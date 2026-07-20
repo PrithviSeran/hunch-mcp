@@ -182,12 +182,10 @@ def suppress_focus_notice(seconds=15):
 
 def _notify_focus(name, reason=""):
     try:
-        n = str(name).replace("\\", "").replace('"', "'")
-        why = str(reason).replace("\\", "").replace('"', "'")
+        from .notify import notify
+        n, why = str(name), str(reason)
         body = f"Bringing {n} to the front — {why}" if why else f"Bringing {n} to the front…"
-        subprocess.run(["osascript", "-e",
-                        f'display notification "{body}" with title "Hunch — focus"'],
-                       check=False, timeout=3)
+        notify(body, "Hunch — focus", timeout=3)
     except Exception:
         pass
 

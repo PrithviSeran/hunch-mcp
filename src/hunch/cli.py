@@ -319,10 +319,14 @@ def cmd_doctor(args):
 
     if args.notify:
         print("\nNotification test")
-        r = subprocess.run(["osascript", "-e",
-                            'display notification "Hunch doctor test" with title "Hunch"'],
-                           capture_output=True, text=True)
-        (_ok if r.returncode == 0 else _warn)("test notification fired — did you see it?")
+        from .notify import ICON, notify
+        if shutil.which("terminal-notifier"):
+            _ok("terminal-notifier present — notifications wear the Hunch logo")
+        else:
+            _warn("terminal-notifier not found — notifications fall back to the plain osascript style "
+                  "(brew install terminal-notifier to get the logo)")
+        notify("Hunch doctor test", "Hunch")
+        _ok("test notification fired — did you see it?")
 
     print("\n" + ("Some checks FAILED — fix the above and re-run." if failed else
                   "No failures. WARNs (if any) explain themselves above."))

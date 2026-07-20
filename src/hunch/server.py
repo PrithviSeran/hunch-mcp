@@ -20,6 +20,7 @@ from .local_mac import (LocalComputer, screenshot_b64, list_running_apps, set_fo
                        launch_app as _launch_app, quit_app as _quit_app, focus_app as _focus_app)
 from . import os_ops
 from . import policy
+from .notify import notify as _notify_impl
 
 HUNCH_PLAYBOOK = """Hunch drives this Mac across THREE focus-free layers plus a gated last resort.
 ALWAYS pick the most direct layer for the task — it's faster, more reliable, and (except the
@@ -157,8 +158,7 @@ def _notify(message, title="Hunch"):
     if _APP_OWNS_PERMS:
         return
     try:
-        script = f'display notification {_as_str(message)} with title {_as_str(title)} sound name "Ping"'
-        subprocess.run(["osascript", "-e", script], check=False, timeout=5)
+        _notify_impl(message, title, sound="Ping")
     except Exception:
         pass
 

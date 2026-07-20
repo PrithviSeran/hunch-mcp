@@ -5,4 +5,4 @@ doctor) must work even when pyobjc or the MCP SDK are missing, so nothing here
 may import them. The server loads lazily via `hunch serve`.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"

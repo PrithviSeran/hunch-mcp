@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="src/hunch/assets/hunch.png" alt="Hunch" width="128">
+</p>
+
 # Hunch
 
 **Drive your Mac with any LLM — focus-free, in the background, over [MCP](https://modelcontextprotocol.io).**
