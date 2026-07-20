@@ -30,6 +30,19 @@ touches your screen:
 A gated last resort (`screenshot` + coordinate clicks/keystrokes) exists for apps whose
 accessibility tree is truly empty — it steals focus, so it asks you first.
 
+## How it works (no server, no cloud)
+
+"MCP server" undersells how local this is. `hunch serve` is a plain Python process that your
+MCP host (Claude Desktop, Cursor, …) spawns as a **child process** and talks to over
+**JSON-RPC on stdin/stdout** (MCP's stdio transport). There is no HTTP endpoint, no port
+Hunch listens on, no daemon, and no telemetry — when your host quits, Hunch is gone.
+
+The tools are direct macOS API calls in-process: the Accessibility framework via pyobjc,
+`osascript` for AppleScript, OS APIs for files/clipboard, and — for the web layer — a local
+WebSocket to Chrome's DevTools port on `127.0.0.1`. The only thing that ever touches the
+network is Chrome itself, doing ordinary browsing. What the model sees is whatever the tools
+return through your host; nothing else leaves the machine.
+
 ## Install
 
 macOS 13+, Python ≥ 3.11. [pipx](https://pipx.pypa.io) recommended (isolated env, on PATH):
