@@ -22,10 +22,15 @@ by construction), and local attackers with your user account.
    it does not assume the host is.
 2. **Hunch's confirmation dialogs** are a content-aware second gate, in the tool layer itself, for
    the catastrophic categories:
-   - `focus_steal` — screen-takeover actions (`key`, `click_xy`, ref-less typing)
+   - `focus_steal` — keyboard/cursor takeover (`key`, `click_xy`, ref-less typing)
+   - `app_to_front` — bringing an app to the front (a view switch, even mid-fullscreen)
    - `shell` — AppleScript containing `do shell script`
    - `destructive_applescript` — delete / send / empty trash / shut down / …
    A macOS dialog asks the human; the action is skipped on Cancel. Defaults: all on.
+   One approval authorizes only its immediate follow-through (~15 s window): the approved
+   switch isn't re-asked or re-notified, and approving a risky AppleScript deliberately does
+   NOT count as screen consent. With `app_to_front` off, focus switches fall back to a
+   desktop notification — asked about or announced, never both, never silent.
 3. **Secrets never enter the model.** Credentials live in the macOS Keychain. The fill tools
    accept a service *name*, read the secret in-process, and type it into the page over CDP. The
    agent learns only "filled" or a refusal.

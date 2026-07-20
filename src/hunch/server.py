@@ -16,6 +16,7 @@ from mcp.server.fastmcp import FastMCP, Image
 from AppKit import NSWorkspace
 
 from .local_mac import (LocalComputer, screenshot_b64, list_running_apps, set_focus_reason,
+                       suppress_focus_notice,
                        launch_app as _launch_app, quit_app as _quit_app, focus_app as _focus_app)
 from . import os_ops
 from . import policy
@@ -162,12 +163,17 @@ def _notify(message, title="Hunch"):
         pass
 
 
-def _confirm_dialog(prompt, timeout=180):
+def _confirm_dialog(prompt, timeout=180, screen_approval=True):
     """Pop a real click-to-approve dialog with a 'Go ahead' button and BLOCK until the user
     answers (or `timeout`). Returns True only if they click Go ahead. This is how Hunch gets
     consent to take over the screen — one click, no typing. (A true inline notification-button
     would require Hunch to be a signed app bundle using UserNotifications; a Python MCP can't
-    post those, so this is a dialog.)"""
+    post those, so this is a dialog.)
+
+    `screen_approval=True` (any screen-related dialog): an approval also counts as consent for
+    the focus switch that follows — the app_to_front gate won't re-ask, and the focus-switch
+    notification is suppressed, for a short window. Pass False for non-screen dialogs
+    (risky AppleScript) so approving a script doesn't quietly authorize a screen takeover."""
     script = (f'tell application "System Events" to display dialog {_as_str(prompt)} '
               f'with title "Hunch wants your screen" buttons {{"Cancel", "Go ahead"}} '
               f'default button "Go ahead" cancel button "Cancel" with icon caution '
@@ -175,9 +181,49 @@ def _confirm_dialog(prompt, timeout=180):
     try:
         r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True,
                            timeout=timeout + 5)
-        return "button returned:Go ahead" in (r.stdout or "")
+        ok = "button returned:Go ahead" in (r.stdout or "")
     except Exception:
         return False
+    if ok and screen_approval:
+        _mark_screen_approval()
+    return ok
+
+
+# One user approval covers the immediate follow-through (the switch they just allowed), so the
+# agent isn't re-asked — and the user isn't re-notified — for the same event. Short-lived on
+# purpose: it is consent for THIS action, not a session-wide waiver.
+_APPROVAL_WINDOW_S = 15
+_screen_ok_until = 0.0
+
+
+def _mark_screen_approval():
+    global _screen_ok_until
+    _screen_ok_until = time.monotonic() + _APPROVAL_WINDOW_S
+    suppress_focus_notice(_APPROVAL_WINDOW_S)
+
+
+def _screen_approved():
+    return time.monotonic() < _screen_ok_until
+
+
+def _front_gate(name, reason=""):
+    """None if bringing `name` to the front may proceed, else a refusal message for the agent.
+    Asks the user first (gates.app_to_front) unless they already approved a screen dialog
+    moments ago, the gate is off, or the app is already frontmost (no real switch)."""
+    if _screen_approved() or not policy.gate_enabled("app_to_front"):
+        return None
+    try:
+        front = NSWorkspace.sharedWorkspace().frontmostApplication()
+        if front and front.localizedName() == name:
+            return None
+    except Exception:
+        pass
+    why = f" — {reason}" if reason else ""
+    if _confirm_dialog(f"Hunch wants to bring “{name}” to the front{why}. Allow?"):
+        return None
+    return (f"User did NOT approve bringing “{name}” to the front. Work on it in the "
+            "background instead (snapshot / web tools are focus-free), or ask the user "
+            "how they'd like to proceed.")
 
 
 @mcp.tool()
@@ -276,6 +322,10 @@ def launch_app(name: str, force_accessibility: bool = False, reason: str = "") -
     the app so its accessibility tree becomes visible to snapshot.
     Pass `reason` — one short sentence for WHY (shown in the focus-switch warning when
     the launch brings the app to the front)."""
+    if not _computer.simultaneous:   # foreground launch = a real focus switch
+        blocked = _front_gate(name, reason)
+        if blocked:
+            return blocked
     set_focus_reason(reason)
     msg = _launch_app(name, force_accessibility, background=_computer.simultaneous)
     _computer.app = name
@@ -310,6 +360,9 @@ def focus_app(name: str, reason: str = "") -> str:
     """Bring an app to the front (reliable OS call), and target it for snapshots.
     ALWAYS pass `reason` — one short sentence for WHY you're switching the user's view
     (shown to them in the focus warning)."""
+    blocked = _front_gate(name, reason)
+    if blocked:
+        return blocked
     set_focus_reason(reason)
     msg = _focus_app(name)
     _computer.app = name
@@ -720,7 +773,7 @@ def applescript(script: str, confirm: bool = False) -> str:
     if category and not confirm and policy.gate_enabled(category):
         preview = script.strip()[:400].replace("\n", "  ").replace("\r", " ")
         if not _confirm_dialog("Hunch wants to run an AppleScript that can change things or "
-                               f"control apps:  {preview}   — allow?"):
+                               f"control apps:  {preview}   — allow?", screen_approval=False):
             return "User did not approve — AppleScript not run. Ask the user how to proceed."
     ok, out = os_ops.run_applescript(script)
     return out if ok else f"AppleScript error: {out[:600]}"

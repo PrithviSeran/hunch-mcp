@@ -18,12 +18,13 @@ CONFIG_PATH = os.path.expanduser("~/.hunch/config.json")
 
 DEFAULT_GATES = {
     "focus_steal": True,             # act() key / click_xy / ref-less type
+    "app_to_front": True,            # focus_app / foreground launch_app switching the user's view
     "shell": True,                   # applescript() containing 'do shell script'
     "destructive_applescript": True, # delete / send / shut down / empty trash / ...
 }
 
-CONFIG_KEYS = ["gates.focus_steal", "gates.shell", "gates.destructive_applescript",
-               "auto_approve_all"]
+CONFIG_KEYS = ["gates.focus_steal", "gates.app_to_front", "gates.shell",
+               "gates.destructive_applescript", "auto_approve_all"]
 
 
 def default_config() -> dict:

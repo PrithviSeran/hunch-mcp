@@ -169,6 +169,17 @@ def set_focus_reason(reason):
     _focus_reason = str(reason or "").strip()
 
 
+# When the user just clicked "Go ahead" on a screen dialog, the follow-up focus notification
+# would re-announce the very thing they approved — suppress it briefly so a switch is either
+# asked about (dialog) or announced (notification), never both.
+_suppress_until = 0.0
+
+
+def suppress_focus_notice(seconds=15):
+    global _suppress_until
+    _suppress_until = time.monotonic() + seconds
+
+
 def _notify_focus(name, reason=""):
     try:
         n = str(name).replace("\\", "").replace('"', "'")
@@ -189,6 +200,8 @@ def _announce_front(name):
     reason, _focus_reason = _focus_reason, ""   # consume — a stale reason must not label a later switch
     if not _NOTIFY_FOCUS or not name:
         return
+    if time.monotonic() < _suppress_until:
+        return  # the user just approved this switch in a dialog — don't re-announce it
     try:
         front = NSWorkspace.sharedWorkspace().frontmostApplication()
         if front and front.localizedName() == name:

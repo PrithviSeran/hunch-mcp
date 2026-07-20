@@ -56,6 +56,32 @@ def test_norm_domain():
     assert creds._norm_domain("") == ""
 
 
+def test_app_to_front_gate_default_on():
+    assert "app_to_front" in policy.DEFAULT_GATES
+    assert "gates.app_to_front" in policy.CONFIG_KEYS
+
+
+def test_screen_approval_dedupe():
+    import hunch.local_mac as local_mac
+    # A fresh approval lets the front gate pass with NO dialog...
+    server._mark_screen_approval()
+    assert server._screen_approved()
+    assert server._front_gate("SomeApp", "test") is None
+    # ...and suppresses the focus notification at the choke point.
+    fired = []
+    old_notify, old_until = local_mac._notify_focus, local_mac._suppress_until
+    try:
+        local_mac._notify_focus = lambda name, reason="": fired.append(name)
+        local_mac._announce_front("DefinitelyNotFrontmostApp")
+        assert fired == [], "notification should be suppressed right after approval"
+        local_mac._suppress_until = 0.0
+        local_mac._announce_front("DefinitelyNotFrontmostApp")
+        assert fired == ["DefinitelyNotFrontmostApp"], "notification should fire when not suppressed"
+    finally:
+        local_mac._notify_focus, local_mac._suppress_until = old_notify, old_until
+        server._screen_ok_until = 0.0
+
+
 class _StubSession:
     def __init__(self, url):
         self._url = url

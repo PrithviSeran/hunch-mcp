@@ -84,9 +84,16 @@ gate — a one-click macOS dialog — for the catastrophic cases:
 
 | Gate | Fires on |
 |---|---|
-| `gates.focus_steal` | actions that take over your screen (`key`, `click_xy`, ref-less typing) |
+| `gates.focus_steal` | actions that take over your keyboard/cursor (`key`, `click_xy`, ref-less typing) |
+| `gates.app_to_front` | an app being brought to the front — a focus switch, even mid-fullscreen |
 | `gates.shell` | AppleScript containing `do shell script` |
 | `gates.destructive_applescript` | delete / send / empty trash / shut down / … |
+
+One approval covers its follow-through: clicking "Go ahead" (on `request_focus`, a gated `act`,
+or the app-to-front dialog) authorizes the switch it announced for ~15 s — no second dialog, and
+the focus-switch notification is suppressed. A switch is either *asked about* or *announced*,
+never both, and never silent (turn `gates.app_to_front` off and switches fall back to the
+notification).
 
 All on by default. `hunch config show` / `hunch config set gates.shell off` to adjust —
 changes apply immediately, even to a running server. `auto_approve_all` disables everything and
@@ -101,7 +108,7 @@ metadata) via its file tools — permission changes are for humans in a terminal
 |---|---|
 | `HUNCH_NO_INTERNAL_GATE=1` | suppress all internal dialogs — for host apps that run their own approval UX |
 | `HUNCH_FORCE_SANDBOX=1` | web layer uses a throwaway, logged-out browser profile |
-| `HUNCH_NOTIFY_FOCUS=0` | silence the "Hunch is switching apps" notifications |
+| `HUNCH_NOTIFY_FOCUS=0` | silence the "Hunch is switching apps" notifications (they fire only for switches no dialog asked about) |
 
 ## Troubleshooting
 
