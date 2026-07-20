@@ -1,0 +1,97 @@
+"""Dependency-light smoke tests: imports, policy defaults, and the two guards.
+
+Run: .venv/bin/python -m pytest tests/  (or plain `python tests/test_smoke.py`).
+Needs pyobjc (imports the server) but touches no Keychain items and no UI.
+"""
+
+import os
+import sys
+
+import hunch
+import hunch.creds as creds
+import hunch.policy as policy
+import hunch.server as server
+
+
+def test_version():
+    assert hunch.__version__
+
+
+def test_tool_count():
+    assert len(server.mcp._tool_manager._tools) == 28
+
+
+def test_policy_defaults_all_on():
+    for cat in policy.DEFAULT_GATES:
+        assert policy.gate_enabled(cat) or _suppressed(), cat
+
+
+def _suppressed():
+    return bool(os.environ.get("HUNCH_NO_INTERNAL_GATE")) or policy.load().get("auto_approve_all")
+
+
+def test_env_override_wins(monkeypatch=None):
+    old = os.environ.get("HUNCH_NO_INTERNAL_GATE")
+    os.environ["HUNCH_NO_INTERNAL_GATE"] = "1"
+    try:
+        assert not policy.gate_enabled("shell")
+    finally:
+        if old is None:
+            del os.environ["HUNCH_NO_INTERNAL_GATE"]
+        else:
+            os.environ["HUNCH_NO_INTERNAL_GATE"] = old
+
+
+def test_protected_paths():
+    assert server._protected("~/.hunch")
+    assert server._protected("~/.hunch/config.json")
+    assert server._protected(os.path.expanduser("~/.hunch/creds_index.json"))
+    assert not server._protected("~/Desktop/file.txt")
+    assert not server._protected("~/.hunchbackup")  # prefix, not inside
+
+
+def test_norm_domain():
+    assert creds._norm_domain("https://www.Accounts.Google.com:443/x") == "accounts.google.com"
+    assert creds._norm_domain("GOOGLE.com") == "google.com"
+    assert creds._norm_domain("") == ""
+
+
+class _StubSession:
+    def __init__(self, url):
+        self._url = url
+
+    def url(self):
+        return self._url
+
+
+class _StubComputer:
+    def __init__(self, url):
+        self.session = _StubSession(url)
+
+
+def test_domain_mismatch_guard(tmp_path=None):
+    # Redirect the domains metadata to a temp file so we never touch real state.
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        old_domains = creds._DOMAINS
+        creds._DOMAINS = os.path.join(d, "creds_domains.json")
+        old_cdp = server._cdp["computer"]
+        try:
+            creds.set_domains("testsvc", ["google.com"])
+            server._cdp["computer"] = _StubComputer("https://accounts.google.com/signin")
+            assert server._domain_mismatch("testsvc") is None  # subdomain allowed
+            server._cdp["computer"] = _StubComputer("https://evil.example.com/login")
+            refusal = server._domain_mismatch("testsvc")
+            assert refusal and refusal.startswith("REFUSED")
+            assert server._domain_mismatch("unbound-svc") is None  # unbound fills anywhere
+        finally:
+            creds._DOMAINS = old_domains
+            server._cdp["computer"] = old_cdp
+
+
+if __name__ == "__main__":
+    mod = sys.modules[__name__]
+    for name in sorted(n for n in dir(mod) if n.startswith("test_")):
+        getattr(mod, name)()
+        print(f"ok {name}")
+    print("all smoke tests passed")
