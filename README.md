@@ -45,11 +45,13 @@ return through your host; nothing else leaves the machine.
 
 ## Install
 
-macOS 13+, Python ≥ 3.11. [pipx](https://pipx.pypa.io) recommended (isolated env, on PATH):
+macOS 13+. Via Homebrew (installs Python and all dependencies in an isolated env):
 
 ```
-pipx install hunch-mcp
+brew install prithviseran/hunch/hunch
 ```
+
+(PyPI/pipx publication is planned; today Homebrew is the supported path.)
 
 Then, one time:
 
