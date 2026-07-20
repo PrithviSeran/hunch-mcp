@@ -522,6 +522,27 @@ def list_credentials() -> str:
     return "Saved credentials — " + "; ".join(parts)
 
 
+def _domain_mismatch(service):
+    """None if the current CDP page's host is allowed for `service`, else a refusal message.
+    A credential bound at add-time (`hunch creds add --domain`) only ever gets typed into that
+    site — the last line of defense when a prompt-injected agent lands on a look-alike page."""
+    from urllib.parse import urlparse
+    from .creds import domains_of
+    allowed = domains_of(service)
+    if not allowed:
+        return None   # unbound (legacy / user chose blank): fills anywhere, as before
+    try:
+        host = (urlparse(_cdp["computer"].session.url()).hostname or "").lower()
+    except Exception:
+        host = ""
+    if any(host == d or host.endswith("." + d) for d in allowed):
+        return None
+    return (f"REFUSED: '{service}' is bound to {allowed} but the current page is '{host or 'unknown'}'. "
+            "Hunch won't type this credential into a different site (phishing/prompt-injection "
+            "protection). If this is legitimate, the user can re-bind it in a terminal: "
+            f"hunch creds add {service} --domain {host or '<domain>'}")
+
+
 @mcp.tool()
 def web_fill_login(service: str) -> str:
     """Fill the CURRENT CDP page's login form (username + password) using the user's SAVED
@@ -540,6 +561,9 @@ def web_fill_login(service: str) -> str:
     if kind_of(service) == "secret":
         return (f"'{service}' is a protected value (API key/token), not a login — use "
                 f"web_fill_secret('{service}', ref) to type it into a field instead.")
+    blocked = _domain_mismatch(service)
+    if blocked:
+        return blocked
     username, password = get_credential(service)   # stays in this process; never returned
     if not (username or password):
         return f"Couldn't read the '{service}' credential from the Keychain."
@@ -566,6 +590,9 @@ def web_fill_secret(service: str, ref: str = "") -> str:
     if kind_of(service) != "secret":
         return (f"'{service}' is a username+password login — use web_fill_login('{service}') "
                 "instead.")
+    blocked = _domain_mismatch(service)
+    if blocked:
+        return blocked
     secret = get_secret(service)   # stays in this process; never returned
     if not secret:
         return f"Couldn't read the '{service}' secret from the Keychain."
@@ -598,11 +625,26 @@ def request_focus(reason: str) -> str:
 
 
 # ── OS-API layer: focus-free filesystem + clipboard (no UI automation needed) ─────────
+_HUNCH_DIR = os.path.realpath(os.path.expanduser("~/.hunch"))
+
+
+def _protected(p):
+    """True for paths inside ~/.hunch — Hunch's own gate policy + credential metadata. The agent
+    must not be able to edit its own permissions; changes go through the `hunch` CLI a human runs.
+    realpath on both sides so a symlink can't launder the target."""
+    rp = os.path.realpath(os.path.abspath(os.path.expanduser(str(p))))
+    return rp == _HUNCH_DIR or rp.startswith(_HUNCH_DIR + os.sep)
+
+
 @mcp.tool()
 def trash(paths: list) -> str:
     """Move file(s)/folder(s) to the Trash BY PATH — FOCUS-FREE and reversible. Use this to
     delete files instead of driving Finder + ⌘⌫ (which steals focus and is fragile). Accepts
     absolute or ~ paths. Files go to the Trash, so it's recoverable."""
+    hit = next((p for p in paths if _protected(p)), None)
+    if hit is not None:
+        return (f"REFUSED: {hit} is inside ~/.hunch — Hunch's own config/credential metadata. "
+                "Not deletable via Hunch; the user can manage it with the `hunch` CLI.")
     return os_ops.trash(paths)
 
 
@@ -610,6 +652,10 @@ def trash(paths: list) -> str:
 def file_op(op: str, src: str, dst: str = "") -> str:
     """Focus-free filesystem operations by path: op='move' or 'copy' (src -> dst; dst may be a
     folder or a new path), or op='mkdir' (create a folder at src). To delete, use `trash`."""
+    for p in (src, dst):
+        if p and _protected(p):
+            return (f"REFUSED: {p} is inside ~/.hunch — Hunch's own config/credential metadata. "
+                    "Not writable via Hunch; the user can manage it with the `hunch` CLI.")
     if op == "move":
         return os_ops.move(src, dst)
     if op == "copy":

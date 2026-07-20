@@ -3,7 +3,9 @@
 The user's site emails/passwords live in the login Keychain so Hunch can USE them to sign into
 sites WITHOUT the values ever entering the agent/LLM context or logs:
 
-  - WRITE path: the popover's Settings/Credentials page (native, in-process) calls set_credential().
+  - WRITE path: `hunch creds add` (CLI, interactive) — or an embedding app's own settings UI —
+    calls set_credential(). A login may be BOUND to domain(s) at add-time (set_domains); the
+    web_fill tools then refuse to type it into any other site (phishing/injection protection).
   - READ path: exactly one MCP tool (web_fill_login) calls get_credential() and types the secret
     straight into the page over CDP, returning only a status. The value never goes back to the model.
   - The agent only ever sees SERVICE NAMES (list_services()), never usernames or passwords.
@@ -23,6 +25,7 @@ import subprocess
 _KC_SERVICE = "com.hunch.credentials"                        # Keychain generic-password 'service'
 _INDEX = os.path.expanduser("~/.hunch/creds_index.json")     # service NAMES only — no secrets
 _KINDS = os.path.expanduser("~/.hunch/creds_kinds.json")     # name -> "login"|"secret" — metadata only.
+_DOMAINS = os.path.expanduser("~/.hunch/creds_domains.json") # name -> [allowed domains] — metadata only.
 # Kind lives OUTSIDE the Keychain on purpose: reading it from the item blob would decrypt secret
 # data just to draw a UI badge, which triggers a Keychain password prompt whenever the reading
 # binary isn't in the item's ACL (e.g. every rebuilt dev app).
@@ -147,3 +150,53 @@ def delete_credential(name):
     if name in kinds:
         del kinds[name]
         _write_kinds(kinds)
+    remove_domains(name)
+
+
+def _read_domains():
+    try:
+        with open(_DOMAINS) as f:
+            d = json.load(f)
+            return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_domains(domains):
+    os.makedirs(os.path.dirname(_DOMAINS), exist_ok=True)
+    tmp = _DOMAINS + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(domains, f)
+    os.replace(tmp, _DOMAINS)
+
+
+def _norm_domain(d):
+    """'https://www.Accounts.Google.com:443/x' -> 'accounts.google.com' (drop scheme/port/path/www)."""
+    d = (d or "").strip().lower()
+    if "://" in d:
+        d = d.split("://", 1)[1]
+    d = d.split("/", 1)[0].split(":", 1)[0]
+    return d[4:] if d.startswith("www.") else d
+
+
+def domains_of(name):
+    """Domains a credential is bound to ([] = unbound, fills anywhere — legacy behavior)."""
+    return _read_domains().get((name or "").strip(), [])
+
+
+def set_domains(name, domains):
+    name = (name or "").strip()
+    cleaned = sorted({d for d in (_norm_domain(x) for x in (domains or [])) if d})
+    all_domains = _read_domains()
+    if cleaned:
+        all_domains[name] = cleaned
+    else:
+        all_domains.pop(name, None)
+    _write_domains(all_domains)
+
+
+def remove_domains(name):
+    all_domains = _read_domains()
+    if (name or "").strip() in all_domains:
+        del all_domains[(name or "").strip()]
+        _write_domains(all_domains)
