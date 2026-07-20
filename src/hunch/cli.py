@@ -284,6 +284,18 @@ def cmd_doctor(args):
     except Exception as e:
         failed |= _fail(f"osascript unavailable: {e}")
 
+    print("\nScreen Recording (needed only for the screenshot/vision fallback)")
+    try:
+        from Quartz import CGPreflightScreenCaptureAccess
+        if CGPreflightScreenCaptureAccess():
+            _ok("granted for this terminal")
+        else:
+            _warn("not granted for this terminal — the `screenshot` tool will fail; everything "
+                  "else works. Grant your MCP host in System Settings → Privacy & Security → "
+                  "Screen Recording if agents need it")
+    except Exception:
+        _warn("could not check Screen Recording (macOS < 10.15?)")
+
     print("\nWeb layer (CDP)")
     chrome = "/Applications/Google Chrome.app"
     if os.path.exists(chrome):

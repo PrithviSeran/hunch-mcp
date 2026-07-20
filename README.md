@@ -129,17 +129,39 @@ metadata) via its file tools; permission changes are for humans in a terminal.
 | `HUNCH_FORCE_SANDBOX=1` | web layer uses a throwaway, logged-out browser profile |
 | `HUNCH_NOTIFY_FOCUS=0` | silence the "Hunch is switching apps" notifications (they fire only for switches no dialog asked about) |
 
-## Troubleshooting
+## FAQ
 
-- **App's tree reads empty**: Electron/CEF apps expose their UI only with an accessibility flag;
-  `snapshot` relaunches them once (background, focus-free) to enable it. If still empty, the
-  vision fallback asks before taking over.
-- **Web layer won't connect**: Chrome 136+ blocks CDP on your default profile by design. Hunch
-  uses its own profile at `~/.hunch/chrome-cdp`; run `hunch setup` to create and sign into it.
-- **"operation not permitted" everywhere**: the *host app* is missing the Accessibility grant.
-  Re-run `hunch setup` and add the host, then restart it.
-- Long server instructions: some host UIs truncate the playbook in their server-info display;
-  the model still receives it in full.
+**Every tree read returns "(no window for …)" and AppleScript fails with "-25211 not allowed
+assistive access".** One cause: the app hosting Hunch is missing the **Accessibility** grant.
+Without it the AX API silently returns nothing, so apps look windowless even when they're open.
+Grant it to the *host* (see next question), and if it's already listed, toggle it off and on:
+macOS silently invalidates grants when an app updates. Restart the host afterwards.
+
+**Which app do I grant permissions to?** The one that *launches* `hunch serve`: Claude Desktop,
+Cursor, or your terminal app (for Claude Code). Grants attach to that app's identity, never to
+"hunch" itself. This is also why `hunch doctor` can be misleading: it reports the grants of the
+terminal you ran it in, which may differ from your MCP host's.
+
+**Only `screenshot` fails; everything else works.** That's the **Screen Recording** permission,
+which only the screenshot/vision fallback needs. Grant it to the host in System Settings →
+Privacy & Security → Screen Recording, or just let agents use `snapshot`, which doesn't need it.
+
+**It worked yesterday and broke today.** An update to your host app (or macOS) likely reset its
+permission grants. Toggle the host off and on under Accessibility (and Screen Recording, if you
+use it), then restart the host.
+
+**An app's tree reads empty or shows only a sidebar.** Two different situations. Electron/CEF
+apps (Discord, Slack, Spotify, VS Code) need an accessibility flag; `snapshot` relaunches them
+once, in the background, to set it. Master-detail and Catalyst apps (WhatsApp, Mail) expose only
+the pane you're in: the agent should click into an item by ref and re-snapshot; the detail pane
+then appears. Also check the app actually has a window open.
+
+**The web layer won't connect.** Chrome 136+ blocks CDP on your default profile by design. Hunch
+uses its own profile at `~/.hunch/chrome-cdp`; run `hunch setup` to create it and sign into your
+sites there.
+
+**My host shows the server instructions truncated.** Cosmetic: some host UIs shorten the playbook
+in their server-info display; the model receives it in full.
 
 ## Security
 

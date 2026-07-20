@@ -21,6 +21,7 @@ from ApplicationServices import (
     AXUIElementCreateApplication, AXUIElementPerformAction,
     AXUIElementSetAttributeValue, AXUIElementSetMessagingTimeout,
     AXUIElementCreateSystemWide, kAXFocusedAttribute, kAXValueAttribute,
+    AXIsProcessTrusted,
 )
 from AppKit import NSWorkspace, NSRunningApplication
 import Quartz
@@ -383,7 +384,16 @@ class MacSession:
                         f"the app blocks AX entirely: use its AppleScript dictionary, or tell the user "
                         f"it needs Screen Recording + pixel control.",
                         {"est_tokens": 70, "refs": 0, "app": app_name, "embedded_chromium": True})
-            return f"(no window for {app_name})", {"est_tokens": 20, "refs": 0, "app": app_name}
+            if not AXIsProcessTrusted():
+                return (f"(no window for {app_name} — and this process is NOT trusted for "
+                        "Accessibility, so ALL tree reads will come back empty. Tell the user: "
+                        "grant the app hosting Hunch in System Settings → Privacy & Security → "
+                        "Accessibility — toggle it off and on if it's already listed — then "
+                        "restart the host. `hunch doctor` explains.)"), \
+                       {"est_tokens": 60, "refs": 0, "app": app_name}
+            return (f"(no window for {app_name} — the app may have no open window; open one "
+                    "via launch_app or open_file, or check with the user, then retry)"), \
+                   {"est_tokens": 40, "refs": 0, "app": app_name}
 
         lines = [f"=== {app_name} — focused window (snapshot #{self.snapshot_count}) ==="]
         self._walk(win, 0, "", lines, compact, max_depth, {"left": _MAX_NODES})
@@ -612,7 +622,15 @@ def _press_key(key, modifiers):
 
 def screenshot_b64():
     with tempfile.NamedTemporaryFile(suffix=".png") as f:
-        subprocess.run(["screencapture", "-x", "-t", "png", f.name], check=True)
+        try:
+            subprocess.run(["screencapture", "-x", "-t", "png", f.name], check=True)
+        except subprocess.CalledProcessError:
+            raise RuntimeError(
+                "screencapture failed — almost always the Screen Recording permission missing "
+                "for the app hosting Hunch. Tell the user: System Settings → Privacy & Security "
+                "→ Screen Recording, enable the MCP host app (toggle off/on if already listed), "
+                "then restart it. Meanwhile, prefer `snapshot` — it reads UI without this "
+                "permission.")
         return base64.b64encode(open(f.name, "rb").read()).decode()
 
 

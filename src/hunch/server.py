@@ -240,8 +240,12 @@ def snapshot(app: str = "") -> str:
     or steal focus (focus_app / launch_app foreground / click_xy) just because the first read was
     thin. Reserve `screenshot` for confirming truly VISUAL content (an image, a file-preview
     thumbnail) — to check what an action did or read UI text, RE-SNAPSHOT, don't screenshot."""
+    prev = _computer.app
     _computer.app = app or _frontmost()
-    return _computer.snapshot()
+    out = _computer.snapshot()
+    if isinstance(out, str) and out.startswith("(app '") and "not found" in out:
+        _computer.app = prev   # a failed target must not poison later act/snapshot calls
+    return out
 
 
 @mcp.tool()
@@ -776,7 +780,19 @@ def applescript(script: str, confirm: bool = False) -> str:
                                f"control apps:  {preview}   — allow?", screen_approval=False):
             return "User did not approve — AppleScript not run. Ask the user how to proceed."
     ok, out = os_ops.run_applescript(script)
-    return out if ok else f"AppleScript error: {out[:600]}"
+    if ok:
+        return out
+    hint = ""
+    if "assistive access" in out.lower() or "-25211" in out:
+        hint = (" — macOS blocked this: the app hosting Hunch lacks the Accessibility "
+                "permission. Tell the user: System Settings → Privacy & Security → "
+                "Accessibility, enable the MCP host app (toggle off/on if already listed), "
+                "then restart it. `hunch doctor` explains.")
+    elif "not authorized" in out.lower() or "-1743" in out:
+        hint = (" — Automation consent missing for the target app. macOS shows a one-time "
+                "'allow control' prompt on first use; if it was denied, tell the user to "
+                "re-enable it in System Settings → Privacy & Security → Automation.")
+    return f"AppleScript error: {out[:600]}{hint}"
 
 
 def main():
