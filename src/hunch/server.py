@@ -18,6 +18,7 @@ from AppKit import NSWorkspace
 from .local_mac import (LocalComputer, screenshot_b64, list_running_apps, set_focus_reason,
                        launch_app as _launch_app, quit_app as _quit_app, focus_app as _focus_app)
 from . import os_ops
+from . import policy
 
 HUNCH_PLAYBOOK = """Hunch drives this Mac across THREE focus-free layers plus a gated last resort.
 ALWAYS pick the most direct layer for the task — it's faster, more reliable, and (except the
@@ -130,8 +131,9 @@ RULES:
 
 mcp = FastMCP("hunch", instructions=HUNCH_PLAYBOOK)
 
-# When the host owns permissions (e.g. the Hunch app's own approve UX), skip Hunch's internal
-# confirm dialogs so the user isn't double-prompted. Set HUNCH_NO_INTERNAL_GATE=1 to enable.
+# When the host owns permissions (e.g. the Hunch app's own approve UX), HUNCH_NO_INTERNAL_GATE=1
+# suppresses the duplicate desktop banners here; its gate suppression flows through
+# policy.gate_enabled (env > auto_approve_all > per-category, from ~/.hunch/config.json).
 _APP_OWNS_PERMS = bool(os.environ.get("HUNCH_NO_INTERNAL_GATE"))
 # ONE persistent computer, so element [refs] survive across snapshot -> act calls.
 _computer = LocalComputer(app="Finder")
@@ -239,7 +241,7 @@ def act(actions: list, confirm: bool = False, reason: str = "") -> str:
     stealing = [a for a in actions if _computer._is_shared_input(a)]
     if stealing:
         set_focus_reason(reason)   # the focus-switch warning tells the user WHY
-    if stealing and not _computer.simultaneous and not confirm and not _APP_OWNS_PERMS:
+    if stealing and not _computer.simultaneous and not confirm and policy.gate_enabled("focus_steal"):
         kinds = ", ".join(sorted({a.get("action") for a in stealing}))
         why = f" — {reason}" if reason else ""
         if not _confirm_dialog(f"Hunch wants to take over your screen ({kinds} on "
@@ -647,8 +649,9 @@ def clipboard_set(text: str) -> str:
 # Creating things (make new draft/note/event/reminder), reading, and playback are benign and
 # reversible, so they run silently — the CLIENT (Claude Code / Desktop) is the primary permission
 # gate; this internal gate is just a content-aware safety net for the catastrophic cases.
-_RISKY_AS = ("do shell script", "delete ", "remove ", "erase", "empty trash",
-             "send ", "shut down", "restart", "log out", "logout", "eject")
+_SHELL_AS = ("do shell script",)
+_DESTRUCTIVE_AS = ("delete ", "remove ", "erase", "empty trash",
+                   "send ", "shut down", "restart", "log out", "logout", "eject")
 
 
 @mcp.tool()
@@ -664,8 +667,11 @@ def applescript(script: str, confirm: bool = False) -> str:
     only run if approved (pass confirm=true to skip the dialog if the user already approved).
     Note: the FIRST time Hunch scripts a given app, macOS shows a one-time 'allow control'
     permission prompt the user must accept."""
-    risky = any(k in script.lower() for k in _RISKY_AS)
-    if risky and not confirm and not _APP_OWNS_PERMS:
+    low = script.lower()
+    category = ("shell" if any(k in low for k in _SHELL_AS)
+                else "destructive_applescript" if any(k in low for k in _DESTRUCTIVE_AS)
+                else None)
+    if category and not confirm and policy.gate_enabled(category):
         preview = script.strip()[:400].replace("\n", "  ").replace("\r", " ")
         if not _confirm_dialog("Hunch wants to run an AppleScript that can change things or "
                                f"control apps:  {preview}   — allow?"):
