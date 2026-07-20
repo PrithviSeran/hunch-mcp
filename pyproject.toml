@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hunch-mcp"
+version = "0.1.0"
+description = "Drive your Mac focus-free over MCP: OS APIs, AppleScript, CDP, and Accessibility."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [{ name = "Prithvi Seran", email = "prithviseran0@gmail.com" }]
+keywords = ["mcp", "macos", "automation", "accessibility", "computer-use", "agent"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: MacOS X",
+  "Intended Audience :: Developers",
+  "Operating System :: MacOS",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Libraries",
+]
+dependencies = [
+  "mcp>=1.2",
+  "websocket-client>=1.6",
+  "pyobjc-framework-Cocoa>=10.0",
+  "pyobjc-framework-ApplicationServices>=10.0",
+  "pyobjc-framework-Quartz>=10.0",
+]
+
+[project.scripts]
+hunch = "hunch.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/prithviseran/hunch-mcp"
+Issues = "https://github.com/prithviseran/hunch-mcp/issues"
