@@ -1,0 +1,849 @@
+"""Hunch local backend (macOS) — drive THIS machine via the Accessibility API.
+
+The same tree-primary approach as the Docker sandbox, but pointed at your real,
+logged-in laptop: perception via AXUIElement, actions via AXPress (which triggers
+an element WITHOUT moving your cursor) with a CGEvent coordinate fallback. Exposes
+the same snapshot/act/screenshot interface as computer.py, so the agent loop is
+identical — only the backend changes.
+
+Requires: Accessibility permission granted to the running process
+(System Settings → Privacy & Security → Accessibility), and pyobjc.
+"""
+
+import os
+import base64
+import subprocess
+import tempfile
+import time
+
+from . import ax_tree_mac as ax  # reuse the AX primitives (get_attrs, bounds, list_apps, get_window)
+from ApplicationServices import (
+    AXUIElementCreateApplication, AXUIElementPerformAction,
+    AXUIElementSetAttributeValue, AXUIElementSetMessagingTimeout,
+    AXUIElementCreateSystemWide, kAXFocusedAttribute, kAXValueAttribute,
+)
+from AppKit import NSWorkspace, NSRunningApplication
+import Quartz
+
+
+# Frameworks that mark an app as "embedded Chromium" — its UI is web content that the OS does NOT
+# put in the background accessibility tree. General, not app-specific: covers Electron (Cursor,
+# VS Code, Discord, Slack, …) and CEF (Chromium Embedded Framework — Spotify and others).
+_EMBEDDED_CHROMIUM = ("Electron Framework.framework", "Chromium Embedded Framework.framework")
+
+
+def _embedded_chromium(pid):
+    """Return the embedded-Chromium framework the app bundles (Electron or CEF), else None. Such an
+    app renders its UI as web content that is NOT exposed to the AX tree in the background (only
+    while frontmost, and only if accessibility is force-enabled) — so a background snapshot reads
+    empty. Real Electron also opens a CDP debug port (web_open); hardened embeddings (e.g. CEF) may
+    open NEITHER a debug port NOR an AX tree, leaving only pixels/manual."""
+    try:
+        app = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+        url = app.bundleURL() if app else None
+        if not url:
+            return None
+        fw = os.path.join(url.path(), "Contents", "Frameworks")
+        for name in _EMBEDDED_CHROMIUM:
+            if os.path.exists(os.path.join(fw, name)):
+                return name
+    except Exception:
+        pass
+    return None
+
+
+# ── forcing an embedded-Chromium app's tree to persist in the BACKGROUND ──────────────────
+# Verified 2026-07-18 on Discord (hardened Electron — strips --remote-debugging-port so CDP can't
+# attach): Chromium builds its web-content AX tree only while the app is active and TEARS IT DOWN on
+# deactivation (AXWindows → 0 the instant it loses focus). The Chromium switch --force-renderer-
+# accessibility flips it into permanent "complete" accessibility mode, so the FULL tree stays live
+# in the background (Discord: 558 nodes — servers, DMs, unread counts, usernames — read while Finder
+# was frontmost). The flag survives Discord's launcher even though the debug-port flag does not.
+# So embedded-Chromium apps ARE focus-free-readable as a TREE after a one-time force relaunch.
+_FORCE_AX_FLAG = "--force-renderer-accessibility"
+_forced_ax = set()   # bundle ids / names we've already relaunched this session (avoid re-quitting)
+
+
+def _proc_has_force_ax(pid):
+    """True if the running process was launched with --force-renderer-accessibility."""
+    try:
+        out = subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=3).stdout
+        return _FORCE_AX_FLAG in out
+    except Exception:
+        return False
+
+
+def _norm_app_name(s):
+    """Fold an app name for matching. Some apps prepend invisible bidi/zero-width marks to their
+    display name (WhatsApp's localizedName is really '\\u200eWhatsApp'), so an exact == against what
+    the user typed silently fails ('app not found'). Strip those, trim, casefold."""
+    for cp in (0x200E, 0x200F, 0x200B, 0x200C, 0x200D, 0xFEFF,
+               0x202A, 0x202B, 0x202C, 0x202D, 0x202E):
+        s = s.replace(chr(cp), "")
+    return s.strip().casefold()
+
+
+def _resolve_app(app_name):
+    """Find the running app matching a user-typed name, tolerant of invisible marks / case. Returns
+    {name, pid} or None. Exact (normalized) match wins; else a unique prefix/substring match."""
+    apps = ax.list_apps()
+    want = _norm_app_name(app_name)
+    exact = [a for a in apps if _norm_app_name(a["name"]) == want]
+    if exact:
+        return exact[0]
+    part = [a for a in apps if want and want in _norm_app_name(a["name"])]
+    return part[0] if len(part) == 1 else None
+
+
+def _pids_named(name):
+    """PIDs of processes whose executable name is exactly `name`, read FRESH via pgrep. We can't use
+    NSWorkspace.runningApplications() for liveness/relaunch polling: without a spinning NSRunLoop its
+    list is cached at first read, so a just-killed app still appears running (this silently broke the
+    force-accessibility relaunch — the kill worked but the poll never saw the app leave)."""
+    try:
+        out = subprocess.run(["pgrep", "-x", name], capture_output=True, text=True, timeout=3).stdout
+        return [int(x) for x in out.split()]
+    except Exception:
+        return []
+
+
+def _enable_manual_ax(ax_app):
+    """Ask a Chromium/Electron app to build its accessibility tree without VoiceOver. Chromium
+    honors AXManualAccessibility=true from a trusted AT; harmless on non-Chromium apps. On its own
+    this is not enough for BACKGROUND reads (the tree still tears down on deactivate) — the launch
+    flag is what makes it persist — but it's a cheap belt-and-suspenders and helps while frontmost."""
+    try:
+        AXUIElementSetAttributeValue(ax_app, "AXManualAccessibility", True)
+    except Exception:
+        pass
+
+
+def _window_node_count(ax_app, cap=60):
+    """Rough descendant count of the app's current window — used to tell a still-loading Chromium
+    tree (a bare window shell, a handful of nodes) from a built one. Cheap: stops early at `cap`."""
+    win = ax.get_window(ax_app)
+    if win is None:
+        return 0
+    seen = [0]
+    def walk(el):
+        if seen[0] >= cap:
+            return
+        seen[0] += 1
+        for k in (ax.get_attr(el, ax.kAXChildrenAttribute) or []):
+            if seen[0] >= cap:
+                return
+            walk(k)
+    walk(win)
+    return seen[0]
+
+
+def _wait_tree_ready(pid, timeout=18.0):
+    """After a --force-renderer-accessibility (re)launch, Chromium needs a few seconds to render and
+    build its web-content AX tree — read too early and you get just the window shell. Poll until the
+    window has real content (or timeout). Returns the built AXUIElement app ref."""
+    deadline = time.time() + timeout
+    ax_app = AXUIElementCreateApplication(pid)
+    _enable_manual_ax(ax_app)
+    while time.time() < deadline:
+        if _window_node_count(ax_app) >= 15:
+            return ax_app
+        time.sleep(0.6)
+        ax_app = AXUIElementCreateApplication(pid)
+        _enable_manual_ax(ax_app)
+    return ax_app
+
+
+# Deterministically alert the user whenever Hunch is about to bring an app to the front (a real
+# focus switch). ON BY DEFAULT so it works under any host (the standalone app, Claude Code, Claude
+# Desktop) — set HUNCH_NOTIFY_FOCUS=0 to silence.
+_NOTIFY_FOCUS = os.environ.get("HUNCH_NOTIFY_FOCUS", "1") != "0"
+
+# The agent's stated WHY for the next focus switch (set at the MCP tool layer, where the reason
+# is known; consumed by the next _announce_front so the warning explains itself).
+_focus_reason = ""
+
+
+def set_focus_reason(reason):
+    global _focus_reason
+    _focus_reason = str(reason or "").strip()
+
+
+def _notify_focus(name, reason=""):
+    try:
+        n = str(name).replace("\\", "").replace('"', "'")
+        why = str(reason).replace("\\", "").replace('"', "'")
+        body = f"Bringing {n} to the front — {why}" if why else f"Bringing {n} to the front…"
+        subprocess.run(["osascript", "-e",
+                        f'display notification "{body}" with title "Hunch — focus"'],
+                       check=False, timeout=3)
+    except Exception:
+        pass
+
+
+def _announce_front(name):
+    """Tell the user BEFORE Hunch fronts an app — but only on a REAL switch (skip if it's already
+    frontmost). The single choke point for EVERY focus-stealing path (activate, focus_app, and a
+    foreground launch_app), so a focus shift is never silent."""
+    global _focus_reason
+    reason, _focus_reason = _focus_reason, ""   # consume — a stale reason must not label a later switch
+    if not _NOTIFY_FOCUS or not name:
+        return
+    try:
+        front = NSWorkspace.sharedWorkspace().frontmostApplication()
+        if front and front.localizedName() == name:
+            return  # already frontmost — no switch happens
+    except Exception:
+        pass
+    _notify_focus(name, reason)
+
+_MAX_NODES = 3000
+# Cap on a single element's text value in the serialized tree. Must be generous: chat messages,
+# code blocks, notes, and email bodies are real content the agent needs IN FULL (the old 120-char
+# cap silently truncated Discord messages so Hunch could neither read nor copy them). Only truly
+# pathological values (a giant textarea) get clipped — and then WITH a visible marker, never silently.
+_MAX_VALUE_CHARS = 4000
+
+# Interactive + content roles the agent can act on or read; everything else
+# (AXGroup / AXScrollArea / AXSplitGroup scaffolding) is traversed but not shown.
+_INTERACTIVE = {
+    "AXButton", "AXTextField", "AXTextArea", "AXSecureTextField", "AXSearchField",
+    "AXCheckBox", "AXRadioButton", "AXPopUpButton", "AXMenuButton", "AXMenuItem",
+    "AXLink", "AXComboBox", "AXSlider", "AXIncrementor", "AXStepper", "AXTabButton",
+    "AXDisclosureTriangle", "AXColorWell",
+}
+_CONTENT = {"AXStaticText", "AXHeading", "AXCell", "AXValueIndicator"}
+_ANCHOR = {"AXWindow", "AXSheet", "AXDialog"}
+# Selectable list/table units. Their AXSelected is settable (so `select` works),
+# but their NAME lives in child cells/text — so we emit them as ONE line labelled
+# with the accessible name computed from their subtree, instead of dropping the
+# row and surfacing only its unselectable text leaf. General to any list/outline.
+_ROW_ROLES = {"AXRow", "AXOutlineRow", "AXListItem"}
+
+_ATTRS = (ax.kAXRoleAttribute, ax.kAXTitleAttribute, ax.kAXDescriptionAttribute,
+          ax.kAXValueAttribute, ax.kAXEnabledAttribute, ax.kAXPositionAttribute,
+          ax.kAXSizeAttribute, ax.kAXChildrenAttribute)
+
+
+def _frontmost():
+    app = NSWorkspace.sharedWorkspace().frontmostApplication()
+    return (app.localizedName(), app.processIdentifier()) if app else (None, None)
+
+
+class StaleRef(Exception):
+    pass
+
+
+class MacSession:
+    """Per-snapshot ref registry mapping [e1..eN] to LIVE AXUIElement handles, so
+    the agent acts on real elements (AXPress) not coordinates."""
+
+    def __init__(self):
+        AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 2.0)
+        self.registry = {}
+        self._keymap = {}
+        self._counter = 0
+        self.snapshot_count = 0
+        self._pid = None  # target app pid, for activation before acting
+
+    def activate(self):
+        """Bring the target app to the front so its window is discoverable and
+        keystrokes route to it. Returns True only if the app is actually frontmost.
+        Crucially, if it is ALREADY frontmost we do nothing — re-activating an app
+        dismisses its open context menus/popups (which breaks right_click -> menu)."""
+        if not self._pid:
+            return False
+        front = NSWorkspace.sharedWorkspace().frontmostApplication()
+        if front and front.processIdentifier() == self._pid:
+            return True  # already active — no focus switch happens
+        _announce_front(getattr(self, "_app_name", None) or "an app")  # deterministic focus warning
+        # `open -a` (LaunchServices) reliably fronts the app. NSRunningApplication.
+        # activateWithOptions_ is restricted on macOS 14+ (cooperative activation) and
+        # silently fails for a background process like this MCP — the cause of
+        # "target app not frontmost" refusals.
+        # macOS focus-stealing prevention suppresses an activation that comes right after
+        # another focus change (e.g. our own confirm dialog). A single `open -a` gives up
+        # too fast, so RE-ISSUE it over a few seconds to punch through the suppression window,
+        # polling for the app to actually reach the front.
+        name = getattr(self, "_app_name", None)
+        deadline = time.time() + 4.0
+        while time.time() < deadline:
+            if name:
+                subprocess.run(["open", "-a", name], check=False)
+            else:
+                app = NSRunningApplication.runningApplicationWithProcessIdentifier_(self._pid)
+                if app:
+                    app.activateWithOptions_(2)
+            settle = time.time() + 1.0
+            while time.time() < settle:
+                front = NSWorkspace.sharedWorkspace().frontmostApplication()
+                if front and front.processIdentifier() == self._pid:
+                    return True
+                time.sleep(0.1)
+        return False
+
+    def _ref_for(self, key):
+        ref = self._keymap.get(key)
+        if ref is None:
+            self._counter += 1
+            ref = f"e{self._counter}"
+            self._keymap[key] = ref
+        return ref
+
+    def _accessible_name(self, el, cap=8):
+        """A container's label computed from its own + descendant text (bounded) —
+        the accessible-name pattern, so a nameless AXRow can be labelled by the
+        filename in its cell."""
+        parts, budget = [], [cap]
+        def collect(e, d):
+            if budget[0] <= 0 or d > 5:
+                return
+            budget[0] -= 1
+            a = ax.get_attrs(e, (ax.kAXTitleAttribute, ax.kAXValueAttribute, ax.kAXChildrenAttribute))
+            for x in (a[ax.kAXTitleAttribute], a[ax.kAXValueAttribute]):
+                s = str(x or "").strip()
+                if s and s not in parts:
+                    parts.append(s)
+            for c in (a[ax.kAXChildrenAttribute] or []):
+                collect(c, d + 1)
+        collect(el, 0)
+        return " ".join(parts)[:100]
+
+    @staticmethod
+    def _interesting(role, title, value):
+        # General filter: keep interactive controls and content-bearing text; drop
+        # structural scaffolding. Nothing app-specific — the agent reasons about
+        # whatever the tree surfaces.
+        if role in _ANCHOR or role in _INTERACTIVE:
+            return True
+        if role in _CONTENT and (title or value):
+            return True
+        return False
+
+    def snapshot(self, app_name=None, compact=True, max_depth=18, activate_app=True):
+        """Compact tree of the target app's focused window (frontmost app by
+        default). Returns (text, info) and refreshes the ref registry."""
+        self.registry = {}
+        self.snapshot_count += 1
+        if app_name is None:
+            app_name, pid = _frontmost()
+        else:
+            match = _resolve_app(app_name)
+            pid = match["pid"] if match else None
+            if match:
+                app_name = match["name"]   # use the app's REAL name (with any invisible marks) downstream
+        if pid is None:
+            return f"(app {app_name!r} not found)", {"est_tokens": 20, "refs": 0, "app": app_name}
+        self._pid = pid
+        self._app_name = app_name  # used by activate() for reliable `open -a` fronting
+        # Reading is FOCUS-FREE: native (AppKit) apps expose their AX tree while backgrounded, so we
+        # never bring an app forward just to look. Embedded-Chromium apps (Electron/CEF) are the
+        # exception — Chromium tears down its web-content AX tree on deactivation, so a background read
+        # sees no window. The fix is NOT to steal focus or fall back to pixels: relaunch the app ONCE
+        # with --force-renderer-accessibility (focus-free, open -g), which keeps the full tree live in
+        # the background permanently. After that, this same app reads as a rich tree with no focus cost.
+        front = NSWorkspace.sharedWorkspace().frontmostApplication()
+        already_front = bool(front and front.processIdentifier() == pid)
+        ax_app = AXUIElementCreateApplication(pid)
+        if _embedded_chromium(pid):
+            _enable_manual_ax(ax_app)
+            # In the background a Chromium app vends a bare window SHELL (a few nodes) until the flag
+            # forces the tree to persist — so "unbuilt" means a tiny node count, not a missing window.
+            built = _window_node_count(ax_app) >= 15
+            need_force = (not already_front) and (not built) and not _proc_has_force_ax(pid)
+            if need_force and app_name not in _forced_ax:
+                # One-time focus-free relaunch so the tree persists in the background. Discord et al.
+                # restore their exact prior view on relaunch, so this is a brief blink, not data loss.
+                _forced_ax.add(app_name)
+                launch_app(app_name, force_accessibility=True, background=True)
+                # re-resolve the new pid FRESH (pgrep) — ax.list_apps() is cached and would hand back
+                # the old, now-dead pid, so the read would target a corpse and come back empty.
+                flagged = [p for p in _pids_named(app_name) if _proc_has_force_ax(p)]
+                if flagged:
+                    pid = self._pid = flagged[0]
+                    ax_app = _wait_tree_ready(pid)
+        win = ax.get_window(ax_app)
+        if win is None:
+            if _embedded_chromium(pid) and not already_front:
+                return (f"“{app_name}” is an embedded-Chromium app whose accessibility tree isn't up "
+                        f"yet. Call launch_app(\"{app_name}\", force_accessibility=true) once — it "
+                        f"relaunches it FOCUS-FREE with the flag that keeps its full tree readable in "
+                        f"the background — then snapshot again. If the tree is STILL empty after that, "
+                        f"the app blocks AX entirely: use its AppleScript dictionary, or tell the user "
+                        f"it needs Screen Recording + pixel control.",
+                        {"est_tokens": 70, "refs": 0, "app": app_name, "embedded_chromium": True})
+            return f"(no window for {app_name})", {"est_tokens": 20, "refs": 0, "app": app_name}
+
+        lines = [f"=== {app_name} — focused window (snapshot #{self.snapshot_count}) ==="]
+        self._walk(win, 0, "", lines, compact, max_depth, {"left": _MAX_NODES})
+        text = "\n".join(lines)
+        return text, {"est_tokens": round(len(text) / 3.5), "refs": len(self.registry), "app": app_name}
+
+    def _walk(self, el, depth, parent_key, lines, compact, max_depth, budget, sib=None):
+        if budget["left"] <= 0:
+            return
+        budget["left"] -= 1
+        if sib is None:
+            sib = {}
+        a = ax.get_attrs(el, _ATTRS)
+        role = str(a[ax.kAXRoleAttribute] or "?")
+        title = str(a[ax.kAXTitleAttribute] or "").strip()
+        desc = str(a[ax.kAXDescriptionAttribute] or "").strip()
+        v = a[ax.kAXValueAttribute]
+        value = str(v).strip() if v is not None else ""
+        enabled = a[ax.kAXEnabledAttribute]
+
+        # A selectable row is nameless in itself; label it with the accessible name
+        # from its subtree so the key (hence the persistent ref) is unique per row.
+        is_row = role in _ROW_ROLES
+        name = (title or value or self._accessible_name(el)) if is_row else title
+        # Stable key: role+name path, disambiguated by sibling occurrence so two
+        # same-named siblings still get distinct refs.
+        seg = f"{role}:{name}:{desc}"
+        occ = sib.get(seg, 0)
+        sib[seg] = occ + 1
+        key = f"{parent_key}/{seg}#{occ}"
+
+        # Collapse a selectable row into ONE labelled, selectable line — the fix for
+        # "the row is selectable but nameless, its text is an unselectable child."
+        if compact and is_row:
+            ref = self._ref_for(key)
+            self.registry[ref] = el
+            lines.append("  " * depth + f"[{ref}] {role}" + (f' "{name}"' if name else ""))
+            return
+
+        emit = (not compact) or self._interesting(role, title, value)
+        depth_out = depth
+        if emit:
+            ref = self._ref_for(key)
+            self.registry[ref] = el
+            parts = [f"[{ref}]", role]
+            if title:
+                parts.append(f'"{title}"')
+            if desc and desc != title:
+                parts.append(f"({desc})")
+            if value and value != title:
+                shown = value if len(value) <= _MAX_VALUE_CHARS else \
+                    value[:_MAX_VALUE_CHARS] + f"…(+{len(value) - _MAX_VALUE_CHARS} more chars)"
+                parts.append(f"val={shown!r}")
+            if enabled is False:
+                parts.append("disabled")
+            lines.append("  " * depth + " ".join(parts))
+            depth_out = depth + 1
+
+        if depth >= max_depth:
+            return
+        children = a[ax.kAXChildrenAttribute]
+        if not children:
+            return
+        child_sib = {}
+        for child in list(children)[:200]:
+            self._walk(child, depth_out, key, lines, compact, max_depth, budget, child_sib)
+
+    # ── actions ─────────────────────────────────────────────────────────
+    def _el(self, ref):
+        el = self.registry.get(ref)
+        if el is None:
+            raise StaleRef(ref)
+        return el
+
+    def _center(self, el):
+        a = ax.get_attrs(el, (ax.kAXPositionAttribute, ax.kAXSizeAttribute))
+        b = ax.values_to_bounds(a[ax.kAXPositionAttribute], a[ax.kAXSizeAttribute])
+        if not b:
+            return None
+        return int(b["x"] + b["w"] / 2), int(b["y"] + b["h"] / 2)
+
+    def click(self, ref, allow_pixel=True):
+        """Activate the element via its own AX action — occlusion-proof and no
+        cursor movement. Falls back to a coordinate click only if it exposes no
+        press action AND allow_pixel (a coordinate click moves the shared cursor)."""
+        el = self._el(ref)
+        if AXUIElementPerformAction(el, "AXPress") == 0:
+            return f"pressed {ref}"
+        if not allow_pixel:
+            return f"{ref}: no AX press action; a pixel click would move the shared cursor — skipped"
+        c = self._center(el)
+        if c is None:
+            return f"{ref} not pressable and has no bounds"
+        _mouse_click(*c)
+        return f"clicked {ref} at {c}"
+
+    def select(self, ref):
+        """Select the element via AX (list rows, table cells, selectable items) —
+        occlusion-proof. A general primitive; the agent decides when selection vs
+        a press is the right move for the surface it sees."""
+        el = self._el(ref)
+        if AXUIElementSetAttributeValue(el, "AXSelected", True) == 0:
+            return f"selected {ref}"
+        return f"{ref} is not selectable"
+
+    def right_click(self, ref, allow_pixel=True):
+        """Open an element's context menu — AXShowMenu if it exposes one (occlusion-
+        proof), else a coordinate right-click (only if allow_pixel — it moves the
+        shared cursor). How the agent reaches 'Leave Server', 'Move to Trash', etc."""
+        el = self._el(ref)
+        if AXUIElementPerformAction(el, "AXShowMenu") == 0:
+            return f"opened context menu on {ref}"
+        if not allow_pixel:
+            return f"{ref}: no AX menu action; a pixel right-click would move the shared cursor — skipped"
+        c = self._center(el)
+        if c is None:
+            return f"{ref} has no bounds"
+        _mouse_click(*c, button="right")
+        return f"right-clicked {ref}"
+
+    def set_text(self, ref, text, allow_keystrokes=True):
+        """Set a text field's value directly via AX (focus-free). Falls back to real
+        keystrokes only if the field isn't AX-settable AND allow_keystrokes (typing
+        uses the shared keyboard)."""
+        el = self._el(ref)
+        if AXUIElementSetAttributeValue(el, kAXValueAttribute, text) == 0:
+            return f"set text on {ref}"
+        if not allow_keystrokes:
+            return f"{ref}: field not AX-settable; typing would use the shared keyboard — skipped"
+        AXUIElementSetAttributeValue(el, kAXFocusedAttribute, True)
+        _type_text(text)
+        return f"typed into {ref}"
+
+    def type_text(self, text):
+        _type_text(text)
+        return f"typed {len(text)} chars"
+
+    def press_key(self, key, modifiers=None):
+        _press_key(key, modifiers or [])
+        return f"key {'+'.join((modifiers or []) + [key])}"
+
+    def menu(self, path):
+        """Invoke a menu-bar command by path, e.g. ["File", "Move to Trash"], via AXPress —
+        FOCUS-FREE: it runs the command WITHOUT bringing the app to the front. This is the
+        focus-free stand-in for keyboard shortcuts (⌘⌫ move-to-trash, ⌘S save, ⌘W close, ⌘N
+        new, ...). Prefer this over a `key` action whenever the command lives in a menu."""
+        if not self._pid:
+            return "no target app for menu"
+        if not path:
+            return "menu needs a path like [\"File\", \"Move to Trash\"]"
+        ax_app = AXUIElementCreateApplication(self._pid)
+        mb = ax.get_attr(ax_app, ax.kAXMenuBarAttribute)
+        if mb is None:
+            return f"{self._app_name or 'app'} exposes no menu bar"
+        items = ax.get_attr(mb, ax.kAXChildrenAttribute) or []
+        def title(c):
+            return str(ax.get_attr(c, ax.kAXTitleAttribute) or "").strip()
+        for depth, name in enumerate(path):
+            match = (next((c for c in items if title(c) == name), None)
+                     or next((c for c in items if name.lower() in title(c).lower()), None))
+            if match is None:
+                where = " > ".join(path[:depth]) or "menu bar"
+                return (f"menu item {name!r} not found under {where}; "
+                        f"available: {[title(c) for c in items if title(c)][:25]}")
+            if depth == len(path) - 1:
+                rc = AXUIElementPerformAction(match, "AXPress")
+                return (f"invoked menu {' > '.join(path)}" if rc == 0 else
+                        f"menu {' > '.join(path)} found but AXPress failed ({rc}) — item may be disabled")
+            sub = (ax.get_attr(match, ax.kAXChildrenAttribute) or [None])[0]
+            items = (ax.get_attr(sub, ax.kAXChildrenAttribute) or []) if sub is not None else []
+        return "empty menu path"
+
+
+# ── CGEvent input helpers ────────────────────────────────────────────────
+def _mouse_click(x, y, button="left"):
+    down = Quartz.kCGEventLeftMouseDown if button == "left" else Quartz.kCGEventRightMouseDown
+    up = Quartz.kCGEventLeftMouseUp if button == "left" else Quartz.kCGEventRightMouseUp
+    btn = Quartz.kCGMouseButtonLeft if button == "left" else Quartz.kCGMouseButtonRight
+    ev = Quartz.CGEventCreateMouseEvent(None, down, (x, y), btn)
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+    ev = Quartz.CGEventCreateMouseEvent(None, up, (x, y), btn)
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+
+
+def _type_text(text):
+    """Type arbitrary text by attaching the unicode string to a synthetic key
+    event — no per-character keycode mapping needed."""
+    ev = Quartz.CGEventCreateKeyboardEvent(None, 0, True)
+    Quartz.CGEventKeyboardSetUnicodeString(ev, len(text), text)
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+    up = Quartz.CGEventCreateKeyboardEvent(None, 0, False)
+    Quartz.CGEventKeyboardSetUnicodeString(up, len(text), text)
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
+
+
+_KEYCODES = {"return": 36, "enter": 36, "tab": 48, "space": 49, "delete": 51,
+             "escape": 53, "left": 123, "right": 124, "down": 125, "up": 126,
+             # US-QWERTY letters/digits, so ⌘-shortcuts (⌘Q, ⌘C, ⌘W, ...) work
+             "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7, "c": 8,
+             "v": 9, "b": 11, "q": 12, "w": 13, "e": 14, "r": 15, "y": 16, "t": 17,
+             "o": 31, "u": 32, "i": 34, "p": 35, "l": 37, "j": 38, "k": 40, "n": 45,
+             "m": 46, "1": 18, "2": 19, "3": 20, "4": 21, "5": 23, "6": 22, "7": 26,
+             "8": 28, "9": 25, "0": 29}
+_MODFLAGS = {"command": Quartz.kCGEventFlagMaskCommand, "cmd": Quartz.kCGEventFlagMaskCommand,
+             "shift": Quartz.kCGEventFlagMaskShift, "option": Quartz.kCGEventFlagMaskAlternate,
+             "control": Quartz.kCGEventFlagMaskControl, "ctrl": Quartz.kCGEventFlagMaskControl}
+
+
+def _press_key(key, modifiers):
+    code = _KEYCODES.get(key.lower())
+    if code is None:
+        _type_text(key)
+        return
+    flags = 0
+    for m in modifiers:
+        flags |= _MODFLAGS.get(m.lower(), 0)
+    down = Quartz.CGEventCreateKeyboardEvent(None, code, True)
+    if flags:
+        Quartz.CGEventSetFlags(down, flags)
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, down)
+    up = Quartz.CGEventCreateKeyboardEvent(None, code, False)
+    if flags:
+        Quartz.CGEventSetFlags(up, flags)
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
+
+
+def screenshot_b64():
+    with tempfile.NamedTemporaryFile(suffix=".png") as f:
+        subprocess.run(["screencapture", "-x", "-t", "png", f.name], check=True)
+        return base64.b64encode(open(f.name, "rb").read()).decode()
+
+
+# ── App lifecycle — OS-backed, reliable, NOT UI-driven ───────────────────────
+# Use these for launch/quit/focus/list. They sidestep the focus limitation that
+# makes ⌘Q / Dock-clicking flaky on background apps. Use the TREE primitives
+# (snapshot/act) for work INSIDE an app; use these to manage the apps themselves.
+def list_running_apps():
+    return ", ".join(sorted(a["name"] for a in ax.list_apps()))
+
+
+def launch_app(name, force_accessibility=False, background=False):
+    """Launch or focus an app. background=True launches it WITHOUT bringing it to
+    the front (open -g) — so it doesn't steal the user's view (for simultaneous use).
+    force_accessibility relaunches an Electron/Chromium app with the Chromium flag
+    that makes its accessibility tree visible to snapshot (otherwise it reads empty)."""
+    bg = ["-g"] if background else []  # -g: open in the background, don't foreground
+    if not background:
+        _announce_front(name)  # foreground launch fronts the app — warn deterministically
+    if force_accessibility:
+        # Relaunch with the Chromium flag that keeps an embedded-Chromium app's accessibility tree
+        # live in the BACKGROUND (see _proc_has_force_ax / snapshot). All process checks here use
+        # _pids_named (fresh pgrep), NOT ax.list_apps() — that list is cached in a no-runloop process,
+        # so a killed app still shows as running and the relaunch never happens.
+        old_pids = set(_pids_named(name))
+        # CRITICAL: `open -a X --args` reuses a running instance and IGNORES the new args, so the flag
+        # would never take. The app must be FULLY GONE before we reopen. Quit gracefully first (clean,
+        # lets the app save state), then hard-kill if it won't go: some apps (Discord) IGNORE SIGTERM,
+        # so the reliable fallback is SIGKILL (pkill -9), which needs no Automation permission.
+        if old_pids:
+            subprocess.run(["osascript", "-e", f'tell application "{name}" to quit'], check=False)
+            gone_by = time.time() + 4
+            while time.time() < gone_by and _pids_named(name):
+                time.sleep(0.3)
+            if _pids_named(name):
+                subprocess.run(["pkill", "-9", "-x", name], check=False)   # SIGTERM-ignoring apps
+                hard_by = time.time() + 5
+                while time.time() < hard_by and _pids_named(name):
+                    time.sleep(0.3)
+            time.sleep(1)
+        subprocess.run(["open", *bg, "-a", name, "--args", _FORCE_AX_FLAG], check=False)
+        # Wait for the NEW instance — a pid we didn't see before that actually carries the flag —
+        # before timing the tree build; polling the old/dying pid was why an early read came back empty.
+        new_pid, deadline = None, time.time() + 20
+        while time.time() < deadline and new_pid is None:
+            for p in _pids_named(name):
+                if p not in old_pids and _proc_has_force_ax(p):
+                    new_pid = p
+                    break
+            if new_pid is None:
+                time.sleep(0.4)
+        if new_pid:
+            _wait_tree_ready(new_pid)   # block until the a11y tree is built, not just the window shell
+        else:
+            time.sleep(6)
+    else:
+        subprocess.run(["open", *bg, "-a", name], check=False)
+        time.sleep(4)
+    return (f"launched {name}" + (" in background" if background else "")
+            + (" (accessibility forced)" if force_accessibility else ""))
+
+
+def focus_app(name):
+    """Bring an app to the front (LaunchServices — more reliable than activating
+    from a background process)."""
+    _announce_front(name)  # this is an explicit focus switch — warn deterministically
+    subprocess.run(["open", "-a", name], check=False)
+    time.sleep(1.0)
+    return f"focused {name}"
+
+
+def quit_app(name):
+    """Quit an app cleanly via the OS — reliable regardless of focus or tray
+    behavior, unlike ⌘Q. Polls until it's actually gone (a graceful quit can lag),
+    escalating to a force-quit if it lingers."""
+    r = next((a for a in ax.list_apps() if a["name"] == name), None)
+    if r is None:
+        return f"{name} is not running"
+    app = NSRunningApplication.runningApplicationWithProcessIdentifier_(r["pid"])
+    app.terminate()
+    # Poll the app object's own termination flag — the NSWorkspace running-apps
+    # list lags behind an actual quit, so checking it gives false "still running".
+    for i in range(20):  # up to ~6s; escalate to force-quit partway
+        time.sleep(0.3)
+        if app.isTerminated():
+            return f"quit {name}"
+        if i == 8:
+            app.forceTerminate()
+    return f"{name} still running (it may be showing a save/confirm prompt)"
+
+
+# ── LocalComputer: the tool-use adapter (same interface as Docker computer.py) ──
+TOOLS = [
+    {"name": "snapshot",
+     "description": ("Look at the screen. Returns the focused app's UI as an accessibility "
+                     "tree — one element per line tagged with a [ref] like [e12]. You act on "
+                     "elements by ref."),
+     "input_schema": {"type": "object", "properties": {}}},
+    {"name": "act",
+     "description": ("Execute one or more UI actions in order by element ref, then get the updated "
+                     "screen. Primitives: click (activate/press an element), right_click (open an "
+                     "element's context menu — e.g. to reach 'Leave Server'), select (select a list "
+                     "row/cell/item), type (type text; with a ref it sets that field's value), "
+                     "menu (invoke a menu-bar command by path, e.g. path=['File','Move to Trash'] — "
+                     "FOCUS-FREE, the preferred stand-in for keyboard shortcuts like ⌘⌫/⌘S/⌘W), "
+                     "key (press a key with optional modifiers — STEALS FOCUS, only when no menu/field "
+                     "equivalent exists), click_xy (pixel click — last-resort fallback, STEALS FOCUS). "
+                     "Prefer the focus-free primitives (click/select/right_click/type-into-ref/menu)."),
+     "input_schema": {"type": "object", "properties": {"actions": {"type": "array", "items": {
+         "type": "object", "properties": {
+             "action": {"type": "string",
+                        "enum": ["click", "right_click", "select", "type", "menu", "key", "click_xy"]},
+             "ref": {"type": "string"}, "text": {"type": "string"},
+             "path": {"type": "array", "items": {"type": "string"}},
+             "key": {"type": "string"}, "modifiers": {"type": "array", "items": {"type": "string"}},
+             "x": {"type": "integer"}, "y": {"type": "integer"}},
+         "required": ["action"]}}}, "required": ["actions"]}},
+    {"name": "screenshot", "description": "See the screen as an image.",
+     "input_schema": {"type": "object", "properties": {}}},
+    # ── App lifecycle (OS-backed, reliable) — manage apps, don't UI-drive them ──
+    {"name": "list_apps", "description": "List the running GUI apps you can target.",
+     "input_schema": {"type": "object", "properties": {}}},
+    {"name": "launch_app",
+     "description": ("Launch or focus an app (reliable OS call — use this instead of clicking Dock "
+                     "icons). Set force_accessibility=true for an embedded-Chromium app (Electron/CEF) "
+                     "whose tree reads empty — it relaunches the app so its accessibility tree may "
+                     "become visible to snapshot (some hardened apps still won't expose it)."),
+     "input_schema": {"type": "object", "properties": {
+         "name": {"type": "string"}, "force_accessibility": {"type": "boolean"}}, "required": ["name"]}},
+    {"name": "quit_app",
+     "description": ("Quit an app via the OS — reliable regardless of focus (use this instead of ⌘Q, "
+                     "which is unreliable on background apps)."),
+     "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}},
+    {"name": "focus_app", "description": "Bring an app to the front (reliable OS call).",
+     "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}},
+]
+
+
+class LocalComputer:
+    """Drives the real Mac through MacSession, exposing the same tools/handle
+    contract the agent loop expects. Swap this in for the Docker Computer."""
+
+    def __init__(self, app="Finder", simultaneous=False):
+        self.app = app
+        # simultaneous=True: never steal the user's cursor/keyboard. Runs the
+        # focus-free primitives (AXPress/select/set_value) without bringing the app
+        # forward, and REFUSES the shared-input ones (typed keystrokes, key combos,
+        # pixel clicks) instead of disrupting whatever the user is doing.
+        self.simultaneous = simultaneous
+        self.session = MacSession()
+        self.tools = TOOLS
+
+    def snapshot(self):
+        text, _ = self.session.snapshot(app_name=self.app, compact=True,
+                                        activate_app=not self.simultaneous)
+        return text
+
+    @staticmethod
+    def _is_shared_input(a):
+        """Actions that use the ONE shared cursor/keyboard (collide with the user)."""
+        act = a.get("action")
+        return act in ("key", "click_xy") or (act == "type" and not a.get("ref"))
+
+    def act(self, actions):
+        sim = self.simultaneous
+        # Only bring the app forward if the batch actually contains a focus-stealing action.
+        # Focus-free primitives (click / select / right_click / set-field / menu) never
+        # activate the app — so they never disturb the user's foreground.
+        needs_focus = any(self._is_shared_input(a) for a in actions)
+        front_ok = True if (sim or not needs_focus) else self.session.activate()
+        lines = []
+        for a in actions:
+            act = a.get("action")
+            try:
+                if sim and self._is_shared_input(a):
+                    lines.append(f"skipped '{act}': needs the shared keyboard/cursor — refused in "
+                                 f"simultaneous mode so it can't disrupt you. Use a focus-free "
+                                 f"alternative: a 'menu' action (e.g. File > Move to Trash), or "
+                                 f"click/select/right_click by ref.")
+                    break
+                if self._is_shared_input(a) and not sim and not front_ok:
+                    lines.append(f"refused '{act}': couldn't bring '{self.app}' to the front "
+                                 f"(modern macOS blocks focus-stealing, especially right after a "
+                                 f"dialog). Use a focus-free alternative: a 'menu' action, or "
+                                 f"click/select/right_click by ref.")
+                    break
+                if act == "click":
+                    lines.append(self.session.click(a["ref"], allow_pixel=not sim))
+                elif act == "right_click":
+                    lines.append(self.session.right_click(a["ref"], allow_pixel=not sim))
+                elif act == "select":
+                    lines.append(self.session.select(a["ref"]))
+                elif act == "menu":
+                    lines.append(self.session.menu(a.get("path") or []))
+                elif act == "type":
+                    lines.append(self.session.set_text(a["ref"], a.get("text", ""), allow_keystrokes=not sim)
+                                 if a.get("ref") else self.session.type_text(a.get("text", "")))
+                elif act == "key":
+                    lines.append(self.session.press_key(a["key"], a.get("modifiers")))
+                elif act == "click_xy":
+                    _mouse_click(int(a["x"]), int(a["y"]))
+                    lines.append(f"clicked ({a['x']},{a['y']})")
+                else:
+                    lines.append(f"unknown action {act}")
+                time.sleep(0.6)
+            except StaleRef:
+                lines.append(f"ref {a.get('ref')} is stale — re-snapshot")
+                break
+            except Exception as e:  # noqa: BLE001
+                lines.append(f"error on {act}: {e}")
+                break
+        time.sleep(0.8)
+        return "Executed:\n" + "\n".join(lines) + "\n\nScreen now:\n" + self.snapshot()
+
+    def handle(self, tool_use):
+        name = tool_use.name
+        args = tool_use.input
+        try:
+            if name == "screenshot":
+                return {"type": "tool_result", "tool_use_id": tool_use.id, "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                                 "data": screenshot_b64()}}]}
+            if name == "snapshot":
+                content = self.snapshot()
+            elif name == "act":
+                content = self.act(args["actions"])
+            elif name == "list_apps":
+                content = list_running_apps()
+            elif name == "launch_app":
+                # In simultaneous mode, launch in the background so it never steals the user's view.
+                content = launch_app(args["name"], args.get("force_accessibility", False),
+                                     background=self.simultaneous)
+                self.app = args["name"]  # target the newly-launched app for subsequent snapshots
+            elif name == "quit_app":
+                content = quit_app(args["name"])
+            elif name == "focus_app":
+                content = focus_app(args["name"])
+                self.app = args["name"]
+            else:
+                return {"type": "tool_result", "tool_use_id": tool_use.id,
+                        "content": f"unknown tool {name}", "is_error": True}
+            return {"type": "tool_result", "tool_use_id": tool_use.id, "content": content}
+        except Exception as e:  # noqa: BLE001
+            return {"type": "tool_result", "tool_use_id": tool_use.id,
+                    "content": f"error: {e}", "is_error": True}

@@ -30,6 +30,9 @@ dependencies = [
   "pyobjc-framework-Quartz>=10.0",
 ]
 
+[tool.hatch.build.targets.wheel]
+packages = ["src/hunch"]
+
 [project.scripts]
 hunch = "hunch.cli:main"
 
