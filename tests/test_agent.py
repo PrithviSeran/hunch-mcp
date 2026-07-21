@@ -299,7 +299,7 @@ def test_backend_resolution(monkeypatch):
         a._resolve_backend("auto")
         assert False, "expected HunchError"
     except agent_mod.HunchError as e:                            # nothing -> both fixes named
-        assert "hunch login" in str(e) and "ANTHROPIC_API_KEY" in str(e)
+        assert "hunch.login()" in str(e) and "ANTHROPIC_API_KEY" in str(e)
     assert Agent(_FakeHunch(), client=_FakeClient([]))._resolve_backend("auto") == "api"
 
 
@@ -323,7 +323,7 @@ def test_subscription_not_signed_in(monkeypatch):
         r.run("x")
         assert False, "expected HunchError"
     except agent_mod.HunchError as e:
-        assert "hunch login" in str(e)
+        assert "hunch.login()" in str(e)
 
 
 def test_sdk_tools_built():
@@ -394,7 +394,7 @@ def test_subscription_run_error_result():
     assert events == [("error", "stopped: error_max_turns")]
 
 
-# ── auth resolution (the `hunch login` surface) ─────────────────────────────────
+# ── auth resolution (the hunch.login() surface) ─────────────────────────────────
 
 def test_auth_resolution_order(monkeypatch):
     import hunch.auth as auth
@@ -410,7 +410,7 @@ def test_auth_resolution_order(monkeypatch):
     monkeypatch.setattr(auth, "_keychain_present", lambda s: False)
     monkeypatch.setattr(auth, "_keychain_read",
                         lambda s: "tok" if s == auth.HUNCH_TOKEN_SERVICE else None)
-    assert auth.resolve()[0] == "hunch_token"                  # 4. hunch login --token
+    assert auth.resolve()[0] == "hunch_token"                  # 4. hunch.login(token=...)
     assert auth.subscription_available()
     monkeypatch.setattr(auth, "_keychain_read", lambda s: None)
     assert auth.resolve()[0] is None                           # nothing

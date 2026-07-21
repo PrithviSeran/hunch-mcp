@@ -2,9 +2,11 @@
 """Run one natural-language task on this Mac with the Hunch agent loop.
 
     pip install 'hunch-sdk[agent]'
-    hunch login                                # Claude subscription (no API key), or:
+    python -c 'import hunch; hunch.login()'    # Claude subscription (no API key), or:
     export ANTHROPIC_API_KEY=sk-ant-...        # metered API
     python examples/agent_task.py "open Music and play my Focus playlist"
+
+Signed into Claude Code on this Mac already? Skip the login line — it's picked up.
 
 Your terminal/IDE needs the Accessibility permission (System Settings → Privacy &
 Security → Accessibility). By default Claude asks before any focus-stealing or
@@ -19,7 +21,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("task")
     p.add_argument("--backend", default="auto", choices=["auto", "api", "subscription"],
-                   help="auto picks by credentials — see `hunch login --status`")
+                   help="auto picks by credentials — see hunch.auth.status()")
     p.add_argument("--model", default=None,
                    help="default: claude-opus-4-8 (api) / your subscription's model")
     p.add_argument("--max-turns", type=int, default=40)

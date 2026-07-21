@@ -11,9 +11,9 @@ tools the MCP server exposes. TWO interchangeable backends, same tools and gates
 
   backend="api"          — the `anthropic` SDK on a metered ANTHROPIC_API_KEY.
   backend="subscription" — `claude-agent-sdk` on the user's Claude subscription
-                           (the sign-in from `hunch login` / Claude Code; no per-token
+                           (the sign-in from hunch.login() / Claude Code; no per-token
                            cost). Auth is EXPLICIT: hunch.auth.resolve() is the single
-                           resolution order, surfaced by `hunch login --status`.
+                           resolution order, surfaced by hunch.auth.status().
   backend="auto" (default) — api if ANTHROPIC_API_KEY is set, else subscription if
                            signed in, else a HunchError naming both fixes.
 
@@ -385,7 +385,7 @@ def _sdk_tools(mac):
 
 class _SubscriptionRunner:
     """The subscription backend: claude-agent-sdk on the user's Claude sign-in
-    (`hunch login` / Claude Code / CLAUDE_CODE_OAUTH_TOKEN — see hunch.auth).
+    (hunch.login() / Claude Code / CLAUDE_CODE_OAUTH_TOKEN — see hunch.auth).
 
     Sync facade over the SDK's asyncio client: a daemon event-loop thread plus
     run_coroutine_threadsafe, so Agent.run() stays synchronous. The connected client
@@ -471,7 +471,7 @@ class _SubscriptionRunner:
                              "package — install it with: pip install 'hunch-sdk[agent]'") from e
         from . import auth
         if not auth.subscription_available():
-            raise HunchError("not signed in — run `hunch login` to use your Claude subscription, "
+            raise HunchError("not signed in — call hunch.login() to use your Claude subscription, "
                              "or set ANTHROPIC_API_KEY for the metered API backend")
         auth.ensure_subscription_env()   # export a Hunch-saved token for the CLI subprocess
 
@@ -525,7 +525,7 @@ class Agent:
 
     def _resolve_backend(self, backend):
         """Explicit choice wins; "auto" picks by credentials — the SAME order
-        `hunch login --status` prints (hunch.auth.resolve)."""
+        hunch.auth.status() reports (hunch.auth.resolve)."""
         b = backend or self.backend or "auto"
         if b in ("api", "subscription"):
             return b
@@ -544,7 +544,7 @@ class Agent:
         if have_sdk and auth.subscription_available():
             return "subscription"
         raise HunchError(
-            "no credentials for the agent loop — run `hunch login` to use your Claude "
+            "no credentials for the agent loop — call hunch.login() to use your Claude "
             "subscription, or set ANTHROPIC_API_KEY for the metered API"
             + ("" if have_sdk else " (subscription backend also needs: "
                                    "pip install 'hunch-sdk[agent]')"))
@@ -628,7 +628,7 @@ class Agent:
                 resp = self._request(client, model, max_tokens, self._system(system_suffix), effort)
             except _AuthError as e:
                 raise HunchError("no valid Anthropic API credentials — set ANTHROPIC_API_KEY, "
-                                 "or run `hunch login` to use your Claude subscription "
+                                 "or call hunch.login() to use your Claude subscription "
                                  "(backend='subscription')") from e
             self._accumulate(usage, resp.usage)
             for b in resp.content:

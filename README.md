@@ -134,7 +134,8 @@ Scrapybara's `act()`, but on *your* machine with *your* logged-in apps. It's an 
 
 ```bash
 pip install 'hunch-sdk[agent]'
-hunch login        # sign in with your Claude subscription (browser OAuth) — no API key
+python -c 'import hunch; hunch.login()'   # Claude subscription sign-in (browser OAuth) — no
+                                          # API key. Already signed into Claude Code? Skip it.
 ```
 
 ```python
@@ -152,7 +153,7 @@ Auth is an explicit, visible surface — nothing is scavenged silently. Two ways
 
 | Backend | Sign in with | Cost |
 |---|---|---|
-| `subscription` | `hunch login` — the same browser OAuth Claude Code uses. Already signed into Claude Code on this Mac? You're done; Hunch reuses that. | your Claude plan (no per-token cost) |
+| `subscription` | `hunch.login()` — the same browser OAuth Claude Code uses. Already signed into Claude Code on this Mac? You're done; Hunch reuses that. | your Claude plan (no per-token cost) |
 | `api` | `export ANTHROPIC_API_KEY=sk-ant-...` | metered API tokens |
 
 You choose the backend where it suits your code — at construction, or per call:
@@ -164,14 +165,12 @@ mac.agent.run(other_task, backend="api")             # per-call override still w
 ```
 
 The default `backend="auto"` picks by credentials, in a fixed documented order (API key →
-`CLAUDE_CODE_OAUTH_TOKEN` env → Claude Code sign-in → `hunch login --token` token) — inspect it
-any time with `hunch login --status`.
-`hunch logout` removes what `hunch login` stored (and only that); headless boxes can use
-`hunch login --token` to paste a long-lived token from `claude setup-token`. With no credentials
-at all, `run()` raises a `HunchError` naming both fixes — it never guesses.
+`CLAUDE_CODE_OAUTH_TOKEN` env → Claude Code sign-in → `hunch.login(token=...)` token) — inspect
+it any time with `hunch.auth.status()` or `hunch doctor`. With no credentials at all, `run()`
+raises a `HunchError` naming both fixes — it never guesses.
 
-Building on the SDK? The whole surface is **public Python API** too — the CLI is just one caller
-of it — so your app owns its own onboarding:
+Auth is **public Python API** (there is no login CLI — the MCP server never needs one, and your
+app owns its own onboarding):
 
 ```python
 import hunch

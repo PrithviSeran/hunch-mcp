@@ -60,7 +60,7 @@ class Hunch:
                  snapshot_max_depth=None, snapshot_max_nodes=None,
                  agent_backend="auto"):
         """agent_backend: which LLM transport `mac.agent` uses — 'api' (anthropic SDK on a
-        metered ANTHROPIC_API_KEY), 'subscription' (claude-agent-sdk on the `hunch login`
+        metered ANTHROPIC_API_KEY), 'subscription' (claude-agent-sdk on the hunch.login()
         Claude sign-in), or 'auto' (pick by credentials). Overridable per call via
         mac.agent.run(..., backend=...)."""
         self._gate = gate.Gate(confirm=confirm)   # validates confirm
@@ -224,7 +224,7 @@ class Hunch:
     def agent(self):
         """The agent loop: `mac.agent.run(task=...)` runs an LLM loop that drives this Mac
         through these primitives. Two backends (pip install 'hunch-sdk[agent]' brings both):
-        your Claude subscription after `hunch login`, or a metered ANTHROPIC_API_KEY.
+        your Claude subscription after hunch.login(), or a metered ANTHROPIC_API_KEY.
         Chosen at construction via Hunch(agent_backend=...), by credentials on 'auto', or
         per call via run(backend=...). Created lazily so plain use imports neither SDK."""
         if self._agent is None:

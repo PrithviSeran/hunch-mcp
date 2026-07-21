@@ -1,28 +1,26 @@
 """auth.py — the EXPLICIT sign-in surface for the agent loop's subscription backend.
 
-Nothing about subscription auth hides inside the agent module, and the surface is
-PUBLIC API, not just a CLI: developers embedding hunch-sdk drive sign-in from
-their own code —
+Nothing about subscription auth hides inside the agent module: this is PUBLIC
+Python API, and developers drive sign-in from their own code —
 
     import hunch
     st = hunch.auth.status()          # AuthStatus: source / email / plan
     if not st.subscription_ready:
         hunch.login()                 # browser OAuth (or login(token=...) headless)
 
-`hunch login` / `hunch logout` / `hunch login --status` are thin CLI callers of
-the same functions, and the agent loop consults the same one resolver
-(`resolve()`). Resolution order — first hit wins:
+The agent loop consults the same one resolver (`resolve()`), and `hunch doctor`
+prints it. Resolution order — first hit wins:
 
   1. ANTHROPIC_API_KEY          -> metered API backend (anthropic SDK)
   2. CLAUDE_CODE_OAUTH_TOKEN    -> subscription (explicit env token)
   3. Claude Code keychain login -> subscription (the user's own Claude Code
                                    sign-in; the bundled CLI reads it by itself)
   4. com.hunch.claude-token     -> subscription (token saved via
-                                   `hunch login --token`; shared with the Hunch
+                                   hunch.login(token=...); shared with the Hunch
                                    menu-bar app)
 
-Like cli.py this module is stdlib-only, so `hunch login --status` works even
-when optional deps are missing.
+Like cli.py this module is stdlib-only, so status/login work even when the
+optional LLM SDKs are missing.
 """
 import json
 import os
@@ -105,8 +103,8 @@ def resolve():
     if _keychain_present(CLAUDE_CODE_SERVICE):
         return "claude_code", "Claude Code sign-in in the Keychain (Claude subscription)"
     if _keychain_read(HUNCH_TOKEN_SERVICE):
-        return "hunch_token", "token saved by `hunch login --token` (Claude subscription)"
-    return None, "no credentials — run `hunch login` or set ANTHROPIC_API_KEY"
+        return "hunch_token", "token saved by hunch.login(token=...) (Claude subscription)"
+    return None, "no credentials — call hunch.login() or set ANTHROPIC_API_KEY"
 
 
 def subscription_available():
@@ -131,7 +129,7 @@ def ensure_subscription_env():
 
 @dataclass
 class AuthStatus:
-    """What `hunch login --status` prints, as data. source is one of 'api_key',
+    """The agent loop's credential situation, as data. source is one of 'api_key',
     'env_token', 'claude_code', 'hunch_token', or None (no credentials)."""
     source: str | None
     description: str
