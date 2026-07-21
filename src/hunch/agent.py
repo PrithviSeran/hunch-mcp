@@ -229,7 +229,10 @@ _DISPATCH = {
                                         max_depth=a.get("max_depth"), max_nodes=a.get("max_nodes")),
     "find": lambda m, a: m.find(role=a.get("role") or None, name_contains=a.get("name_contains") or None,
                                 app=a.get("app", ""), max_results=a.get("max_results", 20)),
-    "act": lambda m, a: m.act(a.get("actions", []), reason=a.get("reason", "")),
+    # `confirm` isn't in the agent tool schema (an agent must not self-approve); the MCP
+    # server's tools DO pass it through when the human already approved out-of-band.
+    "act": lambda m, a: m.act(a.get("actions", []), reason=a.get("reason", ""),
+                              confirm=a.get("confirm", False)),
     "screenshot": lambda m, a: m.screenshot(),
     "list_apps": lambda m, a: m.list_apps(),
     "launch_app": lambda m, a: m.launch_app(a["name"], force_accessibility=a.get("force_accessibility", False),
@@ -257,7 +260,7 @@ _DISPATCH = {
     "reveal_in_finder": lambda m, a: m.files.reveal(a.get("paths", [])),
     "clipboard_get": lambda m, a: m.clipboard.get(),
     "clipboard_set": lambda m, a: m.clipboard.set(a["text"]),
-    "applescript": lambda m, a: m.applescript(a["script"]),
+    "applescript": lambda m, a: m.applescript(a["script"], confirm=a.get("confirm", False)),
 }
 
 

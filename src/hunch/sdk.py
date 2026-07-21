@@ -189,12 +189,13 @@ class Hunch:
             self._computer.app = prev
         return out
 
-    def act(self, actions, reason=""):
+    def act(self, actions, reason="", confirm=False):
         """Run UI actions (same dicts as the MCP `act` tool: click/select/right_click/type/
         menu/key/click_xy by ref) and return the updated tree. Focus-stealing actions are
-        gated; a user refusal raises ApprovalDenied. StaleRef means re-snapshot."""
+        gated; a user refusal raises ApprovalDenied. StaleRef means re-snapshot.
+        confirm=True skips the dialog (the user already approved out-of-band)."""
         blocked = gate.check_focus_steal(self._computer, actions, self._gate,
-                                         confirm=False, reason=reason)
+                                         confirm=confirm, reason=reason)
         if blocked:
             raise ApprovalDenied(blocked)
         return self._computer.act(actions)
@@ -221,7 +222,10 @@ class Hunch:
         set_focus_reason(reason)
         msg = _launch_app(name, force_accessibility, background=self._computer.simultaneous)
         self._computer.app = name
-        return msg
+        refs = self._computer.snapshot().count("[e")
+        return (f"{msg}; accessibility tree has {refs} elements"
+                + ("" if refs > 15 else
+                   " (still low — if it's an Electron app, retry with force_accessibility=True)"))
 
     def quit_app(self, name):
         return _quit_app(name)
@@ -248,11 +252,12 @@ class Hunch:
 
     # ── AppleScript / OS ──────────────────────────────────────────────────────
 
-    def applescript(self, script):
+    def applescript(self, script, confirm=False):
         """Run AppleScript against scriptable apps (Mail, Music, Finder, …) focus-free.
-        Mutating/'do shell script' scripts are gated; refusal raises ApprovalDenied."""
+        Mutating/'do shell script' scripts are gated; refusal raises ApprovalDenied.
+        confirm=True skips the dialog (the user already approved out-of-band)."""
         category = gate.applescript_category(script)
-        if category and self._gate.enabled(category):
+        if category and not confirm and self._gate.enabled(category):
             preview = script.strip()[:400].replace("\n", "  ").replace("\r", " ")
             if not self._gate.confirm_dialog(
                     f"{self.app_name} wants to run an AppleScript that can change things or "
@@ -334,7 +339,7 @@ class Web:
 
     def _session(self):
         if self._computer is None:
-            raise WebNotOpen("no web/Electron app open — call web.open() first")
+            raise WebNotOpen("no web/Electron app open — call web_open / web.open() first")
         return self._computer.session
 
     def open(self, url="", app="Google Chrome", isolated=False):

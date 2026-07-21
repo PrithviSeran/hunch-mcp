@@ -1,47 +1,33 @@
-"""hunch_mcp.py — drive your REAL Mac (Hunch local backend) over MCP.
+"""server.py — the Hunch MCP server: drive your REAL Mac over MCP.
 
 Point Claude Desktop at this and you control your machine through your Claude
-subscription instead of a metered API key — no per-token spend. It exposes the
-same tree-native primitives as the direct module, backed by local_mac.py.
+subscription instead of a metered API key — no per-token spend.
+
+This server is an APP BUILT ON the Hunch SDK — the first one. Every tool below
+delegates to one `Hunch` instance through the same dispatch the agent loop uses
+(`_dispatch_core`), so there is exactly ONE engine. What makes this server the
+*personal* app is nothing but its constructor arguments: policy="personal" (the
+live ~/.hunch/config.json resolver incl. the HUNCH_NO_INTERNAL_GATE kill-switch),
+default "Hunch" branding, and the legacy storage names (no app_id).
 
 Requires Accessibility permission for whatever process runs this (grant
 Claude Desktop in System Settings → Privacy & Security → Accessibility).
 """
 import os
-import base64
 
 from mcp.server.fastmcp import FastMCP, Image
-from AppKit import NSWorkspace
 
 from .playbook import HUNCH_PLAYBOOK
-from .local_mac import (LocalComputer, screenshot_b64, list_running_apps, set_focus_reason,
-                       launch_app as _launch_app, quit_app as _quit_app, focus_app as _focus_app)
 from . import gate
-from . import os_ops
 from .notify import notify as _notify_impl
 
 
 mcp = FastMCP("hunch", instructions=HUNCH_PLAYBOOK)
 
 # When the host owns permissions (e.g. the Hunch app's own approve UX), HUNCH_NO_INTERNAL_GATE=1
-# suppresses the duplicate desktop banners here; its gate suppression flows through
-# policy.gate_enabled (env > auto_approve_all > per-category, from ~/.hunch/config.json).
+# suppresses the duplicate desktop banners here; its gate suppression flows through the
+# "personal" policy resolver (env > auto_approve_all > per-category, from ~/.hunch/config.json).
 _APP_OWNS_PERMS = bool(os.environ.get("HUNCH_NO_INTERNAL_GATE"))
-# ONE persistent computer, so element [refs] survive across snapshot -> act calls.
-_computer = LocalComputer(app="Finder")
-
-
-def _frontmost():
-    app = NSWorkspace.sharedWorkspace().frontmostApplication()
-    return app.localizedName() if app else "Finder"
-
-
-# The consent/safety layer lives in gate.py (shared with the Python SDK); this server keeps
-# ONE Gate so approval state behaves exactly as the old module globals did. The server is
-# the PERSONAL app on the SDK: policy="personal" = the live ~/.hunch/config.json resolver
-# (incl. the HUNCH_NO_INTERNAL_GATE env kill-switch), and default "Hunch" branding.
-_gate = gate.Gate(confirm="dialog", policy="personal")
-_as_str = gate.as_str
 
 
 def _notify(message, title="Hunch"):
@@ -56,20 +42,29 @@ def _notify(message, title="Hunch"):
         pass
 
 
-def _confirm_dialog(prompt, timeout=180, screen_approval=True):
-    return _gate.confirm_dialog(prompt, timeout, screen_approval)
+# ── ONE Hunch instance: the engine behind every tool ──────────────────────────────
+from .sdk import Hunch  # noqa: E402
+from .agent import _dispatch_core  # noqa: E402
+
+_mac = Hunch(
+    confirm="dialog",
+    policy="personal",        # ~/.hunch/config.json live + HUNCH_NO_INTERNAL_GATE, as always
+    check_permissions=False,  # AX problems surface per-tool, not at import
+    notify=_notify,           # keeps the app-mode banner suppression
+)
+_gate = _mac._gate            # single Gate: approval state behaves as the old module globals
+_as_str = gate.as_str         # kept aliases (tests + external callers)
+_protected = gate.protected
+_HUNCH_DIR = gate.HUNCH_DIR
 
 
-def _mark_screen_approval():
-    _gate.mark_screen_approval()
-
-
-def _screen_approved():
-    return _gate.screen_approved()
-
-
-def _front_gate(name, reason=""):
-    return _gate.front_gate(name, reason)
+def _run(name, **args):
+    """Delegate one MCP tool call to the SDK through the same exception-mapped dispatch
+    the agent loop uses. Strings pass through; raw PNG bytes become an MCP Image."""
+    value, _is_error = _dispatch_core(_mac, name, args)
+    if isinstance(value, bytes):
+        return Image(data=value, format="png")
+    return value
 
 
 @mcp.tool()
@@ -94,14 +89,7 @@ def snapshot(app: str = "", ref: str = "", max_depth: int | None = None,
     or steal focus (focus_app / launch_app foreground / click_xy) just because the first read was
     thin. Reserve `screenshot` for confirming truly VISUAL content (an image, a file-preview
     thumbnail) — to check what an action did or read UI text, RE-SNAPSHOT, don't screenshot."""
-    if ref:
-        return _computer.snapshot(ref=ref, max_depth=max_depth, max_nodes=max_nodes)
-    prev = _computer.app
-    _computer.app = app or _frontmost()
-    out = _computer.snapshot(max_depth=max_depth, max_nodes=max_nodes)
-    if isinstance(out, str) and out.startswith("(app '") and "not found" in out:
-        _computer.app = prev   # a failed target must not poison later act/snapshot calls
-    return out
+    return _run("snapshot", app=app, ref=ref, max_depth=max_depth, max_nodes=max_nodes)
 
 
 @mcp.tool()
@@ -116,14 +104,8 @@ def find(role: str = "", name_contains: str = "", app: str = "", max_results: in
     Searches deeper than `snapshot` shows, so it reaches elements a truncated
     snapshot omitted. Refs stay valid until the next full snapshot of that app.
     Pass an app name or leave blank for the current target app."""
-    prev = _computer.app
-    if app:
-        _computer.app = app
-    out = _computer.find(role=role or None, name_contains=name_contains or None,
-                         max_results=max_results)
-    if isinstance(out, str) and out.startswith("(app '") and "not found" in out:
-        _computer.app = prev
-    return out
+    return _run("find", role=role, name_contains=name_contains, app=app,
+                max_results=max_results)
 
 
 @mcp.tool()
@@ -166,10 +148,7 @@ def act(actions: list, confirm: bool = False, reason: str = "") -> str:
     When the batch contains ANY focus-stealing action, ALWAYS pass `reason` — one short human
     sentence for WHY you need the screen (e.g. "press Enter to submit the search"). It is shown
     to the user in the focus warning and the approval prompt."""
-    blocked = gate.check_focus_steal(_computer, actions, _gate, confirm, reason)
-    if blocked:
-        return blocked
-    return _computer.act(actions)
+    return _run("act", actions=actions, confirm=confirm, reason=reason)
 
 
 @mcp.tool()
@@ -179,13 +158,13 @@ def screenshot() -> Image:
     tree looked thin, `click` into the pane and re-`snapshot` instead. A screenshot only shows the
     FRONTMOST app, so in the background it usually shows the user's OTHER app, not your target — and
     it can't be acted on (no refs). Reach for it to VERIFY visual content, not to navigate."""
-    return Image(data=base64.b64decode(screenshot_b64()), format="png")
+    return _run("screenshot")
 
 
 @mcp.tool()
 def list_apps() -> str:
     """List the running GUI apps you can target with snapshot(app=...)."""
-    return list_running_apps()
+    return _run("list_apps")
 
 
 @mcp.tool()
@@ -197,16 +176,8 @@ def launch_app(name: str, force_accessibility: bool = False, reason: str = "") -
     the app so its accessibility tree becomes visible to snapshot.
     Pass `reason` — one short sentence for WHY (shown in the focus-switch warning when
     the launch brings the app to the front)."""
-    if not _computer.simultaneous:   # foreground launch = a real focus switch
-        blocked = _front_gate(name, reason)
-        if blocked:
-            return blocked
-    set_focus_reason(reason)
-    msg = _launch_app(name, force_accessibility, background=_computer.simultaneous)
-    _computer.app = name
-    refs = _computer.snapshot().count("[e")
-    return (f"{msg}; accessibility tree has {refs} elements"
-            + ("" if refs > 15 else " (still low — if it's an Electron app, retry with force_accessibility=True)"))
+    return _run("launch_app", name=name, force_accessibility=force_accessibility,
+                reason=reason)
 
 
 @mcp.tool()
@@ -218,16 +189,14 @@ def simultaneous_mode(on: bool = True) -> str:
     would disrupt you. Works for native apps; Electron apps read empty in this mode
     (they need to be frontmost). Turn OFF to let Hunch bring apps forward and use the
     full input set (for when you're away from the machine)."""
-    _computer.simultaneous = on
-    return ("simultaneous mode ON — Hunch will not touch your foreground, cursor, or keyboard"
-            if on else "simultaneous mode OFF — Hunch may bring apps forward and use the cursor/keyboard")
+    return _run("simultaneous_mode", on=on)
 
 
 @mcp.tool()
 def quit_app(name: str) -> str:
     """Quit an app via the OS — reliable regardless of focus (use instead of ⌘Q,
     which is unreliable on background apps)."""
-    return _quit_app(name)
+    return _run("quit_app", name=name)
 
 
 @mcp.tool()
@@ -235,25 +204,7 @@ def focus_app(name: str, reason: str = "") -> str:
     """Bring an app to the front (reliable OS call), and target it for snapshots.
     ALWAYS pass `reason` — one short sentence for WHY you're switching the user's view
     (shown to them in the focus warning)."""
-    blocked = _front_gate(name, reason)
-    if blocked:
-        return blocked
-    set_focus_reason(reason)
-    msg = _focus_app(name)
-    _computer.app = name
-    return msg
-
-
-# ── CDP: focus-free control of Chromium browsers + Electron apps ──────────────
-_cdp = {"computer": None}
-
-
-def _close_cdp():
-    if _cdp["computer"] is not None:
-        try:
-            _cdp["computer"].session.close()
-        except Exception:
-            pass
+    return _run("focus_app", name=name, reason=reason)
 
 
 @mcp.tool()
@@ -272,27 +223,7 @@ def web_open(app: str = "Google Chrome", url: str = "", isolated: bool = False) 
     DEDICATED Hunch profile — NOT the user's real/default profile (modern Chrome refuses the
     debug port there). If that Hunch profile isn't logged into the site yet, this returns a
     prompt to call web_login once; after that the session persists and stays focus-free."""
-    if os.environ.get("HUNCH_FORCE_SANDBOX") == "1":
-        isolated = True  # the app's Sandbox toggle forces a throwaway, no-login profile
-    from .cdp import CDPComputer
-    _close_cdp()
-    try:
-        _cdp["computer"] = CDPComputer(app, port=9337, url=url or None,
-                                       isolated=isolated, background=True)
-    except Exception as e:  # e.g. debug port never bound
-        return f"couldn't open {app} over CDP: {e}"
-    comp = _cdp["computer"]
-    if url:
-        comp.session.navigate(url)
-    comp.session.wait_ready()  # give the page a fair chance to load before judging it
-    if not isolated and comp.session.signed_out():
-        return (f"opened {app} over CDP, but the Hunch profile isn't signed in "
-                f"(now at {comp.session.url()[:70]}). Call web_login(app, url) once to sign in "
-                "in a foreground, clearly-marked window — the user types their own credentials, "
-                "and afterwards this profile stays logged in and every action is focus-free.")
-    snap = comp.snapshot()
-    return (f"opened {app} over CDP ({snap.count('[e')} elements visible), focus-free. "
-            "Use web_snapshot to look and web_act to click/type/navigate — none of it touches your foreground.")
+    return _run("web_open", app=app, url=url, isolated=isolated)
 
 
 @mcp.tool()
@@ -307,27 +238,7 @@ def web_login(app: str = "Google Chrome", url: str = "") -> str:
     never sees the password); the session then persists, and all later web_open / web_act
     calls run focus-free. Tell the user a notification was sent and to switch to the
     banner-tagged window when ready, sign in, leave it open, and confirm when done."""
-    from .cdp import CDPComputer, quit_cdp
-    _close_cdp()
-    quit_cdp(9337)  # fresh window, no stale-instance reuse (does not front anything)
-    try:
-        _cdp["computer"] = CDPComputer(app, port=9337, url=url or None,
-                                       isolated=False, background=True)
-    except Exception as e:
-        return f"couldn't open {app} for login: {e}"
-    comp = _cdp["computer"]
-    if url:
-        comp.session.navigate(url)
-    comp.session.wait_ready()
-    comp.session.mark()
-    _notify("Switch to the green 'HUNCH — LOG IN HERE' Chrome window to sign in, then tell me when done.",
-            "Hunch needs you to sign in")
-    return ("Opened a BACKGROUND, banner-tagged Hunch window (did NOT steal focus) and sent a "
-            "desktop notification. Tell the user to switch to the window with the green "
-            "'🟢 HUNCH — LOG IN HERE' banner when ready (Cmd-Tab to Chrome or click its Dock "
-            "icon), sign in, leave it open, and confirm when done. Then use web_open / "
-            "web_snapshot / web_act — the login persists and runs focus-free. "
-            "(Don't close that window — it kills the debug session.)")
+    return _run("web_login", app=app, url=url)
 
 
 @mcp.tool()
@@ -341,9 +252,7 @@ def web_snapshot() -> str:
     web_snapshot again. NEVER use the OS `screenshot` tool to see a web page — it captures the
     physical frontmost screen, which for a BACKGROUND CDP window is the user's OWN window, not this
     page. To see the page as pixels focus-free, use `web_screenshot`."""
-    if _cdp["computer"] is None:
-        return "No web/Electron app open — call web_open(app) first."
-    return _cdp["computer"].snapshot()
+    return _run("web_snapshot")
 
 
 @mcp.tool()
@@ -352,12 +261,7 @@ def web_screenshot() -> Image:
     content the tree can't convey (a chart, canvas, image, rendered PDF). Use THIS, never the OS
     `screenshot` tool, for anything in the background browser: the OS one grabs the physical screen
     and would capture the user's own foreground window instead of this page. Call web_open first."""
-    if _cdp["computer"] is None:
-        return "No web/Electron app open — call web_open(app) first."
-    data = _cdp["computer"].session.capture_screenshot()
-    if not data:
-        return "Could not capture the page."
-    return Image(data=base64.b64decode(data), format="png")
+    return _run("web_screenshot")
 
 
 @mcp.tool()
@@ -371,9 +275,7 @@ def web_act(actions: list) -> str:
     To follow a link, CLICK it by ref — do NOT `navigate` to a guessed/constructed URL; only
     navigate to a URL the user gave you or that you read from the page (navigate refuses a host
     that doesn't resolve)."""
-    if _cdp["computer"] is None:
-        return "No web/Electron app open — call web_open(app) first."
-    return _cdp["computer"].act(actions)
+    return _run("web_act", actions=actions)
 
 
 @mcp.tool()
@@ -392,20 +294,7 @@ def web_restart(app: str = "Google Chrome", url: str = "") -> str:
         "This site can't be reached", a network/HTTP error), or a truly blank/empty tree that
         stays unchanged across several snapshots over 20–30s+ with no spinner or progress.
     When unsure, wait and re-snapshot again rather than restarting."""
-    from .cdp import CDPComputer, quit_cdp
-    _close_cdp()
-    quit_cdp(9337)
-    try:
-        _cdp["computer"] = CDPComputer(app, port=9337, url=url or None,
-                                       isolated=False, background=True)
-    except Exception as e:
-        return f"couldn't reopen {app} over CDP: {e}"
-    comp = _cdp["computer"]
-    if url:
-        comp.session.navigate(url)
-    comp.session.wait_ready()
-    snap = comp.snapshot()
-    return (f"restarted {app} over CDP ({snap.count('[e')} elements). Screen now:\n{snap}")
+    return _run("web_restart", app=app, url=url)
 
 
 @mcp.tool()
@@ -413,21 +302,14 @@ def web_tabs() -> str:
     """List the open browser tabs/windows in the CDP session — index, title, URL, and which is
     current (*). New tabs opened by a click or form are AUTO-FOLLOWED on the next web_snapshot;
     use web_switch_tab only to override that (go back to a prior tab, or pick a different one)."""
-    if _cdp["computer"] is None:
-        return "No web/Electron app open — call web_open(app) first."
-    tabs = _cdp["computer"].session.tabs()
-    if not tabs:
-        return "no open tabs"
-    return "\n".join(f"[{t['index']}]{'*' if t['current'] else ' '} {t['title']} — {t['url']}" for t in tabs)
+    return _run("web_tabs")
 
 
 @mcp.tool()
 def web_switch_tab(index: int) -> str:
     """Switch the CDP session to a specific browser tab by index (see web_tabs), then web_snapshot
     to read it. Use when auto-follow landed on the wrong tab, or to return to an earlier one."""
-    if _cdp["computer"] is None:
-        return "No web/Electron app open — call web_open(app) first."
-    return _cdp["computer"].session.switch_tab(index)
+    return _run("web_switch_tab", index=index)
 
 
 @mcp.tool()
@@ -435,29 +317,7 @@ def list_credentials() -> str:
     """List the service NAMES the user has saved credentials for (e.g. "google", "openai").
     Returns names + kind ONLY — never any values. Two kinds: username+password logins
     (use web_fill_login) and single protected values like API keys (use web_fill_secret)."""
-    from .creds import list_services, kind_of
-    names = list_services()
-    if not names:
-        return ("No saved credentials. The user can add them on the Hunch app's Credentials page "
-                "(Settings). For a one-off sign-in where nothing is saved, use web_login instead.")
-    logins = [n for n in names if kind_of(n) != "secret"]
-    secrets = [n for n in names if kind_of(n) == "secret"]
-    parts = []
-    if logins:
-        parts.append("logins (web_fill_login): " + ", ".join(logins))
-    if secrets:
-        parts.append("API keys/secrets (web_fill_secret): " + ", ".join(secrets))
-    return "Saved credentials — " + "; ".join(parts)
-
-
-def _domain_mismatch(service):
-    """None if the current CDP page's host is allowed for `service`, else a refusal message
-    (the shared guard in gate.py, fed the live CDP page URL)."""
-    try:
-        url = _cdp["computer"].session.url()
-    except Exception:
-        url = ""
-    return gate.domain_mismatch(service, url)
+    return _run("list_credentials")
 
 
 @mcp.tool()
@@ -469,26 +329,7 @@ def web_fill_login(service: str) -> str:
     form is visible. For two-step logins (e.g. Google: email, then password), call once, advance
     with web_act, then call again. After filling, submit via web_act (click the sign-in button or
     press Enter). If the service isn't saved, tell the user to add it on the Credentials page."""
-    if _cdp["computer"] is None:
-        return "No web/Electron app open — call web_open(app) first."
-    from .creds import get_credential, has, kind_of
-    if not has(service):
-        return (f"No saved credential for '{service}'. Call list_credentials() to see saved "
-                "services, or tell the user to add it on the Hunch Credentials page.")
-    if kind_of(service) == "secret":
-        return (f"'{service}' is a protected value (API key/token), not a login — use "
-                f"web_fill_secret('{service}', ref) to type it into a field instead.")
-    blocked = _domain_mismatch(service)
-    if blocked:
-        return blocked
-    username, password = get_credential(service)   # stays in this process; never returned
-    if not (username or password):
-        return f"Couldn't read the '{service}' credential from the Keychain."
-    r = _cdp["computer"].session.fill_login(username, password)
-    del username, password
-    return (f"filled '{service}': username={r['username_filled']}, password={r['password_filled']}. "
-            "Now submit via web_act (click the sign-in button or press Enter). If this was the "
-            "email step of a two-step login, advance to the password step and call web_fill_login again.")
+    return _run("web_fill_login", service=service)
 
 
 @mcp.tool()
@@ -498,25 +339,7 @@ def web_fill_secret(service: str, ref: str = "") -> str:
     target field's `ref`; Hunch reads the secret from the macOS Keychain and types it straight into
     that field, replacing its content — you only learn that it was filled. Omit `ref` to type at
     the currently-focused element. For username+password sign-ins use web_fill_login instead."""
-    if _cdp["computer"] is None:
-        return "No web/Electron app open — call web_open(app) first."
-    from .creds import has, kind_of, get_secret
-    if not has(service):
-        return (f"No saved credential for '{service}'. Call list_credentials() to see saved "
-                "services, or tell the user to add it on the Hunch Credentials page.")
-    if kind_of(service) != "secret":
-        return (f"'{service}' is a username+password login — use web_fill_login('{service}') "
-                "instead.")
-    blocked = _domain_mismatch(service)
-    if blocked:
-        return blocked
-    secret = get_secret(service)   # stays in this process; never returned
-    if not secret:
-        return f"Couldn't read the '{service}' secret from the Keychain."
-    _cdp["computer"].session.type_text(ref or None, secret)
-    del secret
-    return (f"filled the '{service}' secret into {('field ' + ref) if ref else 'the focused element'} "
-            "(value not shown to you). Verify the page accepted it and continue.")
+    return _run("web_fill_secret", service=service, ref=ref)
 
 
 @mcp.tool()
@@ -525,8 +348,7 @@ def notify_user(message: str) -> str:
     verification prompt, solve a captcha, or make a decision. Brings the Hunch window back up
     (or fires a desktop notification when running outside the app). Call this the moment you
     hit a step only the human can do, so they don't have to watch the screen."""
-    _notify(message, "Hunch needs you")
-    return f"notified the user: {message}"
+    return _run("notify_user", message=message)
 
 
 @mcp.tool()
@@ -536,14 +358,7 @@ def request_focus(reason: str) -> str:
     dialog and returns their choice. You do NOT need this for `act`'s key / click_xy / ref-less
     type — act pops the same dialog automatically. If approved, do the action, then return focus
     to the user's previous app when done."""
-    ok = _confirm_dialog(f"Hunch wants to {reason}. Allow it to take over your screen?")
-    return ("user clicked Go ahead — proceed, then restore their previous app afterwards"
-            if ok else "user did not approve — do NOT proceed with the focus-stealing action")
-
-
-# ── OS-API layer: focus-free filesystem + clipboard (no UI automation needed) ─────────
-_HUNCH_DIR = gate.HUNCH_DIR
-_protected = gate.protected
+    return _run("request_focus", reason=reason)
 
 
 @mcp.tool()
@@ -551,58 +366,40 @@ def trash(paths: list) -> str:
     """Move file(s)/folder(s) to the Trash BY PATH — FOCUS-FREE and reversible. Use this to
     delete files instead of driving Finder + ⌘⌫ (which steals focus and is fragile). Accepts
     absolute or ~ paths. Files go to the Trash, so it's recoverable."""
-    hit = next((p for p in paths if _protected(p)), None)
-    if hit is not None:
-        return (f"REFUSED: {hit} is inside ~/.hunch — Hunch's own config/credential metadata. "
-                "Not deletable via Hunch; the user can manage it with the `hunch` CLI.")
-    return os_ops.trash(paths)
+    return _run("trash", paths=paths)
 
 
 @mcp.tool()
 def file_op(op: str, src: str, dst: str = "") -> str:
     """Focus-free filesystem operations by path: op='move' or 'copy' (src -> dst; dst may be a
     folder or a new path), or op='mkdir' (create a folder at src). To delete, use `trash`."""
-    for p in (src, dst):
-        if p and _protected(p):
-            return (f"REFUSED: {p} is inside ~/.hunch — Hunch's own config/credential metadata. "
-                    "Not writable via Hunch; the user can manage it with the `hunch` CLI.")
-    if op == "move":
-        return os_ops.move(src, dst)
-    if op == "copy":
-        return os_ops.copy(src, dst)
-    if op == "mkdir":
-        return os_ops.make_dir(src)
-    return f"unknown op {op!r} — use 'move', 'copy', or 'mkdir' (or the trash tool to delete)"
+    return _run("file_op", op=op, src=src, dst=dst)
 
 
 @mcp.tool()
 def open_file(path: str, app: str = "") -> str:
     """Open a file/folder/URL with its default app (or a named app) — focus-free launch. Also
     opens web URLs and app deep-links (e.g. 'spotify:track:...', 'mailto:...')."""
-    return os_ops.open_path(path, app or None)
+    return _run("open_file", path=path, app=app)
 
 
 @mcp.tool()
 def reveal_in_finder(paths: list) -> str:
     """Reveal/select item(s) in a Finder window by path. (This one does bring Finder forward —
     it's an explicit 'show me these files' action.)"""
-    return os_ops.reveal(paths)
+    return _run("reveal_in_finder", paths=paths)
 
 
 @mcp.tool()
 def clipboard_get() -> str:
     """Read the clipboard's text — focus-free (no ⌘C needed)."""
-    return os_ops.clipboard_read()
+    return _run("clipboard_get")
 
 
 @mcp.tool()
 def clipboard_set(text: str) -> str:
     """Put text on the clipboard — focus-free (move data around without ⌘C/⌘V keystrokes)."""
-    return os_ops.clipboard_write(text)
-
-
-_SHELL_AS = gate.SHELL_AS
-_DESTRUCTIVE_AS = gate.DESTRUCTIVE_AS
+    return _run("clipboard_set", text=text)
 
 
 @mcp.tool()
@@ -618,16 +415,7 @@ def applescript(script: str, confirm: bool = False) -> str:
     only run if approved (pass confirm=true to skip the dialog if the user already approved).
     Note: the FIRST time Hunch scripts a given app, macOS shows a one-time 'allow control'
     permission prompt the user must accept."""
-    category = gate.applescript_category(script)
-    if category and not confirm and _gate.enabled(category):
-        preview = script.strip()[:400].replace("\n", "  ").replace("\r", " ")
-        if not _confirm_dialog("Hunch wants to run an AppleScript that can change things or "
-                               f"control apps:  {preview}   — allow?", screen_approval=False):
-            return "User did not approve — AppleScript not run. Ask the user how to proceed."
-    ok, out = os_ops.run_applescript(script)
-    if ok:
-        return out
-    return f"AppleScript error: {out[:600]}{gate.applescript_hint(out)}"
+    return _run("applescript", script=script, confirm=confirm)
 
 
 def main():

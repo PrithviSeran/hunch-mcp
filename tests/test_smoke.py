@@ -65,9 +65,9 @@ def test_app_to_front_gate_default_on():
 def test_screen_approval_dedupe():
     import hunch.local_mac as local_mac
     # A fresh approval lets the front gate pass with NO dialog...
-    server._mark_screen_approval()
-    assert server._screen_approved()
-    assert server._front_gate("SomeApp", "test") is None
+    server._gate.mark_screen_approval()
+    assert server._gate.screen_approved()
+    assert server._gate.front_gate("SomeApp", "test") is None
     # ...and suppresses the focus notification at the choke point.
     fired = []
     old_notify, old_until = local_mac._notify_focus, local_mac._suppress_until
@@ -97,23 +97,27 @@ class _StubComputer:
 
 
 def test_domain_mismatch_guard():
-    # Redirect the domains metadata to a temp dir so we never touch real state.
+    """The domain guard, wired through the INVERTED server: web_fill_login goes
+    server tool -> _dispatch_core -> _mac.web.fill_login -> gate.domain_mismatch
+    with the live CDP page URL."""
     import tempfile
     with tempfile.TemporaryDirectory() as d:
         old_meta = creds._meta_path
         creds._meta_path = lambda base, ns=None: os.path.join(d, ns or "personal", base)
-        old_cdp = server._cdp["computer"]
+        old_comp = server._mac.web._computer
         try:
+            creds._write_index(["testsvc"])   # has() runs before the domain guard
             creds.set_domains("testsvc", ["google.com"])
-            server._cdp["computer"] = _StubComputer("https://accounts.google.com/signin")
-            assert server._domain_mismatch("testsvc") is None  # subdomain allowed
-            server._cdp["computer"] = _StubComputer("https://evil.example.com/login")
-            refusal = server._domain_mismatch("testsvc")
+            server._mac.web._computer = _StubComputer("https://evil.example.com/login")
+            refusal = server._run("web_fill_login", service="testsvc")
             assert refusal and refusal.startswith("REFUSED")
-            assert server._domain_mismatch("unbound-svc") is None  # unbound fills anywhere
+            # allowed subdomain + unbound service pass the guard (they fail later at
+            # the has()/keychain stage in this stub setup, but must NOT be REFUSED)
+            server._mac.web._computer = _StubComputer("https://accounts.google.com/signin")
+            assert not server._run("web_fill_login", service="unbound-svc").startswith("REFUSED")
         finally:
             creds._meta_path = old_meta
-            server._cdp["computer"] = old_cdp
+            server._mac.web._computer = old_comp
 
 
 if __name__ == "__main__":

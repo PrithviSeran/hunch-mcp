@@ -249,6 +249,33 @@ def test_shared_domain_mismatch_guard(monkeypatch, tmp_path):
     assert gate.domain_mismatch("unbound-svc", "https://anywhere.example") is None
 
 
+def test_server_is_an_app_on_the_sdk():
+    """The inversion invariants: one engine (every MCP tool name resolves in the shared
+    dispatch table), one Hunch instance, personal policy + notify wrapper wired in."""
+    import hunch.agent as agent_mod
+    assert set(server.mcp._tool_manager._tools) == set(agent_mod._DISPATCH)
+    assert isinstance(server._mac, Hunch)
+    assert server._gate is server._mac._gate
+    assert server._gate._policy == "personal"
+    assert server._mac._notify_handler is server._notify
+
+
+def test_server_run_delegation(monkeypatch):
+    from mcp.server.fastmcp import Image as McpImage
+
+    class FakeMac:
+        def list_apps(self):
+            return "Finder, Mail"
+
+        def screenshot(self):
+            return b"\x89PNG fake"
+
+    monkeypatch.setattr(server, "_mac", FakeMac())
+    assert server._run("list_apps") == "Finder, Mail"
+    assert isinstance(server._run("screenshot"), McpImage)   # bytes -> MCP Image
+    assert server._run("nope") == "unknown tool nope"
+
+
 def test_server_delegates_to_gate():
     # Regression guard for the extraction: server aliases must point at the shared layer.
     assert server._protected is gate.protected

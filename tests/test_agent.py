@@ -83,7 +83,7 @@ class _FakeHunch:
         self._rec("snapshot")
         return f"tree of {app or 'frontmost'}"
 
-    def act(self, actions, reason=""):
+    def act(self, actions, reason="", confirm=False):
         self._rec("act")
         return "acted"
 
