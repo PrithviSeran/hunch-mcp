@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hunch-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "Drive your Mac focus-free over MCP: OS APIs, AppleScript, CDP, and Accessibility."
 readme = "README.md"
 license = "Apache-2.0"
@@ -29,6 +29,9 @@ dependencies = [
   "pyobjc-framework-ApplicationServices>=10.0",
   "pyobjc-framework-Quartz>=10.0",
 ]
+
+[project.optional-dependencies]
+agent = ["anthropic>=0.80"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hunch"]

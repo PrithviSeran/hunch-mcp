@@ -69,6 +69,7 @@ class Hunch:
         self.web = Web(self, cdp_port or CDP_PORT)
         self.files = Files(self)
         self.clipboard = Clipboard(self)
+        self._agent = None   # the agent loop, created lazily so `anthropic` stays optional
 
     @staticmethod
     def _check_accessibility():
@@ -207,6 +208,18 @@ class Hunch:
         if secrets:
             parts.append("API keys/secrets (web.fill_secret): " + ", ".join(secrets))
         return "Saved credentials — " + "; ".join(parts)
+
+    # ── agent loop ────────────────────────────────────────────────────
+
+    @property
+    def agent(self):
+        """The agent loop: `mac.agent.run(task=...)` runs an LLM loop that drives this Mac
+        through these primitives. Needs the optional 'anthropic' package
+        (pip install 'hunch-mcp[agent]'); created lazily so plain use never imports it."""
+        if self._agent is None:
+            from .agent import Agent
+            self._agent = Agent(self)
+        return self._agent
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
 

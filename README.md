@@ -118,6 +118,47 @@ foreground/cursor/keyboard), `cdp_port`.
 
 Runnable scripts live in [`examples/`](examples/).
 
+## Agent loop (`mac.agent`)
+
+The instance SDK gives you deterministic primitives. The **agent loop** puts an LLM in the driver's seat:
+you hand it a task in plain English and Claude drives the Mac through those same primitives —
+Scrapybara's `act()`, but on *your* machine with *your* logged-in apps. It's an optional extra
+(keeps the base install free of the model SDK):
+
+```bash
+pip install 'hunch-mcp[agent]'
+export ANTHROPIC_API_KEY=sk-ant-...     # or: ant auth login
+```
+
+```python
+from hunch import Hunch
+
+mac = Hunch()
+result = mac.agent.run("reply to Sarah's latest email, but don't send it")
+print(result.text)          # Claude's final summary
+print(result.turns, result.usage)
+```
+
+- **Watch it work** with an `on_event(kind, data)` callback — `kind` is one of `text` (Claude's
+  reasoning), `tool` (`{name, input}`), `tool_result` (preview), `done` (final text), `error`.
+- **Continuation**: follow-up `act()` calls keep the conversation (Claude still knows which email
+  is Sarah's); `mac.agent.reset()` starts a fresh task.
+- **Mix layers freely**: call `mac.snapshot(...)` / `mac.clipboard.get()` deterministically around
+  `mac.agent.run(...)` — the thing a cloud sandbox can't do on your real machine.
+- **Knobs**: `run(task, model="claude-opus-4-8", max_turns=40, effort=None, on_event=None,
+  system_suffix="")`. `AgentResult` has `text`, `turns`, `stop_reason`, `usage`, `aborted`.
+- **Safety**: the instance's gate config governs the loop. The default `confirm="dialog"` pops a
+  real "Go ahead?" dialog before any focus-stealing or risky step — good when you're at the
+  machine, but a gated action can stall an unattended run for the dialog's timeout. For cron jobs
+  use `Hunch(confirm="off")` and accept the risk; Claude still asks *you* (via `notify_user`)
+  before irreversible or outward actions like sending a message. A declined gate comes back to the
+  model as a `REFUSED` result, so the loop adapts instead of crashing.
+- **Cost**: each turn resends the tree-heavy history; prompt caching is on by default, so cached
+  input is ~10× cheaper — but long autonomous runs still add up. `max_turns` caps it.
+
+Other models: the agent loop is Claude-only, but the instance-SDK primitives are provider-agnostic —
+wire `mac.snapshot()` / `mac.act()` into your own OpenAI/Gemini/etc. agent loop as tools.
+
 ## Credentials: agents use them, never see them
 
 ```
