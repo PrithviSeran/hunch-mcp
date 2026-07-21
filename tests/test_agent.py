@@ -417,6 +417,50 @@ def test_auth_resolution_order(monkeypatch):
     assert not auth.subscription_available()
 
 
+def test_auth_status_public_api(monkeypatch):
+    import hunch.auth as auth
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setattr(auth, "_keychain_present", lambda s: s == auth.CLAUDE_CODE_SERVICE)
+    monkeypatch.setattr(auth, "_keychain_read", lambda s: None)
+    monkeypatch.setattr(auth, "claude_login_details",
+                        lambda cli=None: {"email": "dev@x.com", "subscriptionType": "pro"})
+    st = auth.status()
+    assert st.source == "claude_code" and st.subscription_ready
+    assert st.email == "dev@x.com" and st.plan == "pro"
+    assert auth.login() == st                     # already signed in -> no-op, same status
+
+
+def test_auth_login_token_and_failure(monkeypatch):
+    import hunch.auth as auth
+    saved = {}
+    monkeypatch.setattr(auth, "_keychain_write", lambda s, v: saved.update({s: v}))
+    monkeypatch.setattr(auth, "_keychain_present", lambda s: False)
+    monkeypatch.setattr(auth, "_keychain_read", lambda s: saved.get(s))
+    monkeypatch.setattr(auth, "claude_login_details", lambda cli=None: None)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    st = auth.login(token="sk-ant-oat-test")      # headless path: token -> Keychain
+    assert saved[auth.HUNCH_TOKEN_SERVICE] == "sk-ant-oat-test"
+    assert st.source == "hunch_token" and st.subscription_ready
+    saved.clear()
+    monkeypatch.setattr(auth, "interactive_login", lambda: (False, "browser flow failed"))
+    try:
+        auth.login()
+        assert False, "expected HunchError"
+    except auth.HunchError as e:
+        assert "browser flow failed" in str(e)
+
+
+def test_top_level_auth_exports_stay_light():
+    """hunch.login/logout/AuthStatus and the exceptions must not pull pyobjc."""
+    import subprocess
+    code = ("import sys, hunch; "
+            "hunch.AuthStatus, hunch.login, hunch.logout, hunch.HunchError; "
+            "sys.exit(1 if any(m in sys.modules for m in ('AppKit', 'Quartz')) else 0)")
+    assert subprocess.run([sys.executable, "-c", code]).returncode == 0
+
+
 def test_ensure_subscription_env_exports_hunch_token(monkeypatch):
     import os
     import hunch.auth as auth

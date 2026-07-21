@@ -1,9 +1,17 @@
 """auth.py — the EXPLICIT sign-in surface for the agent loop's subscription backend.
 
-Nothing about subscription auth hides inside the agent module: `hunch login`,
-`hunch logout`, and `hunch login --status` all route through here, and the agent
-loop consults the same one function (`resolve()`) the CLI prints. Resolution
-order — first hit wins:
+Nothing about subscription auth hides inside the agent module, and the surface is
+PUBLIC API, not just a CLI: developers embedding hunch-sdk drive sign-in from
+their own code —
+
+    import hunch
+    st = hunch.auth.status()          # AuthStatus: source / email / plan
+    if not st.subscription_ready:
+        hunch.login()                 # browser OAuth (or login(token=...) headless)
+
+`hunch login` / `hunch logout` / `hunch login --status` are thin CLI callers of
+the same functions, and the agent loop consults the same one resolver
+(`resolve()`). Resolution order — first hit wins:
 
   1. ANTHROPIC_API_KEY          -> metered API backend (anthropic SDK)
   2. CLAUDE_CODE_OAUTH_TOKEN    -> subscription (explicit env token)
@@ -20,6 +28,9 @@ import json
 import os
 import shutil
 import subprocess
+from dataclasses import dataclass
+
+from .errors import HunchError
 
 HUNCH_TOKEN_SERVICE = "com.hunch.claude-token"
 CLAUDE_CODE_SERVICE = "Claude Code-credentials"
@@ -116,7 +127,56 @@ def ensure_subscription_env():
         os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = token
 
 
-# ── login / logout flows (called by cli.py; interactive I/O stays there) ───────
+# ── public SDK surface (also exported as hunch.login / hunch.logout) ───────────
+
+@dataclass
+class AuthStatus:
+    """What `hunch login --status` prints, as data. source is one of 'api_key',
+    'env_token', 'claude_code', 'hunch_token', or None (no credentials)."""
+    source: str | None
+    description: str
+    email: str | None = None
+    plan: str | None = None
+
+    @property
+    def subscription_ready(self):
+        """True when the subscription backend can run without further sign-in."""
+        return self.source in ("env_token", "claude_code", "hunch_token")
+
+
+def status(details=True):
+    """The credential the agent loop would use, as an AuthStatus. details=True also
+    asks the claude CLI who the subscription sign-in belongs to (email/plan)."""
+    source, desc = resolve()
+    email = plan = None
+    if details and source in ("env_token", "claude_code", "hunch_token"):
+        info = claude_login_details()
+        if info:
+            email, plan = info.get("email"), info.get("subscriptionType")
+    return AuthStatus(source, desc, email, plan)
+
+
+def login(token=None):
+    """Sign in for the subscription backend, from Python. Already signed in -> no-op.
+    token=None runs the interactive browser OAuth (needs a TTY-ish environment);
+    token="sk-ant-oat..." stores a long-lived token (from `claude setup-token`) in
+    the Keychain — the headless path. Returns the resulting AuthStatus; raises
+    HunchError when sign-in cannot complete."""
+    if token:
+        ok, msg = save_token(token)
+        if not ok:
+            raise HunchError(msg)
+        return status()
+    st = status(details=False)
+    if st.subscription_ready:
+        return status()
+    ok, msg = interactive_login()
+    if not ok:
+        raise HunchError(msg)
+    return status()
+
+
+# ── login / logout flows (shared by the CLI and login() above) ─────────────────
 
 def interactive_login():
     """Run the browser OAuth sign-in via the claude CLI (inherited stdio).

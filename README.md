@@ -162,6 +162,18 @@ any time with `hunch login --status`, force it with `mac.agent.run(task, backend
 `hunch login --token` to paste a long-lived token from `claude setup-token`. With no credentials
 at all, `run()` raises a `HunchError` naming both fixes — it never guesses.
 
+Building on the SDK? The whole surface is **public Python API** too — the CLI is just one caller
+of it — so your app owns its own onboarding:
+
+```python
+import hunch
+
+st = hunch.auth.status()           # AuthStatus: .source / .email / .plan / .subscription_ready
+if not st.subscription_ready:
+    hunch.login()                  # browser OAuth; or hunch.login(token="sk-ant-oat-...") headless
+hunch.logout()                     # removes what login() stored, and only that
+```
+
 - **Watch it work** with an `on_event(kind, data)` callback — `kind` is one of `text` (Claude's
   reasoning), `tool` (`{name, input}`), `tool_result` (preview), `done` (final text), `error`.
 - **Continuation**: follow-up `run()` calls keep the conversation (Claude still knows which email

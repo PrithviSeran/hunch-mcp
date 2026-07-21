@@ -19,21 +19,9 @@ from AppKit import NSWorkspace
 from . import policy
 from .local_mac import set_focus_reason, suppress_focus_notice
 
-
-class HunchError(Exception):
-    """Base for errors raised by the Hunch SDK layer."""
-
-
-class ApprovalDenied(HunchError):
-    """The user declined a consent dialog (or a gate refused the action)."""
-
-
-class AccessibilityNotGranted(HunchError, PermissionError):
-    """This process is not trusted for Accessibility, so tree reads/actions can't work."""
-
-
-class WebNotOpen(HunchError):
-    """A .web method was called before .web.open()."""
+# Exceptions live in errors.py (dependency-free, importable by auth/cli without pyobjc);
+# re-exported here so `from .gate import HunchError` keeps working everywhere.
+from .errors import HunchError, ApprovalDenied, AccessibilityNotGranted, WebNotOpen  # noqa: F401
 
 
 def as_str(s):

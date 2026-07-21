@@ -173,17 +173,14 @@ def cmd_creds(args):
 
 def _print_auth_status():
     from . import auth
-    source, desc = auth.resolve()
-    print(f"agent auth: {desc}")
-    if source in ("claude_code", "env_token", "hunch_token"):
-        info = auth.claude_login_details()
-        if info:
-            plan = info.get("subscriptionType")
-            print(f"  account: {info.get('email', '?')}" + (f"  ({plan} plan)" if plan else ""))
-    elif source == "api_key":
+    st = auth.status()   # the same public API SDK users call: hunch.auth.status()
+    print(f"agent auth: {st.description}")
+    if st.email:
+        print(f"  account: {st.email}" + (f"  ({st.plan} plan)" if st.plan else ""))
+    elif st.source == "api_key":
         print("  note: the API key wins the auto-pick; `hunch login` credentials are used only "
               "when it is unset or backend='subscription' is passed explicitly.")
-    return 0 if source else 1
+    return 0 if st.source else 1
 
 
 def cmd_login(args):
