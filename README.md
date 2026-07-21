@@ -155,9 +155,17 @@ Auth is an explicit, visible surface — nothing is scavenged silently. Two ways
 | `subscription` | `hunch login` — the same browser OAuth Claude Code uses. Already signed into Claude Code on this Mac? You're done; Hunch reuses that. | your Claude plan (no per-token cost) |
 | `api` | `export ANTHROPIC_API_KEY=sk-ant-...` | metered API tokens |
 
+You choose the backend where it suits your code — at construction, or per call:
+
+```python
+mac = Hunch(agent_backend="subscription")            # this instance's agent = subscription
+mac.agent.run(task)                                  # ...no per-call ceremony
+mac.agent.run(other_task, backend="api")             # per-call override still wins
+```
+
 The default `backend="auto"` picks by credentials, in a fixed documented order (API key →
 `CLAUDE_CODE_OAUTH_TOKEN` env → Claude Code sign-in → `hunch login --token` token) — inspect it
-any time with `hunch login --status`, force it with `mac.agent.run(task, backend="subscription")`.
+any time with `hunch login --status`.
 `hunch logout` removes what `hunch login` stored (and only that); headless boxes can use
 `hunch login --token` to paste a long-lived token from `claude setup-token`. With no credentials
 at all, `run()` raises a `HunchError` naming both fixes — it never guesses.

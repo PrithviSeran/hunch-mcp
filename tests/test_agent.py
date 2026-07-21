@@ -482,6 +482,23 @@ def test_lazy_agent_property():
     a1 = h.agent
     a2 = h.agent
     assert a1 is a2 and isinstance(a1, Agent)   # same instance, lazily created
+    assert a1.backend == "auto"                 # the default
+
+
+def test_agent_backend_constructor_option():
+    """Developers choose the backend when constructing the instance; run(backend=)
+    still overrides per call, and a bad value fails fast at construction."""
+    from hunch.sdk import Hunch
+    h = Hunch(check_permissions=False, confirm="off", agent_backend="subscription")
+    assert h.agent.backend == "subscription"
+    assert h.agent._resolve_backend(None) == "subscription"    # constructor default used
+    assert h.agent._resolve_backend("api") == "api"            # per-run override wins
+    assert Agent(_FakeHunch(), backend="api").backend == "api" # direct construction too
+    try:
+        Hunch(check_permissions=False, confirm="off", agent_backend="gpt")
+        assert False, "expected HunchError"
+    except agent_mod.HunchError as e:
+        assert "agent_backend" in str(e)
 
 
 if __name__ == "__main__":

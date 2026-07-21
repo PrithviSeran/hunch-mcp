@@ -57,8 +57,16 @@ class Hunch:
 
     def __init__(self, app="Finder", confirm="dialog", check_permissions=True,
                  simultaneous=False, cdp_port=None, walk_workers=None,
-                 snapshot_max_depth=None, snapshot_max_nodes=None):
+                 snapshot_max_depth=None, snapshot_max_nodes=None,
+                 agent_backend="auto"):
+        """agent_backend: which LLM transport `mac.agent` uses — 'api' (anthropic SDK on a
+        metered ANTHROPIC_API_KEY), 'subscription' (claude-agent-sdk on the `hunch login`
+        Claude sign-in), or 'auto' (pick by credentials). Overridable per call via
+        mac.agent.run(..., backend=...)."""
         self._gate = gate.Gate(confirm=confirm)   # validates confirm
+        if agent_backend not in ("auto", "api", "subscription"):
+            raise HunchError(f"unknown agent_backend {agent_backend!r} — "
+                             "use 'api', 'subscription', or 'auto'")
         if check_permissions:
             self._check_accessibility()
         # ONE persistent computer per instance, so element [refs] survive snapshot -> act.
@@ -69,7 +77,8 @@ class Hunch:
         self.web = Web(self, cdp_port or CDP_PORT)
         self.files = Files(self)
         self.clipboard = Clipboard(self)
-        self._agent = None   # the agent loop, created lazily so `anthropic` stays optional
+        self._agent = None   # the agent loop, created lazily so the LLM SDKs stay optional
+        self._agent_backend = agent_backend
 
     @staticmethod
     def _check_accessibility():
@@ -215,11 +224,12 @@ class Hunch:
     def agent(self):
         """The agent loop: `mac.agent.run(task=...)` runs an LLM loop that drives this Mac
         through these primitives. Two backends (pip install 'hunch-sdk[agent]' brings both):
-        your Claude subscription after `hunch login`, or a metered ANTHROPIC_API_KEY —
-        auto-picked, or forced with backend=. Created lazily so plain use imports neither."""
+        your Claude subscription after `hunch login`, or a metered ANTHROPIC_API_KEY.
+        Chosen at construction via Hunch(agent_backend=...), by credentials on 'auto', or
+        per call via run(backend=...). Created lazily so plain use imports neither SDK."""
         if self._agent is None:
             from .agent import Agent
-            self._agent = Agent(self)
+            self._agent = Agent(self, backend=self._agent_backend)
         return self._agent
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
