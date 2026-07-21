@@ -22,6 +22,8 @@ _LAZY = {
     "login": ".auth",         # sign in for the agent loop's subscription backend
     "logout": ".auth",
     "AuthStatus": ".auth",
+    "ApiKey": ".auth",        # injected agent-loop credentials (developer-first)
+    "OAuthToken": ".auth",
 }
 
 

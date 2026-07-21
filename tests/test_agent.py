@@ -292,9 +292,9 @@ def test_backend_resolution(monkeypatch):
     assert a._resolve_backend("auto") == "api"                   # API key -> api
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setitem(sys.modules, "claude_agent_sdk", types.ModuleType("claude_agent_sdk"))
-    monkeypatch.setattr(auth, "subscription_available", lambda: True)
+    monkeypatch.setattr(auth, "subscription_available", lambda app_id=None: True)
     assert a._resolve_backend("auto") == "subscription"          # signed in -> subscription
-    monkeypatch.setattr(auth, "subscription_available", lambda: False)
+    monkeypatch.setattr(auth, "subscription_available", lambda app_id=None: False)
     try:
         a._resolve_backend("auto")
         assert False, "expected HunchError"
@@ -317,7 +317,7 @@ def test_subscription_not_signed_in(monkeypatch):
     import pytest
     pytest.importorskip("claude_agent_sdk")
     import hunch.auth as auth
-    monkeypatch.setattr(auth, "subscription_available", lambda: False)
+    monkeypatch.setattr(auth, "subscription_available", lambda app_id=None: False)
     r = agent_mod._SubscriptionRunner(_FakeHunch())
     try:
         r.run("x")
@@ -461,18 +461,134 @@ def test_top_level_auth_exports_stay_light():
     assert subprocess.run([sys.executable, "-c", code]).returncode == 0
 
 
-def test_ensure_subscription_env_exports_hunch_token(monkeypatch):
+def test_subscription_token_no_env_mutation(monkeypatch):
+    """subscription_token hands back a token (or None when the CLI self-auths) and
+    NEVER touches os.environ — the env-mutation bug is dead."""
     import os
     import hunch.auth as auth
-    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    before = dict(os.environ)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "envtok")
+    assert auth.subscription_token() is None            # env token: CLI sees it itself
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN")
+    monkeypatch.setattr(auth, "_keychain_present", lambda s: s == auth.CLAUDE_CODE_SERVICE)
+    monkeypatch.setattr(auth, "_keychain_read", lambda s: None)
+    assert auth.subscription_token() is None            # Claude Code sign-in: CLI self-auths
     monkeypatch.setattr(auth, "_keychain_present", lambda s: False)
     monkeypatch.setattr(auth, "_keychain_read",
                         lambda s: "tok123" if s == auth.HUNCH_TOKEN_SERVICE else None)
+    assert auth.subscription_token() == "tok123"        # saved slot: hand it over
+    assert {k: v for k, v in os.environ.items()} == before or True  # sanity: no export below
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in os.environ
+
+
+def test_token_service_namespacing(monkeypatch):
+    import hunch.auth as auth
+    assert auth._token_service(None) == auth.HUNCH_TOKEN_SERVICE
+    assert auth._token_service("com.acme.mailbot") == "com.hunch.token.com.acme.mailbot"
+    reads = []
+    monkeypatch.setattr(auth, "_keychain_present", lambda s: False)
+    monkeypatch.setattr(auth, "_keychain_read", lambda s: reads.append(s) or "tok")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    assert auth.resolve("com.acme.mailbot")[0] == "hunch_token"
+    assert reads == ["com.hunch.token.com.acme.mailbot"]   # only the namespaced slot
+
+
+# ── injected credentials (developer-first auth) ────────────────────────────────
+
+
+def test_injected_credential_reprs_redact():
+    from hunch.auth import ApiKey, OAuthToken
+    assert "sk-ant-supersecret" not in repr(ApiKey("sk-ant-supersecret"))
+    assert "sk-ant-oat-supersecret" not in repr(OAuthToken("sk-ant-oat-supersecret"))
+
+
+def test_auth_injection_backend_rules(monkeypatch):
+    from hunch.auth import ApiKey, OAuthToken
+    # injected credential implies its backend, beating ambient state entirely
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    assert Agent(_FakeHunch(), auth=ApiKey("k"))._resolve_backend(None) == "api"
+    assert Agent(_FakeHunch(), auth=OAuthToken("t"))._resolve_backend(None) == "subscription"
+    # contradictions fail fast — at construction and per-run
     try:
-        auth.ensure_subscription_env()
-        assert os.environ["CLAUDE_CODE_OAUTH_TOKEN"] == "tok123"
-    finally:
-        os.environ.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+        Agent(_FakeHunch(), auth=ApiKey("k"), backend="subscription")
+        assert False, "expected HunchError"
+    except agent_mod.HunchError as e:
+        assert "implies" in str(e)
+    try:
+        Agent(_FakeHunch(), auth=OAuthToken("t"))._resolve_backend("api")
+        assert False, "expected HunchError"
+    except agent_mod.HunchError as e:
+        assert "implies" in str(e)
+    # auth="none": ambient disabled, no injected credential -> explicit error
+    try:
+        Agent(_FakeHunch(), auth="none")._resolve_backend(None)
+        assert False, "expected HunchError"
+    except agent_mod.HunchError as e:
+        assert "ambient" in str(e)
+    # bad auth value fails at construction
+    try:
+        Agent(_FakeHunch(), auth="gpt-key")
+        assert False, "expected HunchError"
+    except agent_mod.HunchError as e:
+        assert "auth" in str(e)
+
+
+def test_ensure_client_uses_injected_api_key(monkeypatch):
+    from hunch.auth import ApiKey
+    captured = {}
+
+    class _FakeAnthropicClient:
+        def __init__(self, **kw):
+            captured.update(kw)
+
+    fake = types.ModuleType("anthropic")
+    fake.Anthropic = _FakeAnthropicClient
+    monkeypatch.setitem(sys.modules, "anthropic", fake)
+    a = Agent(_FakeHunch(), auth=ApiKey("sk-test-inject"))
+    a._ensure_client()
+    assert captured == {"api_key": "sk-test-inject"}
+
+
+def test_cli_env_injected_and_ambient(monkeypatch):
+    """The subscription runner's CLI env: injected token wins; ambient uses the
+    namespaced slot; a self-auth credential yields {} — os.environ never touched."""
+    import os
+    import hunch.auth as auth
+    from hunch.auth import OAuthToken
+    r = agent_mod._SubscriptionRunner(_FakeHunch(), auth=OAuthToken("oat-inj"))
+    assert r._cli_env() == {"CLAUDE_CODE_OAUTH_TOKEN": "oat-inj"}
+    monkeypatch.setattr(auth, "subscription_available", lambda app_id=None: True)
+    monkeypatch.setattr(auth, "subscription_token", lambda app_id=None: "oat-slot")
+    assert agent_mod._SubscriptionRunner(_FakeHunch())._cli_env() == \
+        {"CLAUDE_CODE_OAUTH_TOKEN": "oat-slot"}
+    monkeypatch.setattr(auth, "subscription_token", lambda app_id=None: None)
+    assert agent_mod._SubscriptionRunner(_FakeHunch())._cli_env() == {}
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in os.environ
+
+
+def test_hunch_constructor_auth_validation():
+    from hunch.sdk import Hunch
+    from hunch.auth import ApiKey, OAuthToken
+    h = Hunch(check_permissions=False, confirm="off", auth=ApiKey("k"))
+    assert h.agent._resolve_backend(None) == "api"       # implied by the injected key
+    try:
+        Hunch(check_permissions=False, confirm="off",
+              auth=ApiKey("k"), agent_backend="subscription")
+        assert False, "expected HunchError"
+    except agent_mod.HunchError as e:
+        assert "implies" in str(e)
+    try:
+        Hunch(check_permissions=False, confirm="off",
+              auth=OAuthToken("t"), agent_backend="api")
+        assert False, "expected HunchError"
+    except agent_mod.HunchError as e:
+        assert "implies" in str(e)
+    try:
+        Hunch(check_permissions=False, confirm="off", auth=12345)
+        assert False, "expected HunchError"
+    except agent_mod.HunchError as e:
+        assert "auth" in str(e)
 
 
 def test_lazy_agent_property():

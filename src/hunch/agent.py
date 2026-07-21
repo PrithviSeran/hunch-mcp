@@ -391,8 +391,10 @@ class _SubscriptionRunner:
     run_coroutine_threadsafe, so Agent.run() stays synchronous. The connected client
     is kept across run() calls (continuation) while the options are unchanged."""
 
-    def __init__(self, hunch):
+    def __init__(self, hunch, auth=None, app_id=None):
         self._h = hunch
+        self._auth = auth              # OAuthToken (injected) or None (ambient)
+        self._app_id = app_id
         self._loop = None
         self._thread = None
         self._client = None
@@ -409,8 +411,22 @@ class _SubscriptionRunner:
             self._thread.start()
         return asyncio.run_coroutine_threadsafe(coro, self._loop).result()
 
+    # — auth: what (if anything) to hand the CLI subprocess. NEVER touches os.environ;
+    # the token rides in the per-client options.env (merged over the inherited env). —
+    def _cli_env(self):
+        from . import auth as auth_mod
+        from .auth import OAuthToken
+        if isinstance(self._auth, OAuthToken):
+            return {"CLAUDE_CODE_OAUTH_TOKEN": self._auth.value}
+        if not auth_mod.subscription_available(self._app_id):
+            raise HunchError("not signed in — call hunch.login() to use your Claude "
+                             "subscription, or set ANTHROPIC_API_KEY for the metered API "
+                             "backend")
+        token = auth_mod.subscription_token(self._app_id)
+        return {"CLAUDE_CODE_OAUTH_TOKEN": token} if token else {}
+
     # — options —
-    def _options(self, sdk, model, max_turns, system_suffix, effort):
+    def _options(self, sdk, model, max_turns, system_suffix, effort, env):
         async def _allow_hunch_only(tool_name, input_data, context):
             if tool_name.startswith("mcp__hunch__"):
                 return sdk.PermissionResultAllow()
@@ -430,6 +446,7 @@ class _SubscriptionRunner:
             model=model,                       # None -> the subscription's default model
             max_turns=max_turns,
             effort=effort,
+            env=env,                           # {} or the injected/namespaced OAuth token
             max_buffer_size=16 * 1024 * 1024,  # snapshots/screenshots exceed the 1MB default
         )
 
@@ -469,18 +486,14 @@ class _SubscriptionRunner:
         except ImportError as e:
             raise HunchError("the subscription backend needs the optional 'claude-agent-sdk' "
                              "package — install it with: pip install 'hunch-sdk[agent]'") from e
-        from . import auth
-        if not auth.subscription_available():
-            raise HunchError("not signed in — call hunch.login() to use your Claude subscription, "
-                             "or set ANTHROPIC_API_KEY for the metered API backend")
-        auth.ensure_subscription_env()   # export a Hunch-saved token for the CLI subprocess
+        env = self._cli_env()            # injected token, namespaced slot, or {} (CLI self-auth)
 
         key = (model, max_turns, system_suffix, effort)
         if self._client is not None and key != self._opts_key:
             self.reset()                 # options changed -> fresh conversation
         if self._client is None:
             client = sdk.ClaudeSDKClient(
-                options=self._options(sdk, model, max_turns, system_suffix, effort))
+                options=self._options(sdk, model, max_turns, system_suffix, effort, env))
             self._call(client.connect())
             self._client, self._opts_key = client, key
         emit = on_event or (lambda kind, data: None)
@@ -516,17 +529,47 @@ class Agent:
     """The agent loop. Created lazily as `Hunch.agent`. Holds conversation state across
     run() calls (continuation); call reset() to start a fresh task."""
 
-    def __init__(self, hunch, client=None, backend="auto"):
+    def __init__(self, hunch, client=None, backend="auto", auth=None):
+        from .auth import ApiKey, OAuthToken
         self._h = hunch
         self._client = client          # test seam; None -> lazily anthropic.Anthropic()
         self.backend = backend         # "auto" | "api" | "subscription" (per-run override too)
+        self.auth = auth               # None (ambient) | ApiKey | OAuthToken | "none"
         self.messages = []
         self._sub = None               # _SubscriptionRunner, built on first subscription run
+        if not (auth is None or auth == "none" or isinstance(auth, (ApiKey, OAuthToken))):
+            raise HunchError(f"unknown auth {auth!r} — pass hunch.ApiKey(...), "
+                             "hunch.OAuthToken(...), 'none', or None (ambient)")
+        implied = self._implied_backend()
+        if implied and backend not in ("auto", implied):
+            raise HunchError(f"auth={type(auth).__name__}(...) implies the {implied!r} backend, "
+                             f"but backend={backend!r} was requested")
+
+    @property
+    def _app_id(self):
+        return getattr(self._h, "_app_id", None)   # set by Hunch when namespaced
+
+    def _implied_backend(self):
+        from .auth import ApiKey, OAuthToken
+        if isinstance(self.auth, ApiKey):
+            return "api"
+        if isinstance(self.auth, OAuthToken):
+            return "subscription"
+        return None
 
     def _resolve_backend(self, backend):
-        """Explicit choice wins; "auto" picks by credentials — the SAME order
-        hunch.auth.status() reports (hunch.auth.resolve)."""
-        b = backend or self.backend or "auto"
+        """Injected credentials imply their backend; an explicit choice wins otherwise;
+        "auto" picks by ambient credentials — the SAME order hunch.auth.status() reports.
+        auth="none" means never scavenge: with no injected credential, raise."""
+        implied = self._implied_backend()
+        b = backend or implied or self.backend or "auto"
+        if implied and b != implied:
+            raise HunchError(f"auth={type(self.auth).__name__}(...) implies the {implied!r} "
+                             f"backend, but backend={b!r} was requested")
+        if self.auth == "none" and implied is None:
+            raise HunchError("auth='none' — ambient credentials are disabled for this instance; "
+                             "pass hunch.ApiKey(...) or hunch.OAuthToken(...) (or auth=None "
+                             "to allow ambient resolution)")
         if b in ("api", "subscription"):
             return b
         if b != "auto":
@@ -541,7 +584,7 @@ class Agent:
             have_sdk = True
         except ImportError:
             have_sdk = False
-        if have_sdk and auth.subscription_available():
+        if have_sdk and auth.subscription_available(self._app_id):
             return "subscription"
         raise HunchError(
             "no credentials for the agent loop — call hunch.login() to use your Claude "
@@ -563,12 +606,16 @@ class Agent:
 
     def _ensure_client(self):
         if self._client is None:
+            from .auth import ApiKey
             try:
                 import anthropic
             except ImportError as e:
                 raise HunchError("the agent loop needs the optional 'anthropic' package — "
                                  "install it with: pip install 'hunch-sdk[agent]'") from e
-            self._client = anthropic.Anthropic()   # env key / auth token / ant profile
+            if isinstance(self.auth, ApiKey):      # injected key, nothing ambient
+                self._client = anthropic.Anthropic(api_key=self.auth.value)
+            else:
+                self._client = anthropic.Anthropic()   # env key / auth token / ant profile
         return self._client
 
     def _system(self, system_suffix):
@@ -606,7 +653,10 @@ class Agent:
         subscription CLI manages its own output limits)."""
         if self._resolve_backend(backend) == "subscription":
             if self._sub is None:
-                self._sub = _SubscriptionRunner(self._h)
+                from .auth import OAuthToken
+                self._sub = _SubscriptionRunner(
+                    self._h, auth=self.auth if isinstance(self.auth, OAuthToken) else None,
+                    app_id=self._app_id)
             return self._sub.run(task, model=model, max_turns=max_turns, on_event=on_event,
                                  system_suffix=system_suffix, effort=effort)
 

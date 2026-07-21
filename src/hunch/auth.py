@@ -34,6 +34,35 @@ HUNCH_TOKEN_SERVICE = "com.hunch.claude-token"
 CLAUDE_CODE_SERVICE = "Claude Code-credentials"
 
 
+def _token_service(app_id=None):
+    """Keychain service for the saved OAuth token. app_id (pure namespacing) gives an
+    app its own slot so two apps built on the SDK can't log each other out."""
+    return f"com.hunch.token.{app_id}" if app_id else HUNCH_TOKEN_SERVICE
+
+
+# ── injected credentials (developer-first: pass exactly the credential you manage) ─
+
+@dataclass(frozen=True)
+class ApiKey:
+    """A metered Anthropic API key, injected per-instance: Hunch(auth=ApiKey("sk-ant-...")).
+    Forces the agent loop's 'api' backend; ambient resolution is skipped entirely."""
+    value: str
+
+    def __repr__(self):  # never leak the key into logs/tracebacks
+        return "ApiKey('sk-ant-…redacted')"
+
+
+@dataclass(frozen=True)
+class OAuthToken:
+    """A Claude-subscription OAuth token (e.g. from `claude setup-token`), injected
+    per-instance: Hunch(auth=OAuthToken("sk-ant-oat-...")). Forces the 'subscription'
+    backend; ambient resolution is skipped entirely."""
+    value: str
+
+    def __repr__(self):
+        return "OAuthToken('sk-ant-oat-…redacted')"
+
+
 # ── keychain (macOS `security`) ────────────────────────────────────────────────
 
 def _keychain_read(service):
@@ -92,37 +121,36 @@ def claude_login_details(cli=None):
 
 # ── resolution (single source of truth; the agent loop calls this too) ─────────
 
-def resolve():
+def resolve(app_id=None):
     """Which credential the agent loop would use, as
     (source, human_description) — source is one of 'api_key', 'env_token',
-    'claude_code', 'hunch_token', or None."""
+    'claude_code', 'hunch_token', or None. app_id namespaces the saved-token slot."""
     if os.environ.get("ANTHROPIC_API_KEY"):
         return "api_key", "ANTHROPIC_API_KEY env var (metered API)"
     if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
         return "env_token", "CLAUDE_CODE_OAUTH_TOKEN env var (Claude subscription)"
     if _keychain_present(CLAUDE_CODE_SERVICE):
         return "claude_code", "Claude Code sign-in in the Keychain (Claude subscription)"
-    if _keychain_read(HUNCH_TOKEN_SERVICE):
+    if _keychain_read(_token_service(app_id)):
         return "hunch_token", "token saved by hunch.login(token=...) (Claude subscription)"
     return None, "no credentials — call hunch.login() or set ANTHROPIC_API_KEY"
 
 
-def subscription_available():
+def subscription_available(app_id=None):
     """True when the subscription backend has a usable credential."""
-    return resolve()[0] in ("env_token", "claude_code", "hunch_token")
+    return resolve(app_id)[0] in ("env_token", "claude_code", "hunch_token")
 
 
-def ensure_subscription_env():
-    """Make the subscription credential visible to claude-agent-sdk subprocesses.
-    An env token or a Claude Code keychain login needs nothing (the CLI reads
-    both itself); a Hunch-saved token is exported as CLAUDE_CODE_OAUTH_TOKEN."""
+def subscription_token(app_id=None):
+    """The token the claude CLI subprocess needs handed to it, or None when it can
+    find the credential by itself (env token in the inherited env, or a Claude Code
+    keychain sign-in). NEVER mutates os.environ — the caller passes this via the
+    SDK's per-client options.env."""
     if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
-        return
+        return None
     if _keychain_present(CLAUDE_CODE_SERVICE):
-        return
-    token = _keychain_read(HUNCH_TOKEN_SERVICE)
-    if token:
-        os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = token
+        return None
+    return _keychain_read(_token_service(app_id))
 
 
 # ── public SDK surface (also exported as hunch.login / hunch.logout) ───────────
@@ -142,10 +170,11 @@ class AuthStatus:
         return self.source in ("env_token", "claude_code", "hunch_token")
 
 
-def status(details=True):
+def status(details=True, app_id=None):
     """The credential the agent loop would use, as an AuthStatus. details=True also
-    asks the claude CLI who the subscription sign-in belongs to (email/plan)."""
-    source, desc = resolve()
+    asks the claude CLI who the subscription sign-in belongs to (email/plan).
+    app_id namespaces the saved-token slot (pure naming — same semantics)."""
+    source, desc = resolve(app_id)
     email = plan = None
     if details and source in ("env_token", "claude_code", "hunch_token"):
         info = claude_login_details()
@@ -154,24 +183,24 @@ def status(details=True):
     return AuthStatus(source, desc, email, plan)
 
 
-def login(token=None):
+def login(token=None, app_id=None):
     """Sign in for the subscription backend, from Python. Already signed in -> no-op.
     token=None runs the interactive browser OAuth (needs a TTY-ish environment);
     token="sk-ant-oat..." stores a long-lived token (from `claude setup-token`) in
-    the Keychain — the headless path. Returns the resulting AuthStatus; raises
-    HunchError when sign-in cannot complete."""
+    the Keychain — the headless path. app_id stores to that app's own slot. Returns
+    the resulting AuthStatus; raises HunchError when sign-in cannot complete."""
     if token:
-        ok, msg = save_token(token)
+        ok, msg = save_token(token, app_id)
         if not ok:
             raise HunchError(msg)
-        return status()
-    st = status(details=False)
+        return status(app_id=app_id)
+    st = status(details=False, app_id=app_id)
     if st.subscription_ready:
-        return status()
+        return status(app_id=app_id)
     ok, msg = interactive_login()
     if not ok:
         raise HunchError(msg)
-    return status()
+    return status(app_id=app_id)
 
 
 # ── login / logout flows (shared by the CLI and login() above) ─────────────────
@@ -193,26 +222,29 @@ def interactive_login():
     return True, f"signed in as {who}" + (f" ({plan} plan)" if plan else "")
 
 
-def save_token(token):
+def save_token(token, app_id=None):
     """Store a long-lived OAuth token (from `claude setup-token`) in the Keychain
-    under com.hunch.claude-token. Returns (ok, message)."""
+    under the (possibly app-namespaced) Hunch slot. Returns (ok, message)."""
     token = (token or "").strip()
     if not token:
         return False, "empty token — nothing saved."
-    _keychain_write(HUNCH_TOKEN_SERVICE, token)
-    return True, (f"token saved to the macOS Keychain ({HUNCH_TOKEN_SERVICE}). "
+    service = _token_service(app_id)
+    _keychain_write(service, token)
+    return True, (f"token saved to the macOS Keychain ({service}). "
                   "The agent loop will use your Claude subscription.")
 
 
-def logout():
-    """Remove the Hunch-saved token. Never touches the Claude Code sign-in or env
-    vars — reports what (if anything) still authenticates. Returns messages list."""
+def logout(app_id=None):
+    """Remove the Hunch-saved token (for this app_id's slot only). Never touches the
+    Claude Code sign-in or env vars — reports what (if anything) still
+    authenticates. Returns messages list."""
     msgs = []
-    if _keychain_delete(HUNCH_TOKEN_SERVICE):
-        msgs.append(f"removed the Hunch-saved token ({HUNCH_TOKEN_SERVICE}) from the Keychain.")
+    service = _token_service(app_id)
+    if _keychain_delete(service):
+        msgs.append(f"removed the saved token ({service}) from the Keychain.")
     else:
-        msgs.append("no Hunch-saved token to remove.")
-    source, desc = resolve()
+        msgs.append("no saved token to remove.")
+    source, desc = resolve(app_id)
     if source == "claude_code":
         msgs.append("note: your Claude Code sign-in still authenticates the agent loop — "
                     "it belongs to Claude Code, so sign out there (`claude auth logout` or "

@@ -58,15 +58,30 @@ class Hunch:
     def __init__(self, app="Finder", confirm="dialog", check_permissions=True,
                  simultaneous=False, cdp_port=None, walk_workers=None,
                  snapshot_max_depth=None, snapshot_max_nodes=None,
-                 agent_backend="auto"):
+                 agent_backend="auto", auth=None):
         """agent_backend: which LLM transport `mac.agent` uses — 'api' (anthropic SDK on a
         metered ANTHROPIC_API_KEY), 'subscription' (claude-agent-sdk on the hunch.login()
         Claude sign-in), or 'auto' (pick by credentials). Overridable per call via
-        mac.agent.run(..., backend=...)."""
+        mac.agent.run(..., backend=...).
+
+        auth: the agent loop's credential — None (ambient resolution, hunch.auth order),
+        hunch.ApiKey(...) / hunch.OAuthToken(...) (use exactly this credential, nothing
+        ambient), or 'none' (never scavenge; the loop raises until a credential is given)."""
         self._gate = gate.Gate(confirm=confirm)   # validates confirm
         if agent_backend not in ("auto", "api", "subscription"):
             raise HunchError(f"unknown agent_backend {agent_backend!r} — "
                              "use 'api', 'subscription', or 'auto'")
+        from .auth import ApiKey, OAuthToken
+        if not (auth is None or auth == "none" or isinstance(auth, (ApiKey, OAuthToken))):
+            raise HunchError(f"unknown auth {auth!r} — pass hunch.ApiKey(...), "
+                             "hunch.OAuthToken(...), 'none', or None (ambient)")
+        if isinstance(auth, ApiKey) and agent_backend == "subscription":
+            raise HunchError("auth=ApiKey(...) implies the 'api' backend, "
+                             "but agent_backend='subscription' was requested")
+        if isinstance(auth, OAuthToken) and agent_backend == "api":
+            raise HunchError("auth=OAuthToken(...) implies the 'subscription' backend, "
+                             "but agent_backend='api' was requested")
+        self._agent_auth = auth
         if check_permissions:
             self._check_accessibility()
         # ONE persistent computer per instance, so element [refs] survive snapshot -> act.
@@ -229,7 +244,7 @@ class Hunch:
         per call via run(backend=...). Created lazily so plain use imports neither SDK."""
         if self._agent is None:
             from .agent import Agent
-            self._agent = Agent(self, backend=self._agent_backend)
+            self._agent = Agent(self, backend=self._agent_backend, auth=self._agent_auth)
         return self._agent
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
