@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="src/hunch/assets/hunch.png" alt="Hunch" width="128">
+  <img src="https://raw.githubusercontent.com/PrithviSeran/hunch-mcp/main/src/hunch/assets/hunch.png" alt="Hunch" width="128">
 </p>
 
 # Hunch
@@ -45,13 +45,19 @@ return through your host; nothing else leaves the machine.
 
 ## Install
 
-macOS 13+. Via Homebrew (installs Python and all dependencies in an isolated env):
+macOS 13+. From PyPI (the distribution is `hunch-sdk`; the import and CLI are `hunch`):
+
+```
+pipx install hunch-sdk          # or: pip install hunch-sdk
+pip install 'hunch-sdk[agent]'  # + the optional LLM agent loop
+```
+
+Or via Homebrew — best if you don't manage Python environments; it bundles an isolated
+Python at a stable path, which makes the macOS permission grants the most predictable:
 
 ```
 brew install prithviseran/hunch/hunch
 ```
-
-(PyPI/pipx publication is planned; today Homebrew is the supported path.)
 
 Then, one time:
 
