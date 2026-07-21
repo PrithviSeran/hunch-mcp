@@ -9,7 +9,7 @@ primitives, on the user's own machine and logged-in apps.
 Anthropic-only in v1: Claude reads the Hunch playbook as its system prompt and drives
 the Mac through the same tools the MCP server exposes. Other models can use the instance
 SDK primitives directly in their own harness. `anthropic` is an OPTIONAL dependency
-(pip install 'hunch-mcp[agent]'), imported lazily so plain `import hunch` stays clean.
+(pip install 'hunch-sdk[agent]'), imported lazily so plain `import hunch` stays clean.
 
 Provider seam: request construction and response parsing are isolated in _request /
 _parse_response so a future backend adapter has a clean boundary — no abstraction layer
@@ -361,7 +361,7 @@ class Agent:
                 import anthropic
             except ImportError as e:
                 raise HunchError("the agent loop needs the optional 'anthropic' package — "
-                                 "install it with: pip install 'hunch-mcp[agent]'") from e
+                                 "install it with: pip install 'hunch-sdk[agent]'") from e
             self._client = anthropic.Anthropic()   # env key / auth token / ant profile
         return self._client
 

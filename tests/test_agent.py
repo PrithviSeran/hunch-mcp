@@ -255,7 +255,7 @@ def test_missing_anthropic_error(monkeypatch):
         a.run("x")
         assert False, "expected HunchError"
     except agent_mod.HunchError as e:
-        assert "hunch-mcp[agent]" in str(e)
+        assert "hunch-sdk[agent]" in str(e)
 
 
 def test_lazy_agent_property():

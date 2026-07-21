@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Read Mail.app's inbox focus-free — a deterministic script, no LLM involved.
 
-Run with the Python that has hunch-mcp installed. The app running this script
+Run with the Python that has hunch-sdk installed. The app running this script
 (your terminal or IDE) needs the Accessibility permission:
 System Settings → Privacy & Security → Accessibility.
 """

@@ -5,7 +5,7 @@ Opens github.com over CDP (focus-free — your foreground is untouched), reports
 whether the profile is signed in, and prints the top of the page's accessibility
 tree. If signed out, it opens a banner-tagged window for you to log in once.
 
-Run with the Python that has hunch-mcp installed; your terminal/IDE needs the
+Run with the Python that has hunch-sdk installed; your terminal/IDE needs the
 Accessibility permission (System Settings → Privacy & Security → Accessibility).
 """
 from hunch import Hunch

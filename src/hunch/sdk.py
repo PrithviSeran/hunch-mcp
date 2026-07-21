@@ -77,7 +77,7 @@ class Hunch:
             from ApplicationServices import AXIsProcessTrusted
         except ImportError as e:
             raise HunchError(
-                "pyobjc is missing — install the full package: pip install hunch-mcp") from e
+                "pyobjc is missing — install the full package: pip install hunch-sdk") from e
         if not AXIsProcessTrusted():
             raise AccessibilityNotGranted(
                 "this process is not trusted for Accessibility, so tree reads and UI actions "
@@ -215,7 +215,7 @@ class Hunch:
     def agent(self):
         """The agent loop: `mac.agent.run(task=...)` runs an LLM loop that drives this Mac
         through these primitives. Needs the optional 'anthropic' package
-        (pip install 'hunch-mcp[agent]'); created lazily so plain use never imports it."""
+        (pip install 'hunch-sdk[agent]'); created lazily so plain use never imports it."""
         if self._agent is None:
             from .agent import Agent
             self._agent = Agent(self)

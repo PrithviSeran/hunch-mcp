@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run one natural-language task on this Mac with the Hunch agent loop.
 
-    pip install 'hunch-mcp[agent]'
+    pip install 'hunch-sdk[agent]'
     export ANTHROPIC_API_KEY=sk-ant-...        # or: ant auth login
     python examples/agent_task.py "open Music and play my Focus playlist"
 

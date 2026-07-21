@@ -81,7 +81,7 @@ it from; the server inherits the *host's* grant.
 
 Hunch is also an importable library — the same focus-free primitives as the MCP tools, driven
 deterministically from your own Python (a cron job, a test harness, your own agent loop), no LLM
-required. The distribution is `hunch-mcp`; the import is `hunch`:
+required. The distribution is `hunch-sdk`; the import is `hunch`:
 
 ```python
 from hunch import Hunch
@@ -126,7 +126,7 @@ Scrapybara's `act()`, but on *your* machine with *your* logged-in apps. It's an 
 (keeps the base install free of the model SDK):
 
 ```bash
-pip install 'hunch-mcp[agent]'
+pip install 'hunch-sdk[agent]'
 export ANTHROPIC_API_KEY=sk-ant-...     # or: ant auth login
 ```
 

@@ -56,7 +56,7 @@ def cmd_serve(args):
     except ImportError as e:
         print(f"hunch serve: cannot load the server ({e}).\n"
               "Run `hunch doctor` to see which dependency is broken "
-              "(pip install hunch-mcp pulls them all).", file=sys.stderr)
+              "(pip install hunch-sdk pulls them all).", file=sys.stderr)
         return 1
     server.main()
     return 0
