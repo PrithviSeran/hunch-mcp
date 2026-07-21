@@ -6,16 +6,23 @@ primitives, on the user's own machine and logged-in apps.
     result = mac.agent.run("reply to Sarah's latest email, but don't send it")
     print(result.text)
 
-Anthropic-only in v1: Claude reads the Hunch playbook as its system prompt and drives
-the Mac through the same tools the MCP server exposes. Other models can use the instance
-SDK primitives directly in their own harness. `anthropic` is an OPTIONAL dependency
-(pip install 'hunch-sdk[agent]'), imported lazily so plain `import hunch` stays clean.
+Claude reads the Hunch playbook as its system prompt and drives the Mac through the same
+tools the MCP server exposes. TWO interchangeable backends, same tools and gates:
 
-Provider seam: request construction and response parsing are isolated in _request /
-_parse_response so a future backend adapter has a clean boundary — no abstraction layer
-is built now.
+  backend="api"          — the `anthropic` SDK on a metered ANTHROPIC_API_KEY.
+  backend="subscription" — `claude-agent-sdk` on the user's Claude subscription
+                           (the sign-in from `hunch login` / Claude Code; no per-token
+                           cost). Auth is EXPLICIT: hunch.auth.resolve() is the single
+                           resolution order, surfaced by `hunch login --status`.
+  backend="auto" (default) — api if ANTHROPIC_API_KEY is set, else subscription if
+                           signed in, else a HunchError naming both fixes.
+
+Both SDKs are OPTIONAL dependencies (pip install 'hunch-sdk[agent]' brings both),
+imported lazily so plain `import hunch` stays clean. Other models can use the instance
+SDK primitives directly in their own harness.
 """
 import base64
+import os
 from dataclasses import dataclass, field
 
 from .playbook import HUNCH_PLAYBOOK
@@ -215,14 +222,15 @@ def _img(png_bytes):
                                          "data": base64.b64encode(png_bytes).decode()}}]
 
 
-# Dispatcher: tool name -> callable(mac, args) -> content (str or image-block list).
+# Dispatcher: tool name -> callable(mac, args) -> content (str, or raw PNG bytes for the
+# screenshot tools — each backend formats bytes into its own image-block shape).
 _DISPATCH = {
     "snapshot": lambda m, a: m.snapshot(a.get("app", ""), ref=a.get("ref") or None,
                                         max_depth=a.get("max_depth"), max_nodes=a.get("max_nodes")),
     "find": lambda m, a: m.find(role=a.get("role") or None, name_contains=a.get("name_contains") or None,
                                 app=a.get("app", ""), max_results=a.get("max_results", 20)),
     "act": lambda m, a: m.act(a.get("actions", []), reason=a.get("reason", "")),
-    "screenshot": lambda m, a: _img(m.screenshot()),
+    "screenshot": lambda m, a: m.screenshot(),
     "list_apps": lambda m, a: m.list_apps(),
     "launch_app": lambda m, a: m.launch_app(a["name"], force_accessibility=a.get("force_accessibility", False),
                                             reason=a.get("reason", "")),
@@ -233,7 +241,7 @@ _DISPATCH = {
                                         isolated=a.get("isolated", False)),
     "web_login": lambda m, a: m.web.login(url=a.get("url", ""), app=a.get("app", "Google Chrome")),
     "web_snapshot": lambda m, a: m.web.snapshot(),
-    "web_screenshot": lambda m, a: _img(m.web.screenshot()),
+    "web_screenshot": lambda m, a: m.web.screenshot(),
     "web_act": lambda m, a: m.web.act(a.get("actions", [])),
     "web_restart": lambda m, a: m.web.restart(url=a.get("url", ""), app=a.get("app", "Google Chrome")),
     "web_tabs": lambda m, a: m.web.tabs(),
@@ -281,36 +289,48 @@ def _file_op(mac, a):
     return f"unknown op {op!r} — use 'move', 'copy', or 'mkdir' (or the trash tool to delete)"
 
 
-def _run_tool(mac, tool_use):
-    """Dispatch one tool_use block -> a tool_result dict. Expected Hunch exceptions become
-    plain content strings so the model can adapt; only genuinely unexpected exceptions set
-    is_error (mirrors the MCP server's return-the-message behavior)."""
+def _dispatch_core(mac, name, args):
+    """Shared tool execution for BOTH backends: run one tool -> (value, is_error) where
+    value is str (text) or bytes (raw PNG). Expected Hunch exceptions become plain content
+    strings so the model can adapt; only genuinely unexpected exceptions set is_error
+    (mirrors the MCP server's return-the-message behavior)."""
     from .local_mac import StaleRef
-    name = tool_use.name
-    tid = tool_use.id
-    args = tool_use.input or {}
     fn = _DISPATCH.get(name)
     if fn is None:
-        return {"type": "tool_result", "tool_use_id": tid, "content": f"unknown tool {name}",
-                "is_error": True}
+        return f"unknown tool {name}", True
     try:
-        content = fn(mac, args)
+        return fn(mac, args or {}), False
     except ApprovalDenied as e:
-        content = (f"REFUSED: {e} — the user declined; do not retry the identical action, "
-                   "adapt or call notify_user")
+        return (f"REFUSED: {e} — the user declined; do not retry the identical action, "
+                "adapt or call notify_user"), False
     except StaleRef:
-        content = "ref is stale — re-snapshot the app and use fresh refs"
+        return "ref is stale — re-snapshot the app and use fresh refs", False
     except (WebNotOpen, AccessibilityNotGranted, HunchError) as e:
-        content = str(e)
+        return str(e), False
     except Exception as e:  # noqa: BLE001 — genuinely unexpected: flag it
-        return {"type": "tool_result", "tool_use_id": tid, "content": f"error: {e}", "is_error": True}
-    return {"type": "tool_result", "tool_use_id": tid, "content": content}
+        return f"error: {e}", True
+
+
+def _run_tool(mac, tool_use):
+    """API-backend formatter: dispatch one tool_use block -> an anthropic tool_result dict
+    (bytes become an anthropic-shaped image block)."""
+    value, is_error = _dispatch_core(mac, tool_use.name, tool_use.input or {})
+    content = _img(value) if isinstance(value, bytes) else value
+    out = {"type": "tool_result", "tool_use_id": tool_use.id, "content": content}
+    if is_error:
+        out["is_error"] = True
+    return out
 
 
 def _preview(content):
     if isinstance(content, list):
-        return "[image]"
-    s = str(content)
+        texts = [d.get("text", "") for d in content
+                 if isinstance(d, dict) and d.get("type") == "text"]
+        s = " ".join(t for t in texts if t).strip()
+        if not s:
+            return "[image]"
+    else:
+        s = str(content)
     return s if len(s) <= 200 else s[:200] + "…"
 
 
@@ -333,6 +353,156 @@ def _mark_cache(messages):
         last["cache_control"] = {"type": "ephemeral"}
 
 
+# ── subscription backend (claude-agent-sdk — the user's Claude sign-in, no API key) ──
+
+def _mcp_content(value, is_error):
+    """Format a _dispatch_core result into MCP tool-output shape (the subscription
+    backend's wire format — note: NOT the anthropic image-block shape _img builds)."""
+    if isinstance(value, bytes):
+        content = [{"type": "image", "data": base64.b64encode(value).decode(),
+                    "mimeType": "image/png"}]
+    else:
+        content = [{"type": "text", "text": str(value)}]
+    return {"content": content, **({"is_error": True} if is_error else {})}
+
+
+def _sdk_tools(mac):
+    """One in-process MCP tool per AGENT_TOOLS entry, driving the SAME Hunch instance
+    through _dispatch_core — no subprocess, no second server, same gates."""
+    import asyncio
+    from claude_agent_sdk import tool
+
+    def _make(name):
+        async def handler(args):
+            loop = asyncio.get_running_loop()   # Hunch calls block on AX/subprocess -> executor
+            value, is_error = await loop.run_in_executor(None, _dispatch_core, mac, name, args or {})
+            return _mcp_content(value, is_error)
+        return handler
+
+    return [tool(t["name"], t["description"], t["input_schema"])(_make(t["name"]))
+            for t in AGENT_TOOLS]
+
+
+class _SubscriptionRunner:
+    """The subscription backend: claude-agent-sdk on the user's Claude sign-in
+    (`hunch login` / Claude Code / CLAUDE_CODE_OAUTH_TOKEN — see hunch.auth).
+
+    Sync facade over the SDK's asyncio client: a daemon event-loop thread plus
+    run_coroutine_threadsafe, so Agent.run() stays synchronous. The connected client
+    is kept across run() calls (continuation) while the options are unchanged."""
+
+    def __init__(self, hunch):
+        self._h = hunch
+        self._loop = None
+        self._thread = None
+        self._client = None
+        self._opts_key = None
+
+    # — event-loop plumbing —
+    def _call(self, coro):
+        import asyncio
+        if self._loop is None:
+            import threading
+            self._loop = asyncio.new_event_loop()
+            self._thread = threading.Thread(target=self._loop.run_forever,
+                                            daemon=True, name="hunch-agent-sdk")
+            self._thread.start()
+        return asyncio.run_coroutine_threadsafe(coro, self._loop).result()
+
+    # — options —
+    def _options(self, sdk, model, max_turns, system_suffix, effort):
+        async def _allow_hunch_only(tool_name, input_data, context):
+            if tool_name.startswith("mcp__hunch__"):
+                return sdk.PermissionResultAllow()
+            return sdk.PermissionResultDeny(   # no built-in Read/Bash/Write — Hunch tools only
+                message="the Hunch agent only runs Hunch tools")
+
+        system = HUNCH_PLAYBOOK + "\n" + AGENT_ADDENDUM
+        if system_suffix:
+            system += "\n" + system_suffix
+        return sdk.ClaudeAgentOptions(
+            system_prompt=system,
+            mcp_servers={"hunch": sdk.create_sdk_mcp_server("hunch", tools=_sdk_tools(self._h))},
+            allowed_tools=[f"mcp__hunch__{t['name']}" for t in AGENT_TOOLS],
+            can_use_tool=_allow_hunch_only,
+            permission_mode="default",         # unmatched tools -> can_use_tool (our policy point)
+            setting_sources=[],                # ignore the user's .claude / .mcp.json entirely
+            model=model,                       # None -> the subscription's default model
+            max_turns=max_turns,
+            effort=effort,
+            max_buffer_size=16 * 1024 * 1024,  # snapshots/screenshots exceed the 1MB default
+        )
+
+    # — the loop —
+    async def _run_async(self, client, task, emit):
+        await client.query(task)
+        final_text, turns, stop_reason, usage, aborted = "", 0, "end_turn", {}, True
+        async for msg in client.receive_response():   # duck-typed: no SDK types needed in tests
+            kind = type(msg).__name__
+            if kind == "AssistantMessage":
+                for b in msg.content:
+                    bname = type(b).__name__
+                    if bname == "TextBlock" and b.text.strip():
+                        emit("text", b.text.strip())
+                    elif bname == "ToolUseBlock":
+                        emit("tool", {"name": b.name.split("__")[-1], "input": b.input})
+            elif kind == "UserMessage":
+                for b in (msg.content if isinstance(msg.content, list) else []):
+                    if type(b).__name__ == "ToolResultBlock":
+                        emit("tool_result", _preview(b.content))
+            elif kind == "ResultMessage":
+                final_text = msg.result or ""
+                turns = msg.num_turns or 0
+                aborted = bool(msg.is_error)
+                stop_reason = msg.stop_reason or ("error" if aborted else "end_turn")
+                usage = msg.usage or {}
+                if aborted:
+                    emit("error", f"stopped: {msg.subtype}")
+                else:
+                    emit("done", final_text)
+        return AgentResult(text=final_text, turns=turns, stop_reason=stop_reason,
+                           usage=usage, aborted=aborted)
+
+    def run(self, task, model=None, max_turns=40, on_event=None, system_suffix="", effort=None):
+        try:
+            import claude_agent_sdk as sdk
+        except ImportError as e:
+            raise HunchError("the subscription backend needs the optional 'claude-agent-sdk' "
+                             "package — install it with: pip install 'hunch-sdk[agent]'") from e
+        from . import auth
+        if not auth.subscription_available():
+            raise HunchError("not signed in — run `hunch login` to use your Claude subscription, "
+                             "or set ANTHROPIC_API_KEY for the metered API backend")
+        auth.ensure_subscription_env()   # export a Hunch-saved token for the CLI subprocess
+
+        key = (model, max_turns, system_suffix, effort)
+        if self._client is not None and key != self._opts_key:
+            self.reset()                 # options changed -> fresh conversation
+        if self._client is None:
+            client = sdk.ClaudeSDKClient(
+                options=self._options(sdk, model, max_turns, system_suffix, effort))
+            self._call(client.connect())
+            self._client, self._opts_key = client, key
+        emit = on_event or (lambda kind, data: None)
+        return self._call(self._run_async(self._client, task, emit))
+
+    def reset(self):
+        if self._client is not None:
+            client, self._client, self._opts_key = self._client, None, None
+            try:
+                self._call(client.disconnect())
+            except Exception:
+                pass
+
+    def close(self):
+        self.reset()
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            self._thread.join(timeout=5)
+            self._loop.close()
+            self._loop = self._thread = None
+
+
 @dataclass
 class AgentResult:
     text: str
@@ -344,16 +514,52 @@ class AgentResult:
 
 class Agent:
     """The agent loop. Created lazily as `Hunch.agent`. Holds conversation state across
-    act() calls (continuation); call reset() to start a fresh task."""
+    run() calls (continuation); call reset() to start a fresh task."""
 
-    def __init__(self, hunch, client=None):
+    def __init__(self, hunch, client=None, backend="auto"):
         self._h = hunch
         self._client = client          # test seam; None -> lazily anthropic.Anthropic()
+        self.backend = backend         # "auto" | "api" | "subscription" (per-run override too)
         self.messages = []
+        self._sub = None               # _SubscriptionRunner, built on first subscription run
+
+    def _resolve_backend(self, backend):
+        """Explicit choice wins; "auto" picks by credentials — the SAME order
+        `hunch login --status` prints (hunch.auth.resolve)."""
+        b = backend or self.backend or "auto"
+        if b in ("api", "subscription"):
+            return b
+        if b != "auto":
+            raise HunchError(f"unknown backend {b!r} — use 'api', 'subscription', or 'auto'")
+        if self._client is not None:       # injected client (test seam) is an api client
+            return "api"
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            return "api"
+        from . import auth
+        try:
+            import claude_agent_sdk  # noqa: F401
+            have_sdk = True
+        except ImportError:
+            have_sdk = False
+        if have_sdk and auth.subscription_available():
+            return "subscription"
+        raise HunchError(
+            "no credentials for the agent loop — run `hunch login` to use your Claude "
+            "subscription, or set ANTHROPIC_API_KEY for the metered API"
+            + ("" if have_sdk else " (subscription backend also needs: "
+                                   "pip install 'hunch-sdk[agent]')"))
 
     def reset(self):
         """Clear the conversation for an unrelated task (same Hunch instance and gates)."""
         self.messages = []
+        if self._sub is not None:
+            self._sub.reset()
+
+    def close(self):
+        """Stop the subscription backend's event-loop thread (no-op otherwise)."""
+        if self._sub is not None:
+            self._sub.close()
+            self._sub = None
 
     def _ensure_client(self):
         if self._client is None:
@@ -388,11 +594,23 @@ class Agent:
                   "cache_creation_input_tokens", "cache_read_input_tokens"):
             usage[k] = usage.get(k, 0) + (getattr(resp_usage, k, 0) or 0)
 
-    def run(self, task, model=DEFAULT_MODEL, max_turns=40, on_event=None,
-            system_suffix="", effort=None, max_tokens=16000):
+    def run(self, task, model=None, max_turns=40, on_event=None,
+            system_suffix="", effort=None, max_tokens=16000, backend=None):
         """Run the agent loop until Claude finishes the task (end_turn), is blocked, or hits
         max_turns. Returns an AgentResult. on_event(kind, data) receives 'text' | 'tool' |
-        'tool_result' | 'done' | 'error' as work streams."""
+        'tool_result' | 'done' | 'error' as work streams.
+
+        backend: 'api' | 'subscription' | None (-> the Agent's default, normally 'auto').
+        model=None -> claude-opus-4-8 on the api backend, the subscription's own default
+        on the subscription backend. max_tokens applies to the api backend only (the
+        subscription CLI manages its own output limits)."""
+        if self._resolve_backend(backend) == "subscription":
+            if self._sub is None:
+                self._sub = _SubscriptionRunner(self._h)
+            return self._sub.run(task, model=model, max_turns=max_turns, on_event=on_event,
+                                 system_suffix=system_suffix, effort=effort)
+
+        model = model or DEFAULT_MODEL
         client = self._ensure_client()   # friendly HunchError if 'anthropic' isn't installed
         try:
             import anthropic
@@ -409,8 +627,9 @@ class Agent:
             try:
                 resp = self._request(client, model, max_tokens, self._system(system_suffix), effort)
             except _AuthError as e:
-                raise HunchError("no valid Anthropic credentials — set ANTHROPIC_API_KEY or "
-                                 "run `ant auth login` (then retry)") from e
+                raise HunchError("no valid Anthropic API credentials — set ANTHROPIC_API_KEY, "
+                                 "or run `hunch login` to use your Claude subscription "
+                                 "(backend='subscription')") from e
             self._accumulate(usage, resp.usage)
             for b in resp.content:
                 if getattr(b, "type", None) == "text" and b.text.strip():

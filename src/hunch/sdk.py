@@ -214,8 +214,9 @@ class Hunch:
     @property
     def agent(self):
         """The agent loop: `mac.agent.run(task=...)` runs an LLM loop that drives this Mac
-        through these primitives. Needs the optional 'anthropic' package
-        (pip install 'hunch-sdk[agent]'); created lazily so plain use never imports it."""
+        through these primitives. Two backends (pip install 'hunch-sdk[agent]' brings both):
+        your Claude subscription after `hunch login`, or a metered ANTHROPIC_API_KEY —
+        auto-picked, or forced with backend=. Created lazily so plain use imports neither."""
         if self._agent is None:
             from .agent import Agent
             self._agent = Agent(self)
@@ -224,8 +225,11 @@ class Hunch:
     # ── lifecycle ─────────────────────────────────────────────────────────────
 
     def close(self):
-        """Close the CDP web session, if any (the browser window stays open)."""
+        """Close the CDP web session, if any (the browser window stays open), and stop
+        the agent loop's subscription backend if it was started."""
         self.web.close()
+        if self._agent is not None:
+            self._agent.close()
 
     def __enter__(self):
         return self

@@ -2,7 +2,8 @@
 """Run one natural-language task on this Mac with the Hunch agent loop.
 
     pip install 'hunch-sdk[agent]'
-    export ANTHROPIC_API_KEY=sk-ant-...        # or: ant auth login
+    hunch login                                # Claude subscription (no API key), or:
+    export ANTHROPIC_API_KEY=sk-ant-...        # metered API
     python examples/agent_task.py "open Music and play my Focus playlist"
 
 Your terminal/IDE needs the Accessibility permission (System Settings → Privacy &
@@ -17,7 +18,10 @@ from hunch import Hunch
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("task")
-    p.add_argument("--model", default="claude-opus-4-8")
+    p.add_argument("--backend", default="auto", choices=["auto", "api", "subscription"],
+                   help="auto picks by credentials — see `hunch login --status`")
+    p.add_argument("--model", default=None,
+                   help="default: claude-opus-4-8 (api) / your subscription's model")
     p.add_argument("--max-turns", type=int, default=40)
     p.add_argument("--effort", default=None, help="low | medium | high | xhigh | max")
     p.add_argument("--unattended", action="store_true",
@@ -39,7 +43,7 @@ def main():
     mac = Hunch(confirm="off" if args.unattended else "dialog")
     try:
         result = mac.agent.run(args.task, model=args.model, max_turns=args.max_turns,
-                               effort=args.effort, on_event=on_event)
+                               effort=args.effort, on_event=on_event, backend=args.backend)
         print(f"\n— {result.turns} turns, stop_reason={result.stop_reason}, "
               f"tokens in/out={result.usage.get('input_tokens')}/{result.usage.get('output_tokens')} "
               f"(cached read {result.usage.get('cache_read_input_tokens')})")

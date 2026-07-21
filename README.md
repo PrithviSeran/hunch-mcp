@@ -49,7 +49,8 @@ macOS 13+. From PyPI (the distribution is `hunch-sdk`; the import and CLI are `h
 
 ```
 pipx install hunch-sdk          # or: pip install hunch-sdk
-pip install 'hunch-sdk[agent]'  # + the optional LLM agent loop
+pip install 'hunch-sdk[agent]'  # + the optional LLM agent loop (both backends;
+                                #   [api] or [subscription] picks just one)
 ```
 
 Or via Homebrew — best if you don't manage Python environments; it bundles an isolated
@@ -129,11 +130,11 @@ Runnable scripts live in [`examples/`](examples/).
 The instance SDK gives you deterministic primitives. The **agent loop** puts an LLM in the driver's seat:
 you hand it a task in plain English and Claude drives the Mac through those same primitives —
 Scrapybara's `act()`, but on *your* machine with *your* logged-in apps. It's an optional extra
-(keeps the base install free of the model SDK):
+(keeps the base install free of the model SDKs):
 
 ```bash
 pip install 'hunch-sdk[agent]'
-export ANTHROPIC_API_KEY=sk-ant-...     # or: ant auth login
+hunch login        # sign in with your Claude subscription (browser OAuth) — no API key
 ```
 
 ```python
@@ -145,22 +146,42 @@ print(result.text)          # Claude's final summary
 print(result.turns, result.usage)
 ```
 
+### Signing in
+
+Auth is an explicit, visible surface — nothing is scavenged silently. Two ways to run the loop:
+
+| Backend | Sign in with | Cost |
+|---|---|---|
+| `subscription` | `hunch login` — the same browser OAuth Claude Code uses. Already signed into Claude Code on this Mac? You're done; Hunch reuses that. | your Claude plan (no per-token cost) |
+| `api` | `export ANTHROPIC_API_KEY=sk-ant-...` | metered API tokens |
+
+The default `backend="auto"` picks by credentials, in a fixed documented order (API key →
+`CLAUDE_CODE_OAUTH_TOKEN` env → Claude Code sign-in → `hunch login --token` token) — inspect it
+any time with `hunch login --status`, force it with `mac.agent.run(task, backend="subscription")`.
+`hunch logout` removes what `hunch login` stored (and only that); headless boxes can use
+`hunch login --token` to paste a long-lived token from `claude setup-token`. With no credentials
+at all, `run()` raises a `HunchError` naming both fixes — it never guesses.
+
 - **Watch it work** with an `on_event(kind, data)` callback — `kind` is one of `text` (Claude's
   reasoning), `tool` (`{name, input}`), `tool_result` (preview), `done` (final text), `error`.
-- **Continuation**: follow-up `act()` calls keep the conversation (Claude still knows which email
+- **Continuation**: follow-up `run()` calls keep the conversation (Claude still knows which email
   is Sarah's); `mac.agent.reset()` starts a fresh task.
 - **Mix layers freely**: call `mac.snapshot(...)` / `mac.clipboard.get()` deterministically around
   `mac.agent.run(...)` — the thing a cloud sandbox can't do on your real machine.
-- **Knobs**: `run(task, model="claude-opus-4-8", max_turns=40, effort=None, on_event=None,
-  system_suffix="")`. `AgentResult` has `text`, `turns`, `stop_reason`, `usage`, `aborted`.
+- **Knobs**: `run(task, model=None, max_turns=40, effort=None, on_event=None,
+  system_suffix="", backend=None)` — `model=None` means `claude-opus-4-8` on the api backend and
+  your subscription's default model otherwise. `AgentResult` has `text`, `turns`, `stop_reason`,
+  `usage`, `aborted`.
 - **Safety**: the instance's gate config governs the loop. The default `confirm="dialog"` pops a
   real "Go ahead?" dialog before any focus-stealing or risky step — good when you're at the
   machine, but a gated action can stall an unattended run for the dialog's timeout. For cron jobs
   use `Hunch(confirm="off")` and accept the risk; Claude still asks *you* (via `notify_user`)
   before irreversible or outward actions like sending a message. A declined gate comes back to the
   model as a `REFUSED` result, so the loop adapts instead of crashing.
-- **Cost**: each turn resends the tree-heavy history; prompt caching is on by default, so cached
-  input is ~10× cheaper — but long autonomous runs still add up. `max_turns` caps it.
+- **Cost**: on the subscription backend, runs draw on your Claude plan's usage limits — no
+  per-token bill. On the api backend each turn resends the tree-heavy history; prompt caching is
+  on by default, so cached input is ~10× cheaper — but long autonomous runs still add up.
+  `max_turns` caps it either way.
 
 Other models: the agent loop is Claude-only, but the instance-SDK primitives are provider-agnostic —
 wire `mac.snapshot()` / `mac.act()` into your own OpenAI/Gemini/etc. agent loop as tools.

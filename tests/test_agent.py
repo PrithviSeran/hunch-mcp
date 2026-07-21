@@ -252,10 +252,183 @@ def test_missing_anthropic_error(monkeypatch):
     monkeypatch.setitem(sys.modules, "anthropic", None)   # import anthropic -> ImportError
     a = Agent(_FakeHunch(), client=None)                  # no injected client -> must import
     try:
-        a.run("x")
+        a.run("x", backend="api")                         # pin: auto may pick subscription here
         assert False, "expected HunchError"
     except agent_mod.HunchError as e:
         assert "hunch-sdk[agent]" in str(e)
+
+
+# ── shared dispatch + subscription backend ──────────────────────────────────────
+
+def test_dispatch_core_screenshot_bytes():
+    """The shared dispatcher returns RAW bytes; the api formatter still wraps them in
+    the anthropic image shape (regression guard for the backend refactor)."""
+    h = _FakeHunch()
+    value, is_error = agent_mod._dispatch_core(h, "screenshot", {})
+    assert isinstance(value, bytes) and not is_error
+    r = _run_tool(h, tool_block("screenshot", {}))
+    assert r["content"][0]["type"] == "image"
+    assert r["content"][0]["source"]["media_type"] == "image/png"
+
+
+def test_mcp_image_shape():
+    """The subscription formatter uses the MCP shape (data/mimeType — NOT anthropic's
+    source dict)."""
+    import base64
+    out = agent_mod._mcp_content(b"png", False)
+    assert out["content"][0] == {"type": "image", "data": base64.b64encode(b"png").decode(),
+                                 "mimeType": "image/png"}
+    assert "is_error" not in out
+    out = agent_mod._mcp_content("boom", True)
+    assert out["content"][0] == {"type": "text", "text": "boom"} and out["is_error"] is True
+
+
+def test_backend_resolution(monkeypatch):
+    import hunch.auth as auth
+    a = Agent(_FakeHunch())
+    assert a._resolve_backend("api") == "api"                    # explicit wins
+    assert a._resolve_backend("subscription") == "subscription"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    assert a._resolve_backend("auto") == "api"                   # API key -> api
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", types.ModuleType("claude_agent_sdk"))
+    monkeypatch.setattr(auth, "subscription_available", lambda: True)
+    assert a._resolve_backend("auto") == "subscription"          # signed in -> subscription
+    monkeypatch.setattr(auth, "subscription_available", lambda: False)
+    try:
+        a._resolve_backend("auto")
+        assert False, "expected HunchError"
+    except agent_mod.HunchError as e:                            # nothing -> both fixes named
+        assert "hunch login" in str(e) and "ANTHROPIC_API_KEY" in str(e)
+    assert Agent(_FakeHunch(), client=_FakeClient([]))._resolve_backend("auto") == "api"
+
+
+def test_subscription_missing_sdk(monkeypatch):
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", None)   # import -> ImportError
+    r = agent_mod._SubscriptionRunner(_FakeHunch())
+    try:
+        r.run("x")
+        assert False, "expected HunchError"
+    except agent_mod.HunchError as e:
+        assert "hunch-sdk[agent]" in str(e)
+
+
+def test_subscription_not_signed_in(monkeypatch):
+    import pytest
+    pytest.importorskip("claude_agent_sdk")
+    import hunch.auth as auth
+    monkeypatch.setattr(auth, "subscription_available", lambda: False)
+    r = agent_mod._SubscriptionRunner(_FakeHunch())
+    try:
+        r.run("x")
+        assert False, "expected HunchError"
+    except agent_mod.HunchError as e:
+        assert "hunch login" in str(e)
+
+
+def test_sdk_tools_built():
+    import asyncio
+    import pytest
+    pytest.importorskip("claude_agent_sdk")
+    tools = agent_mod._sdk_tools(_FakeHunch())
+    assert [t.name for t in tools] == [t["name"] for t in AGENT_TOOLS]   # 1:1, same order
+    out = asyncio.run(tools[0].handler({"app": "Mail"}))                 # snapshot round-trip
+    assert out["content"][0]["type"] == "text" and "Mail" in out["content"][0]["text"]
+    shot = asyncio.run(tools[[t.name for t in tools].index("screenshot")].handler({}))
+    assert shot["content"][0]["mimeType"] == "image/png"                 # bytes -> MCP image
+
+
+def _mk(clsname, **kw):
+    """Instance whose type().__name__ matches the SDK message/block class names —
+    _run_async is duck-typed on exactly that, so no SDK import is needed."""
+    obj = type(clsname, (), {})()
+    obj.__dict__.update(kw)
+    return obj
+
+
+class _FakeSubClient:
+    def __init__(self, msgs):
+        self._msgs = msgs
+        self.queries = []
+
+    async def query(self, task):
+        self.queries.append(task)
+
+    async def receive_response(self):
+        for m in self._msgs:
+            yield m
+
+
+def test_subscription_run_fake_client():
+    import asyncio
+    events = []
+    msgs = [
+        _mk("AssistantMessage", content=[
+            _mk("TextBlock", text="working on it"),
+            _mk("ToolUseBlock", name="mcp__hunch__snapshot", input={"app": "Mail"})]),
+        _mk("UserMessage", content=[
+            _mk("ToolResultBlock", content=[{"type": "text", "text": "tree of Mail"}])]),
+        _mk("ResultMessage", result="did it", num_turns=3, stop_reason=None,
+            usage={"input_tokens": 9}, is_error=False, subtype="success"),
+    ]
+    runner = agent_mod._SubscriptionRunner(_FakeHunch())
+    res = asyncio.run(runner._run_async(_FakeSubClient(msgs), "task",
+                                        lambda k, d: events.append((k, d))))
+    assert isinstance(res, AgentResult)
+    assert res.text == "did it" and res.turns == 3 and not res.aborted
+    assert res.stop_reason == "end_turn" and res.usage == {"input_tokens": 9}
+    assert [k for k, _ in events] == ["text", "tool", "tool_result", "done"]
+    assert events[1][1]["name"] == "snapshot"        # mcp__hunch__ prefix stripped
+    assert events[2][1] == "tree of Mail"            # text extracted from MCP content list
+
+
+def test_subscription_run_error_result():
+    import asyncio
+    events = []
+    msgs = [_mk("ResultMessage", result=None, num_turns=5, stop_reason=None,
+                usage=None, is_error=True, subtype="error_max_turns")]
+    runner = agent_mod._SubscriptionRunner(_FakeHunch())
+    res = asyncio.run(runner._run_async(_FakeSubClient(msgs), "task",
+                                        lambda k, d: events.append((k, d))))
+    assert res.aborted and res.stop_reason == "error" and res.text == ""
+    assert events == [("error", "stopped: error_max_turns")]
+
+
+# ── auth resolution (the `hunch login` surface) ─────────────────────────────────
+
+def test_auth_resolution_order(monkeypatch):
+    import hunch.auth as auth
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "t")
+    assert auth.resolve()[0] == "api_key"                      # 1. API key wins
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    assert auth.resolve()[0] == "env_token"                    # 2. env token
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN")
+    monkeypatch.setattr(auth, "_keychain_present", lambda s: s == auth.CLAUDE_CODE_SERVICE)
+    monkeypatch.setattr(auth, "_keychain_read", lambda s: None)
+    assert auth.resolve()[0] == "claude_code"                  # 3. Claude Code sign-in
+    monkeypatch.setattr(auth, "_keychain_present", lambda s: False)
+    monkeypatch.setattr(auth, "_keychain_read",
+                        lambda s: "tok" if s == auth.HUNCH_TOKEN_SERVICE else None)
+    assert auth.resolve()[0] == "hunch_token"                  # 4. hunch login --token
+    assert auth.subscription_available()
+    monkeypatch.setattr(auth, "_keychain_read", lambda s: None)
+    assert auth.resolve()[0] is None                           # nothing
+    assert not auth.subscription_available()
+
+
+def test_ensure_subscription_env_exports_hunch_token(monkeypatch):
+    import os
+    import hunch.auth as auth
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setattr(auth, "_keychain_present", lambda s: False)
+    monkeypatch.setattr(auth, "_keychain_read",
+                        lambda s: "tok123" if s == auth.HUNCH_TOKEN_SERVICE else None)
+    try:
+        auth.ensure_subscription_env()
+        assert os.environ["CLAUDE_CODE_OAUTH_TOKEN"] == "tok123"
+    finally:
+        os.environ.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
 
 
 def test_lazy_agent_property():

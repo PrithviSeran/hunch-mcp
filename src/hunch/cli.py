@@ -168,6 +168,58 @@ def cmd_creds(args):
     return 0
 
 
+# ── login / logout (agent-loop subscription auth) ──────────────────────────────
+
+
+def _print_auth_status():
+    from . import auth
+    source, desc = auth.resolve()
+    print(f"agent auth: {desc}")
+    if source in ("claude_code", "env_token", "hunch_token"):
+        info = auth.claude_login_details()
+        if info:
+            plan = info.get("subscriptionType")
+            print(f"  account: {info.get('email', '?')}" + (f"  ({plan} plan)" if plan else ""))
+    elif source == "api_key":
+        print("  note: the API key wins the auto-pick; `hunch login` credentials are used only "
+              "when it is unset or backend='subscription' is passed explicitly.")
+    return 0 if source else 1
+
+
+def cmd_login(args):
+    from . import auth
+    if args.status:
+        return _print_auth_status()
+
+    if args.token:
+        token = getpass.getpass("Paste your long-lived token (from `claude setup-token`, hidden): ")
+        ok, msg = auth.save_token(token)
+        print(msg)
+        return 0 if ok else 1
+
+    source, desc = auth.resolve()
+    if source and source != "api_key":
+        print(f"already signed in — {desc}")
+        return _print_auth_status()
+    if source == "api_key":
+        print("ANTHROPIC_API_KEY is set (metered API). Continuing signs you in with a Claude "
+              "subscription as well; the agent loop prefers the API key unless you unset it or "
+              "pass backend='subscription'.\n")
+
+    print("Signing you in with your Claude subscription (browser OAuth — the same login "
+          "Claude Code uses). No API key, no per-token cost.\n")
+    ok, msg = auth.interactive_login()
+    print(msg)
+    return 0 if ok else 1
+
+
+def cmd_logout(args):
+    from . import auth
+    for msg in auth.logout():
+        print(msg)
+    return 0
+
+
 # ── connect ────────────────────────────────────────────────────────────────────
 
 
@@ -313,6 +365,33 @@ def cmd_doctor(args):
     except OSError:
         _ok(f"CDP port {CDP_PORT} free")
 
+    print("\nAgent auth (only needed for the agent loop — mac.agent.run)")
+    try:
+        from . import auth
+        source, desc = auth.resolve()
+        if source:
+            _ok(f"credentials found: {desc}")
+        else:
+            _warn("no agent credentials — `hunch login` (Claude subscription) or set "
+                  "ANTHROPIC_API_KEY (metered API). The MCP server and instance SDK don't need this")
+        have_api = True
+        have_sub = True
+        try:
+            import anthropic  # noqa: F401
+        except ImportError:
+            have_api = False
+        try:
+            import claude_agent_sdk  # noqa: F401
+        except ImportError:
+            have_sub = False
+        if have_api or have_sub:
+            backends = [b for b, ok_ in (("api", have_api), ("subscription", have_sub)) if ok_]
+            _ok(f"agent backends installed: {', '.join(backends)}")
+        else:
+            _warn("no agent backend installed — pip install 'hunch-sdk[agent]' to use mac.agent.run")
+    except Exception as e:
+        failed |= _fail(f"auth check errored: {e}")
+
     print("\nPolicy & credentials")
     cfg = policy.load()
     if os.environ.get("HUNCH_NO_INTERNAL_GATE"):
@@ -418,6 +497,18 @@ def main(argv=None):
     p = sub.add_parser("doctor", help="check every layer; PASS/WARN/FAIL per line")
     p.add_argument("--notify", action="store_true", help="also fire a test desktop notification")
     p.set_defaults(func=cmd_doctor)
+
+    p = sub.add_parser("login", help="sign in with your Claude subscription for the agent loop "
+                                     "(mac.agent.run) — browser OAuth, no API key")
+    p.add_argument("--status", action="store_true",
+                   help="show which credential the agent loop would use, and exit")
+    p.add_argument("--token", action="store_true",
+                   help="paste a long-lived token (from `claude setup-token`) instead of the "
+                        "browser flow; stored in the macOS Keychain")
+    p.set_defaults(func=cmd_login)
+
+    p = sub.add_parser("logout", help="remove the Hunch-saved subscription token from the Keychain")
+    p.set_defaults(func=cmd_logout)
 
     p = sub.add_parser("connect", help="register Hunch in an MCP host's config")
     p.add_argument("host", choices=["claude-desktop", "claude-code", "cursor"])
