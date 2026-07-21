@@ -18,7 +18,8 @@ def test_version():
 
 
 def test_tool_count():
-    assert len(server.mcp._tool_manager._tools) == 28
+    assert len(server.mcp._tool_manager._tools) == 29
+    assert "find" in server.mcp._tool_manager._tools
 
 
 def test_policy_defaults_all_on():
@@ -79,7 +80,7 @@ def test_screen_approval_dedupe():
         assert fired == ["DefinitelyNotFrontmostApp"], "notification should fire when not suppressed"
     finally:
         local_mac._notify_focus, local_mac._suppress_until = old_notify, old_until
-        server._screen_ok_until = 0.0
+        server._gate._screen_ok_until = 0.0
 
 
 class _StubSession:

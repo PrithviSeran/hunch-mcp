@@ -296,9 +296,12 @@ class CDPSession:
         by_id = {n["nodeId"]: n for n in nodes}
         roots = [n for n in nodes if not n.get("parentId")]
         lines = [f"=== {self.title()[:60]} — CDP snapshot #{self.snapshot_count} ==="]
-        budget = [max_nodes]
+        budget = {"left": max_nodes, "skipped": 0}
         for r in roots:
             self._walk(r, by_id, 0, lines, compact, budget)
+        if budget["skipped"]:
+            lines.append(f"…tree truncated at {max_nodes} elements shown (+{budget['skipped']} "
+                         "more) — interact/scroll to change the page, then web_snapshot again")
         text = "\n".join(lines)
         return text, {"est_tokens": round(len(text) / 3.5), "refs": len(self.registry), "url": self.url()}
 
@@ -333,8 +336,11 @@ class CDPSession:
         # Budget caps EMITTED elements (output/token size), NOT nodes traversed. Counting
         # traversal instead would let a big page's ignored background (e.g. an aria-hidden
         # inbox behind a modal) exhaust the budget before we reach the real content/modal.
-        if emit and budget[0] > 0:
-            budget[0] -= 1
+        if emit and budget["left"] <= 0:
+            budget["skipped"] += 1   # counted so truncation is announced, never silent
+            emit = False
+        if emit:
+            budget["left"] -= 1
             ref = self._ref(backend)
             parts = [f"[{ref}]", role]
             if name:

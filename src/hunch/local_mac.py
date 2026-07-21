@@ -209,12 +209,31 @@ def _announce_front(name):
         pass
     _notify_focus(name, reason)
 
-_MAX_NODES = 3000
+_MAX_NODES = 3000          # default node budget for a FULL-window walk
+_MAX_DEPTH = 18            # default depth for a FULL-window walk
+_SCOPED_MAX_NODES = 10000  # defaults for scoped (ref=) subtree walks and find()
+_SCOPED_MAX_DEPTH = 100    # "full depth" while still guarding Python recursion
+_NODES_CEILING = 50000     # hard safety ceiling everywhere
+_MAX_CHILDREN = 200        # per-node sibling cap (marked, not silent)
 # Cap on a single element's text value in the serialized tree. Must be generous: chat messages,
 # code blocks, notes, and email bodies are real content the agent needs IN FULL (the old 120-char
 # cap silently truncated Discord messages so Hunch could neither read nor copy them). Only truly
 # pathological values (a giant textarea) get clipped — and then WITH a visible marker, never silently.
 _MAX_VALUE_CHARS = 4000
+
+_TRUNC_FOOTER = ("…tree truncated at {n} nodes — use snapshot(ref=...) on a container or "
+                 "find(role=..., name_contains=...) to see more")
+
+
+def _cap_depth(v, default):
+    """None/negative -> default; 0 is honored (root only)."""
+    return default if (v is None or v < 0) else v
+
+
+def _cap_nodes(v, default):
+    """None/0/negative -> default; always clamped to the safety ceiling."""
+    v = default if (v is None or v <= 0) else v
+    return min(v, _NODES_CEILING)
 
 # Interactive + content roles the agent can act on or read; everything else
 # (AXGroup / AXScrollArea / AXSplitGroup scaffolding) is traversed but not shown.
@@ -250,13 +269,22 @@ class MacSession:
     """Per-snapshot ref registry mapping [e1..eN] to LIVE AXUIElement handles, so
     the agent acts on real elements (AXPress) not coordinates."""
 
-    def __init__(self):
+    def __init__(self, walk_workers=None):
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 2.0)
         self.registry = {}
         self._keymap = {}
+        self._ref_keys = {}  # ref -> full key path; mirrors _keymap (persistent) so a
+        #                      scoped snapshot can seed the subtree root's exact key
         self._counter = 0
         self.snapshot_count = 0
         self._pid = None  # target app pid, for activation before acting
+        if walk_workers is None:
+            try:
+                walk_workers = int(os.environ.get("HUNCH_WALK_WORKERS", "8"))
+            except ValueError:
+                walk_workers = 8
+        # 0/1 = serial walk; >1 = concurrent BFS prefetch of AX attributes
+        self.walk_workers = max(0, min(int(walk_workers), 32))
 
     def activate(self):
         """Bring the target app to the front so its window is discoverable and
@@ -300,18 +328,21 @@ class MacSession:
             self._counter += 1
             ref = f"e{self._counter}"
             self._keymap[key] = ref
+            self._ref_keys[ref] = key   # single write site: every registry write mints here first
         return ref
 
-    def _accessible_name(self, el, cap=8):
+    def _accessible_name(self, el, cap=8, fetch=None):
         """A container's label computed from its own + descendant text (bounded) —
         the accessible-name pattern, so a nameless AXRow can be labelled by the
-        filename in its cell."""
+        filename in its cell. `fetch` serves cached full-attr dicts (a superset of
+        the three attrs read here); misses fall back to a live fetch."""
         parts, budget = [], [cap]
         def collect(e, d):
             if budget[0] <= 0 or d > 5:
                 return
             budget[0] -= 1
-            a = ax.get_attrs(e, (ax.kAXTitleAttribute, ax.kAXValueAttribute, ax.kAXChildrenAttribute))
+            a = fetch(e) if fetch else \
+                ax.get_attrs(e, (ax.kAXTitleAttribute, ax.kAXValueAttribute, ax.kAXChildrenAttribute))
             for x in (a[ax.kAXTitleAttribute], a[ax.kAXValueAttribute]):
                 s = str(x or "").strip()
                 if s and s not in parts:
@@ -320,6 +351,43 @@ class MacSession:
                 collect(c, d + 1)
         collect(el, 0)
         return " ".join(parts)[:100]
+
+    def _describe(self, el, a, fetch=None):
+        """Unpack a fetched attrs dict into display fields. `name` applies the row
+        rule (title, else value, else accessible name from the subtree)."""
+        role = str(a[ax.kAXRoleAttribute] or "?")
+        title = str(a[ax.kAXTitleAttribute] or "").strip()
+        desc = str(a[ax.kAXDescriptionAttribute] or "").strip()
+        v = a[ax.kAXValueAttribute]
+        value = str(v).strip() if v is not None else ""
+        enabled = a[ax.kAXEnabledAttribute]
+        is_row = role in _ROW_ROLES
+        name = (title or value or self._accessible_name(el, fetch=fetch)) if is_row else title
+        return role, title, desc, value, enabled, name, is_row
+
+    @staticmethod
+    def _seg_key(parent_key, sib, role, name, desc):
+        """One stable path segment: role+name+desc, disambiguated by sibling
+        occurrence so two same-named siblings still get distinct refs. Mutates sib."""
+        seg = f"{role}:{name}:{desc}"
+        occ = sib.get(seg, 0)
+        sib[seg] = occ + 1
+        return f"{parent_key}/{seg}#{occ}"
+
+    @staticmethod
+    def _fmt_el(ref, role, title, desc, value, enabled):
+        parts = [f"[{ref}]", role]
+        if title:
+            parts.append(f'"{title}"')
+        if desc and desc != title:
+            parts.append(f"({desc})")
+        if value and value != title:
+            shown = value if len(value) <= _MAX_VALUE_CHARS else \
+                value[:_MAX_VALUE_CHARS] + f"…(+{len(value) - _MAX_VALUE_CHARS} more chars)"
+            parts.append(f"val={shown!r}")
+        if enabled is False:
+            parts.append("disabled")
+        return " ".join(parts)
 
     @staticmethod
     def _interesting(role, title, value):
@@ -332,11 +400,47 @@ class MacSession:
             return True
         return False
 
-    def snapshot(self, app_name=None, compact=True, max_depth=18, activate_app=True):
+    def snapshot(self, app_name=None, compact=True, max_depth=None, activate_app=True,
+                 ref=None, max_nodes=None):
         """Compact tree of the target app's focused window (frontmost app by
-        default). Returns (text, info) and refreshes the ref registry."""
+        default). Returns (text, info) and refreshes the ref registry.
+        Pass ref='eNN' to re-walk ONLY that element's subtree (deeper defaults,
+        does NOT clear other refs). max_depth/max_nodes=None -> defaults; when a
+        cap truncates output, an explicit …marker line says what was dropped."""
+        if ref is not None:
+            return self._snapshot_scoped(ref, max_depth, max_nodes, compact)
+        max_depth = _cap_depth(max_depth, _MAX_DEPTH)
+        max_nodes = _cap_nodes(max_nodes, _MAX_NODES)
         self.registry = {}
         self.snapshot_count += 1
+        win, app_name, err = self._resolve_window(app_name)
+        if err is not None:
+            return err
+        lines = [f"=== {app_name} — focused window (snapshot #{self.snapshot_count}) ==="]
+        cache = self._prefetch(win, max_depth, max_nodes, compact)
+        fetch = self._fetcher(cache)
+        budget = {"left": max_nodes, "hit": False}
+        self._walk(win, 0, "", lines, compact, max_depth, budget, fetch=fetch)
+        if budget["hit"]:
+            lines.append(_TRUNC_FOOTER.format(n=max_nodes))
+        text = "\n".join(lines)
+        return text, {"est_tokens": round(len(text) / 3.5), "refs": len(self.registry), "app": app_name}
+
+    @staticmethod
+    def _fetcher(cache):
+        """Cache-backed attribute fetcher for _walk/_accessible_name (None -> live serial)."""
+        if cache is None:
+            return None
+        def fetch(el):
+            hit = cache.get(id(el))
+            return hit[1] if hit is not None else ax.get_attrs(el, _ATTRS)
+        return fetch
+
+    def _resolve_window(self, app_name):
+        """Resolve app -> (window element, real app name, error). On failure the
+        error is the (text, info) tuple snapshot()/find() should return as-is.
+        Side effects: sets self._pid/_app_name, handles the embedded-Chromium
+        force-accessibility relaunch dance."""
         if app_name is None:
             app_name, pid = _frontmost()
         else:
@@ -345,7 +449,8 @@ class MacSession:
             if match:
                 app_name = match["name"]   # use the app's REAL name (with any invisible marks) downstream
         if pid is None:
-            return f"(app {app_name!r} not found)", {"est_tokens": 20, "refs": 0, "app": app_name}
+            return None, app_name, (f"(app {app_name!r} not found)",
+                                    {"est_tokens": 20, "refs": 0, "app": app_name})
         self._pid = pid
         self._app_name = app_name  # used by activate() for reliable `open -a` fronting
         # Reading is FOCUS-FREE: native (AppKit) apps expose their AX tree while backgrounded, so we
@@ -377,53 +482,144 @@ class MacSession:
         win = ax.get_window(ax_app)
         if win is None:
             if _embedded_chromium(pid) and not already_front:
-                return (f"“{app_name}” is an embedded-Chromium app whose accessibility tree isn't up "
-                        f"yet. Call launch_app(\"{app_name}\", force_accessibility=true) once — it "
-                        f"relaunches it FOCUS-FREE with the flag that keeps its full tree readable in "
-                        f"the background — then snapshot again. If the tree is STILL empty after that, "
-                        f"the app blocks AX entirely: use its AppleScript dictionary, or tell the user "
-                        f"it needs Screen Recording + pixel control.",
-                        {"est_tokens": 70, "refs": 0, "app": app_name, "embedded_chromium": True})
+                return None, app_name, (
+                    (f"“{app_name}” is an embedded-Chromium app whose accessibility tree isn't up "
+                     f"yet. Call launch_app(\"{app_name}\", force_accessibility=true) once — it "
+                     f"relaunches it FOCUS-FREE with the flag that keeps its full tree readable in "
+                     f"the background — then snapshot again. If the tree is STILL empty after that, "
+                     f"the app blocks AX entirely: use its AppleScript dictionary, or tell the user "
+                     f"it needs Screen Recording + pixel control."),
+                    {"est_tokens": 70, "refs": 0, "app": app_name, "embedded_chromium": True})
             if not AXIsProcessTrusted():
-                return (f"(no window for {app_name} — and this process is NOT trusted for "
-                        "Accessibility, so ALL tree reads will come back empty. Tell the user: "
-                        "grant the app hosting Hunch in System Settings → Privacy & Security → "
-                        "Accessibility — toggle it off and on if it's already listed — then "
-                        "restart the host. `hunch doctor` explains.)"), \
-                       {"est_tokens": 60, "refs": 0, "app": app_name}
-            return (f"(no window for {app_name} — the app may have no open window; open one "
-                    "via launch_app or open_file, or check with the user, then retry)"), \
-                   {"est_tokens": 40, "refs": 0, "app": app_name}
+                return None, app_name, (
+                    (f"(no window for {app_name} — and this process is NOT trusted for "
+                     "Accessibility, so ALL tree reads will come back empty. Tell the user: "
+                     "grant the app hosting Hunch in System Settings → Privacy & Security → "
+                     "Accessibility — toggle it off and on if it's already listed — then "
+                     "restart the host. `hunch doctor` explains.)"),
+                    {"est_tokens": 60, "refs": 0, "app": app_name})
+            return None, app_name, (
+                (f"(no window for {app_name} — the app may have no open window; open one "
+                 "via launch_app or open_file, or check with the user, then retry)"),
+                {"est_tokens": 40, "refs": 0, "app": app_name})
+        return win, app_name, None
 
-        lines = [f"=== {app_name} — focused window (snapshot #{self.snapshot_count}) ==="]
-        self._walk(win, 0, "", lines, compact, max_depth, {"left": _MAX_NODES})
+    def _snapshot_scoped(self, ref, max_depth, max_nodes, compact):
+        """Re-walk ONLY the subtree under a known ref, at generous depth. Does NOT
+        clear the registry: every other ref stays live, subtree refs are updated in
+        place (the persistent _keymap makes them identical to full-walk refs)."""
+        el = self.registry.get(ref)
+        key = self._ref_keys.get(ref)
+        app = getattr(self, "_app_name", None) or "app"
+        if el is None or key is None:
+            return (f"(ref {ref} unknown or stale — take a full snapshot first)",
+                    {"est_tokens": 15, "refs": len(self.registry), "app": app})
+        a = ax.get_attrs(el, _ATTRS)
+        if a[ax.kAXRoleAttribute] is None:
+            return (f"(ref {ref} is stale — its element is gone; re-snapshot the app)",
+                    {"est_tokens": 15, "refs": len(self.registry), "app": app})
+        max_depth = _cap_depth(max_depth, _SCOPED_MAX_DEPTH)
+        max_nodes = _cap_nodes(max_nodes, _SCOPED_MAX_NODES)
+        self.snapshot_count += 1
+        cache = self._prefetch(el, max_depth, max_nodes, compact)
+        if cache is not None:
+            cache[id(el)] = (el, a)   # root already fetched by the staleness probe
+        fetch = self._fetcher(cache)
+        lines = [f"=== {app} — subtree of [{ref}] (snapshot #{self.snapshot_count}) ==="]
+        budget = {"left": max_nodes, "hit": False}
+        self._walk(el, 0, "", lines, compact, max_depth, budget, fetch=fetch, root_key=key)
+        if budget["hit"]:
+            lines.append(_TRUNC_FOOTER.format(n=max_nodes))
         text = "\n".join(lines)
-        return text, {"est_tokens": round(len(text) / 3.5), "refs": len(self.registry), "app": app_name}
+        return text, {"est_tokens": round(len(text) / 3.5), "refs": len(self.registry), "app": app}
 
-    def _walk(self, el, depth, parent_key, lines, compact, max_depth, budget, sib=None):
+    def find(self, role=None, name_contains=None, max_results=20, app_name=None, max_nodes=None):
+        """Search the WHOLE tree (deeper than snapshot shows) for matching elements.
+        Registers refs for matches only — does NOT clear existing refs. Returns
+        (text, info): one line per match with an ancestor breadcrumb."""
+        win, app_name, err = self._resolve_window(app_name)
+        if err is not None:
+            return err
+        max_nodes = _cap_nodes(max_nodes, _SCOPED_MAX_NODES)
+        max_depth = _SCOPED_MAX_DEPTH
+        # compact=False: find searches INSIDE rows too, so prefetch must descend them
+        cache = self._prefetch(win, max_depth, max_nodes, compact=False)
+        fetch = self._fetcher(cache)
+        want_role = role.lower() if role else None
+        if want_role and want_role.startswith("ax"):
+            want_role = want_role[2:]
+        needle = (name_contains or "").lower()
+        results, searched, more = [], [0], [False]
+
+        def matches(role_, title, desc, value, name):
+            if want_role is not None:
+                r = role_.lower()
+                if (r[2:] if r.startswith("ax") else r) != want_role:
+                    return False
+            if needle:
+                hay = " ".join(x for x in (title, desc, value, name) if x).lower()
+                return needle in hay
+            return True
+
+        def walk(el, depth, parent_key, sib, crumbs):
+            if len(results) >= max_results or searched[0] >= max_nodes:
+                more[0] = True
+                return
+            searched[0] += 1
+            a = fetch(el) if fetch else ax.get_attrs(el, _ATTRS)
+            role_, title, desc, value, enabled, name, is_row = self._describe(el, a, fetch)
+            key = self._seg_key(parent_key, sib, role_, name, desc)
+            if matches(role_, title, desc, value, name):
+                r = self._ref_for(key)
+                self.registry[r] = el
+                crumb = " > ".join(crumbs[-4:])
+                line = self._fmt_el(r, role_, title or name, desc, value, enabled)
+                results.append((crumb + " › " if crumb else "") + line)
+            if depth >= max_depth:
+                return
+            children = a[ax.kAXChildrenAttribute]
+            if not children:
+                return
+            shown = (title or name)[:40]
+            child_crumbs = crumbs + [shown] if shown else crumbs
+            child_sib = {}
+            for child in list(children)[:_MAX_CHILDREN]:
+                if len(results) >= max_results:
+                    more[0] = True
+                    return
+                walk(child, depth + 1, key, child_sib, child_crumbs)
+
+        walk(win, 0, "", {}, [])
+        if not results:
+            text = (f"(no matches for role={role!r}, name_contains={name_contains!r} in "
+                    f"{app_name} — {searched[0]} nodes searched)")
+        else:
+            lines = [f"=== {app_name} — find(role={role!r}, name_contains={name_contains!r}) "
+                     f"— {len(results)} match(es) ==="] + results
+            if more[0]:
+                lines.append(f"…stopped at {len(results)} matches — narrow with role=/"
+                             "name_contains=, or raise max_results")
+            text = "\n".join(lines)
+        return text, {"est_tokens": round(len(text) / 3.5), "refs": len(self.registry),
+                      "app": app_name, "matches": len(results), "searched": searched[0]}
+
+    def _walk(self, el, depth, parent_key, lines, compact, max_depth, budget, sib=None,
+              fetch=None, root_key=None):
         if budget["left"] <= 0:
+            budget["hit"] = True
             return
         budget["left"] -= 1
         if sib is None:
             sib = {}
-        a = ax.get_attrs(el, _ATTRS)
-        role = str(a[ax.kAXRoleAttribute] or "?")
-        title = str(a[ax.kAXTitleAttribute] or "").strip()
-        desc = str(a[ax.kAXDescriptionAttribute] or "").strip()
-        v = a[ax.kAXValueAttribute]
-        value = str(v).strip() if v is not None else ""
-        enabled = a[ax.kAXEnabledAttribute]
-
-        # A selectable row is nameless in itself; label it with the accessible name
-        # from its subtree so the key (hence the persistent ref) is unique per row.
-        is_row = role in _ROW_ROLES
-        name = (title or value or self._accessible_name(el)) if is_row else title
-        # Stable key: role+name path, disambiguated by sibling occurrence so two
-        # same-named siblings still get distinct refs.
-        seg = f"{role}:{name}:{desc}"
-        occ = sib.get(seg, 0)
-        sib[seg] = occ + 1
-        key = f"{parent_key}/{seg}#{occ}"
+        a = fetch(el) if fetch else ax.get_attrs(el, _ATTRS)
+        role, title, desc, value, enabled, name, is_row = self._describe(el, a, fetch)
+        if root_key is not None and depth == 0:
+            # Scoped walk: the root's #occ disambiguator is uncomputable from inside the
+            # subtree (its siblings aren't walked) — seed the stored key verbatim so this
+            # ref and every descendant ref match the full-walk assignment.
+            key = root_key
+        else:
+            key = self._seg_key(parent_key, sib, role, name, desc)
 
         # Collapse a selectable row into ONE labelled, selectable line — the fix for
         # "the row is selectable but nameless, its text is an unselectable child."
@@ -435,31 +631,93 @@ class MacSession:
 
         emit = (not compact) or self._interesting(role, title, value)
         depth_out = depth
+        ref = None
         if emit:
             ref = self._ref_for(key)
             self.registry[ref] = el
-            parts = [f"[{ref}]", role]
-            if title:
-                parts.append(f'"{title}"')
-            if desc and desc != title:
-                parts.append(f"({desc})")
-            if value and value != title:
-                shown = value if len(value) <= _MAX_VALUE_CHARS else \
-                    value[:_MAX_VALUE_CHARS] + f"…(+{len(value) - _MAX_VALUE_CHARS} more chars)"
-                parts.append(f"val={shown!r}")
-            if enabled is False:
-                parts.append("disabled")
-            lines.append("  " * depth + " ".join(parts))
+            lines.append("  " * depth + self._fmt_el(ref, role, title, desc, value, enabled))
             depth_out = depth + 1
 
-        if depth >= max_depth:
-            return
         children = a[ax.kAXChildrenAttribute]
+        if depth >= max_depth:
+            if children:
+                lines.append("  " * depth_out + (
+                    f"…(+{len(children)} children not walked — snapshot(ref='{ref}') to expand)"
+                    if ref else f"…(+{len(children)} children not walked — max depth reached)"))
+            return
         if not children:
             return
         child_sib = {}
-        for child in list(children)[:200]:
-            self._walk(child, depth_out, key, lines, compact, max_depth, budget, child_sib)
+        for child in list(children)[:_MAX_CHILDREN]:
+            self._walk(child, depth_out, key, lines, compact, max_depth, budget, child_sib,
+                       fetch=fetch)
+        if len(children) > _MAX_CHILDREN:
+            lines.append("  " * depth_out + f"…(+{len(children) - _MAX_CHILDREN} more siblings not shown)")
+
+    _PREFETCH_DEADLINE_S = 20.0
+
+    def _prefetch(self, root, max_depth, max_nodes, compact):
+        """Phase A of the walk: fetch each element's attributes CONCURRENTLY (wave
+        BFS on a thread pool) so the serial assembly in _walk never waits on IPC.
+        The AX client API is synchronous Mach messaging with no documented thread
+        guarantee, so this is best-effort: ANY failure returns None and the caller
+        walks fully serial (today's behavior). Partial caches are safe — assembly
+        falls back to a live fetch per miss. Returns {id(el): (el, attrs)}; the
+        tuple keeps el referenced so id() stays unique for the cache's lifetime."""
+        if self.walk_workers <= 1:
+            return None
+        try:
+            from concurrent.futures import ThreadPoolExecutor
+            deadline = time.time() + self._PREFETCH_DEADLINE_S
+            cache = {}
+            limit = max_nodes + 512   # slack: DFS-with-budget ≠ first-N-BFS exactly
+            # Level entries: (el, depth, rowctr, rel). Inside a row subtree rowctr is a
+            # shared countdown ([n] mirroring _accessible_name's budget of 8 nodes ≤ 5
+            # levels) and rel the relative depth; elsewhere both are None.
+            level = [(root, 0, None, None)]
+            with ThreadPoolExecutor(max_workers=min(self.walk_workers, 32)) as pool:
+                while level and len(cache) < limit and time.time() < deadline:
+                    level = level[:limit - len(cache)]
+                    futs = [(item, pool.submit(ax.get_attrs, item[0], _ATTRS)) for item in level]
+                    nxt = []
+                    for (el, depth, rowctr, rel), fut in futs:
+                        a = fut.result()
+                        cache[id(el)] = (el, a)
+                        children = a[ax.kAXChildrenAttribute] or []
+                        if not children:
+                            continue
+                        if rowctr is not None:           # inside a row's name fan-out
+                            if rel >= 5:
+                                continue
+                            for c in list(children)[:_MAX_CHILDREN]:
+                                if rowctr[0] <= 0:
+                                    break
+                                rowctr[0] -= 1
+                                nxt.append((c, depth + 1, rowctr, rel + 1))
+                            continue
+                        role = str(a[ax.kAXRoleAttribute] or "?")
+                        if compact and role in _ROW_ROLES:
+                            # assembly never descends rows, but _accessible_name reads a
+                            # few descendants when the row is nameless — prefetch those
+                            title = str(a[ax.kAXTitleAttribute] or "").strip()
+                            v = a[ax.kAXValueAttribute]
+                            value = str(v).strip() if v is not None else ""
+                            if not (title or value):
+                                ctr = [7]   # _accessible_name budget 8 minus the row itself
+                                for c in list(children)[:_MAX_CHILDREN]:
+                                    if ctr[0] <= 0:
+                                        break
+                                    ctr[0] -= 1
+                                    nxt.append((c, depth + 1, ctr, 1))
+                            continue
+                        if depth >= max_depth:
+                            continue
+                        for c in list(children)[:_MAX_CHILDREN]:
+                            nxt.append((c, depth + 1, None, None))
+                    level = nxt
+            return cache
+        except Exception:
+            return None   # any weirdness -> serial walk, correctness unaffected
 
     # ── actions ─────────────────────────────────────────────────────────
     def _el(self, ref):
@@ -773,19 +1031,30 @@ class LocalComputer:
     """Drives the real Mac through MacSession, exposing the same tools/handle
     contract the agent loop expects. Swap this in for the Docker Computer."""
 
-    def __init__(self, app="Finder", simultaneous=False):
+    def __init__(self, app="Finder", simultaneous=False, walk_workers=None,
+                 max_depth=None, max_nodes=None):
         self.app = app
         # simultaneous=True: never steal the user's cursor/keyboard. Runs the
         # focus-free primitives (AXPress/select/set_value) without bringing the app
         # forward, and REFUSES the shared-input ones (typed keystrokes, key combos,
         # pixel clicks) instead of disrupting whatever the user is doing.
         self.simultaneous = simultaneous
-        self.session = MacSession()
+        self.session = MacSession(walk_workers=walk_workers)
+        self.max_depth = max_depth   # instance defaults for full snapshots (None -> module defaults)
+        self.max_nodes = max_nodes
         self.tools = TOOLS
 
-    def snapshot(self):
+    def snapshot(self, ref=None, max_depth=None, max_nodes=None):
         text, _ = self.session.snapshot(app_name=self.app, compact=True,
-                                        activate_app=not self.simultaneous)
+                                        activate_app=not self.simultaneous,
+                                        ref=ref,
+                                        max_depth=max_depth if max_depth is not None else self.max_depth,
+                                        max_nodes=max_nodes if max_nodes is not None else self.max_nodes)
+        return text
+
+    def find(self, role=None, name_contains=None, max_results=20):
+        text, _ = self.session.find(role=role, name_contains=name_contains,
+                                    max_results=max_results, app_name=self.app)
         return text
 
     @staticmethod

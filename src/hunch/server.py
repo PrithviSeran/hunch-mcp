@@ -8,18 +8,15 @@ Requires Accessibility permission for whatever process runs this (grant
 Claude Desktop in System Settings → Privacy & Security → Accessibility).
 """
 import os
-import time
 import base64
-import subprocess
 
 from mcp.server.fastmcp import FastMCP, Image
 from AppKit import NSWorkspace
 
 from .local_mac import (LocalComputer, screenshot_b64, list_running_apps, set_focus_reason,
-                       suppress_focus_notice,
                        launch_app as _launch_app, quit_app as _quit_app, focus_app as _focus_app)
+from . import gate
 from . import os_ops
-from . import policy
 from .notify import notify as _notify_impl
 
 HUNCH_PLAYBOOK = """Hunch drives this Mac across THREE focus-free layers plus a gated last resort.
@@ -146,9 +143,10 @@ def _frontmost():
     return app.localizedName() if app else "Finder"
 
 
-def _as_str(s):
-    """Quote a Python string as an AppleScript string literal (escape \\ and ", keep UTF-8)."""
-    return '"' + str(s).replace("\\", "\\\\").replace('"', '\\"') + '"'
+# The consent/safety layer lives in gate.py (shared with the Python SDK); this server keeps
+# ONE Gate so approval state behaves exactly as the old module globals did.
+_gate = gate.Gate(confirm="dialog")
+_as_str = gate.as_str
 
 
 def _notify(message, title="Hunch"):
@@ -164,73 +162,34 @@ def _notify(message, title="Hunch"):
 
 
 def _confirm_dialog(prompt, timeout=180, screen_approval=True):
-    """Pop a real click-to-approve dialog with a 'Go ahead' button and BLOCK until the user
-    answers (or `timeout`). Returns True only if they click Go ahead. This is how Hunch gets
-    consent to take over the screen — one click, no typing. (A true inline notification-button
-    would require Hunch to be a signed app bundle using UserNotifications; a Python MCP can't
-    post those, so this is a dialog.)
-
-    `screen_approval=True` (any screen-related dialog): an approval also counts as consent for
-    the focus switch that follows — the app_to_front gate won't re-ask, and the focus-switch
-    notification is suppressed, for a short window. Pass False for non-screen dialogs
-    (risky AppleScript) so approving a script doesn't quietly authorize a screen takeover."""
-    script = (f'tell application "System Events" to display dialog {_as_str(prompt)} '
-              f'with title "Hunch wants your screen" buttons {{"Cancel", "Go ahead"}} '
-              f'default button "Go ahead" cancel button "Cancel" with icon caution '
-              f'giving up after {timeout}')
-    try:
-        r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True,
-                           timeout=timeout + 5)
-        ok = "button returned:Go ahead" in (r.stdout or "")
-    except Exception:
-        return False
-    if ok and screen_approval:
-        _mark_screen_approval()
-    return ok
-
-
-# One user approval covers the immediate follow-through (the switch they just allowed), so the
-# agent isn't re-asked — and the user isn't re-notified — for the same event. Short-lived on
-# purpose: it is consent for THIS action, not a session-wide waiver.
-_APPROVAL_WINDOW_S = 15
-_screen_ok_until = 0.0
+    return _gate.confirm_dialog(prompt, timeout, screen_approval)
 
 
 def _mark_screen_approval():
-    global _screen_ok_until
-    _screen_ok_until = time.monotonic() + _APPROVAL_WINDOW_S
-    suppress_focus_notice(_APPROVAL_WINDOW_S)
+    _gate.mark_screen_approval()
 
 
 def _screen_approved():
-    return time.monotonic() < _screen_ok_until
+    return _gate.screen_approved()
 
 
 def _front_gate(name, reason=""):
-    """None if bringing `name` to the front may proceed, else a refusal message for the agent.
-    Asks the user first (gates.app_to_front) unless they already approved a screen dialog
-    moments ago, the gate is off, or the app is already frontmost (no real switch)."""
-    if _screen_approved() or not policy.gate_enabled("app_to_front"):
-        return None
-    try:
-        front = NSWorkspace.sharedWorkspace().frontmostApplication()
-        if front and front.localizedName() == name:
-            return None
-    except Exception:
-        pass
-    why = f" — {reason}" if reason else ""
-    if _confirm_dialog(f"Hunch wants to bring “{name}” to the front{why}. Allow?"):
-        return None
-    return (f"User did NOT approve bringing “{name}” to the front. Work on it in the "
-            "background instead (snapshot / web tools are focus-free), or ask the user "
-            "how they'd like to proceed.")
+    return _gate.front_gate(name, reason)
 
 
 @mcp.tool()
-def snapshot(app: str = "") -> str:
+def snapshot(app: str = "", ref: str = "", max_depth: int | None = None,
+             max_nodes: int | None = None) -> str:
     """See the screen as an accessibility tree. Each element is one line tagged with
     a [ref] like [e12]; you act on elements by ref. Pass an app name to target that
     app's focused window, or leave blank for the frontmost app.
+
+    Truncation is never silent: when the tree is bigger than the walk budget, the
+    output ends in `…` marker lines naming what was dropped. Pass ref="e42" to
+    re-walk ONLY that element's subtree at full depth (its refs match the full
+    snapshot's, and every other ref stays valid) — the way to see inside a
+    truncated container. `find` locates elements without reading a full tree.
+    max_depth/max_nodes override the defaults when you truly need a bigger walk.
 
     A PARTIAL tree is NOT a dead end. Some apps (chat/mail/master-detail, and Catalyst apps like
     WhatsApp) only expose the pane you're IN — the first snapshot may show just the sidebar/list.
@@ -240,11 +199,35 @@ def snapshot(app: str = "") -> str:
     or steal focus (focus_app / launch_app foreground / click_xy) just because the first read was
     thin. Reserve `screenshot` for confirming truly VISUAL content (an image, a file-preview
     thumbnail) — to check what an action did or read UI text, RE-SNAPSHOT, don't screenshot."""
+    if ref:
+        return _computer.snapshot(ref=ref, max_depth=max_depth, max_nodes=max_nodes)
     prev = _computer.app
     _computer.app = app or _frontmost()
-    out = _computer.snapshot()
+    out = _computer.snapshot(max_depth=max_depth, max_nodes=max_nodes)
     if isinstance(out, str) and out.startswith("(app '") and "not found" in out:
         _computer.app = prev   # a failed target must not poison later act/snapshot calls
+    return out
+
+
+@mcp.tool()
+def find(role: str = "", name_contains: str = "", app: str = "", max_results: int = 20) -> str:
+    """Search an app's WHOLE accessibility tree for matching elements — the cheap way
+    to locate one control in a huge window without reading a full snapshot. Filters:
+    `role` (e.g. "button", "AXTextField", "row" — case-insensitive, "AX" prefix
+    optional) and/or `name_contains` (case-insensitive substring of the element's
+    title/description/value). Returns one line per match: an ancestor breadcrumb,
+    then the element tagged with a [ref] you can pass straight to `act`
+    (click/select/type by ref) or to `snapshot(ref=...)` to expand its subtree.
+    Searches deeper than `snapshot` shows, so it reaches elements a truncated
+    snapshot omitted. Refs stay valid until the next full snapshot of that app.
+    Pass an app name or leave blank for the current target app."""
+    prev = _computer.app
+    if app:
+        _computer.app = app
+    out = _computer.find(role=role or None, name_contains=name_contains or None,
+                         max_results=max_results)
+    if isinstance(out, str) and out.startswith("(app '") and "not found" in out:
+        _computer.app = prev
     return out
 
 
@@ -288,16 +271,9 @@ def act(actions: list, confirm: bool = False, reason: str = "") -> str:
     When the batch contains ANY focus-stealing action, ALWAYS pass `reason` — one short human
     sentence for WHY you need the screen (e.g. "press Enter to submit the search"). It is shown
     to the user in the focus warning and the approval prompt."""
-    stealing = [a for a in actions if _computer._is_shared_input(a)]
-    if stealing:
-        set_focus_reason(reason)   # the focus-switch warning tells the user WHY
-    if stealing and not _computer.simultaneous and not confirm and policy.gate_enabled("focus_steal"):
-        kinds = ", ".join(sorted({a.get("action") for a in stealing}))
-        why = f" — {reason}" if reason else ""
-        if not _confirm_dialog(f"Hunch wants to take over your screen ({kinds} on "
-                               f"“{_computer.app}”){why}. Allow?"):
-            return (f"User did NOT approve — skipped {len(stealing)} focus-stealing action(s) "
-                    f"[{kinds}]. Ask the user how they'd like to proceed.")
+    blocked = gate.check_focus_steal(_computer, actions, _gate, confirm, reason)
+    if blocked:
+        return blocked
     return _computer.act(actions)
 
 
@@ -580,24 +556,13 @@ def list_credentials() -> str:
 
 
 def _domain_mismatch(service):
-    """None if the current CDP page's host is allowed for `service`, else a refusal message.
-    A credential bound at add-time (`hunch creds add --domain`) only ever gets typed into that
-    site — the last line of defense when a prompt-injected agent lands on a look-alike page."""
-    from urllib.parse import urlparse
-    from .creds import domains_of
-    allowed = domains_of(service)
-    if not allowed:
-        return None   # unbound (legacy / user chose blank): fills anywhere, as before
+    """None if the current CDP page's host is allowed for `service`, else a refusal message
+    (the shared guard in gate.py, fed the live CDP page URL)."""
     try:
-        host = (urlparse(_cdp["computer"].session.url()).hostname or "").lower()
+        url = _cdp["computer"].session.url()
     except Exception:
-        host = ""
-    if any(host == d or host.endswith("." + d) for d in allowed):
-        return None
-    return (f"REFUSED: '{service}' is bound to {allowed} but the current page is '{host or 'unknown'}'. "
-            "Hunch won't type this credential into a different site (phishing/prompt-injection "
-            "protection). If this is legitimate, the user can re-bind it in a terminal: "
-            f"hunch creds add {service} --domain {host or '<domain>'}")
+        url = ""
+    return gate.domain_mismatch(service, url)
 
 
 @mcp.tool()
@@ -682,15 +647,8 @@ def request_focus(reason: str) -> str:
 
 
 # ── OS-API layer: focus-free filesystem + clipboard (no UI automation needed) ─────────
-_HUNCH_DIR = os.path.realpath(os.path.expanduser("~/.hunch"))
-
-
-def _protected(p):
-    """True for paths inside ~/.hunch — Hunch's own gate policy + credential metadata. The agent
-    must not be able to edit its own permissions; changes go through the `hunch` CLI a human runs.
-    realpath on both sides so a symlink can't launder the target."""
-    rp = os.path.realpath(os.path.abspath(os.path.expanduser(str(p))))
-    return rp == _HUNCH_DIR or rp.startswith(_HUNCH_DIR + os.sep)
+_HUNCH_DIR = gate.HUNCH_DIR
+_protected = gate.protected
 
 
 @mcp.tool()
@@ -748,13 +706,8 @@ def clipboard_set(text: str) -> str:
     return os_ops.clipboard_write(text)
 
 
-# Only GENUINELY dangerous / irreversible / OUTWARD verbs get Hunch's own click-to-approve.
-# Creating things (make new draft/note/event/reminder), reading, and playback are benign and
-# reversible, so they run silently — the CLIENT (Claude Code / Desktop) is the primary permission
-# gate; this internal gate is just a content-aware safety net for the catastrophic cases.
-_SHELL_AS = ("do shell script",)
-_DESTRUCTIVE_AS = ("delete ", "remove ", "erase", "empty trash",
-                   "send ", "shut down", "restart", "log out", "logout", "eject")
+_SHELL_AS = gate.SHELL_AS
+_DESTRUCTIVE_AS = gate.DESTRUCTIVE_AS
 
 
 @mcp.tool()
@@ -770,11 +723,8 @@ def applescript(script: str, confirm: bool = False) -> str:
     only run if approved (pass confirm=true to skip the dialog if the user already approved).
     Note: the FIRST time Hunch scripts a given app, macOS shows a one-time 'allow control'
     permission prompt the user must accept."""
-    low = script.lower()
-    category = ("shell" if any(k in low for k in _SHELL_AS)
-                else "destructive_applescript" if any(k in low for k in _DESTRUCTIVE_AS)
-                else None)
-    if category and not confirm and policy.gate_enabled(category):
+    category = gate.applescript_category(script)
+    if category and not confirm and _gate.enabled(category):
         preview = script.strip()[:400].replace("\n", "  ").replace("\r", " ")
         if not _confirm_dialog("Hunch wants to run an AppleScript that can change things or "
                                f"control apps:  {preview}   — allow?", screen_approval=False):
@@ -782,17 +732,7 @@ def applescript(script: str, confirm: bool = False) -> str:
     ok, out = os_ops.run_applescript(script)
     if ok:
         return out
-    hint = ""
-    if "assistive access" in out.lower() or "-25211" in out:
-        hint = (" — macOS blocked this: the app hosting Hunch lacks the Accessibility "
-                "permission. Tell the user: System Settings → Privacy & Security → "
-                "Accessibility, enable the MCP host app (toggle off/on if already listed), "
-                "then restart it. `hunch doctor` explains.")
-    elif "not authorized" in out.lower() or "-1743" in out:
-        hint = (" — Automation consent missing for the target app. macOS shows a one-time "
-                "'allow control' prompt on first use; if it was denied, tell the user to "
-                "re-enable it in System Settings → Privacy & Security → Automation.")
-    return f"AppleScript error: {out[:600]}{hint}"
+    return f"AppleScript error: {out[:600]}{gate.applescript_hint(out)}"
 
 
 def main():

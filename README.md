@@ -77,6 +77,47 @@ Cursor, your terminal), not "hunch" itself. `hunch setup` walks you through it:
 `hunch doctor` reports what's granted. Note: its Accessibility line reflects the *terminal* you ran
 it from; the server inherits the *host's* grant.
 
+## Python SDK (library use)
+
+Hunch is also an importable library — the same focus-free primitives as the MCP tools, driven
+deterministically from your own Python (a cron job, a test harness, your own agent loop), no LLM
+required. The distribution is `hunch-mcp`; the import is `hunch`:
+
+```python
+from hunch import Hunch
+
+mac = Hunch()                              # your machine, your logged-in apps
+print(mac.snapshot("Mail"))                # accessibility tree, focus-free
+mac.act([{"action": "click", "ref": "e12"}])
+mac.web.open(url="https://github.com")     # real persistent Chrome profile over CDP
+print(mac.web.snapshot())
+mac.files.trash(["~/Downloads/old.zip"])   # reversible delete, no Finder
+mac.applescript('tell application "Music" to play')
+```
+
+Constructor knobs: `app` (initial snapshot target), `confirm="dialog"|"off"` (see below),
+`check_permissions` (Accessibility check up front), `simultaneous` (never touch the
+foreground/cursor/keyboard), `cdp_port`.
+
+- **Permissions**: for library use it's *whatever runs your script* — your terminal or IDE — that
+  needs Accessibility (the MCP server instead uses the host app's grant). The constructor checks
+  and raises `AccessibilityNotGranted` with instructions. `screenshot()` additionally needs
+  Screen Recording.
+- **Safety gates default ON**: the same one-click "Go ahead" dialogs and `~/.hunch/config.json`
+  gates as the MCP server. `Hunch(confirm="off")` auto-approves for that instance only — for
+  unattended scripts, with the same caveats as `auto_approve_all`.
+- **Errors**: methods return status strings (check for `REFUSED`); the SDK raises only
+  `ApprovalDenied` (user declined a dialog), `AccessibilityNotGranted`, `WebNotOpen`
+  (`.web` before `.web.open()`), `StaleRef` (re-snapshot), and `HunchError` when a CDP
+  browser can't be opened (`web.restart()` recovers a stale instance).
+- **Credentials**: `mac.web.fill_login(service)` / `fill_secret(service, ref)` type Keychain
+  values straight into the page and never return them; domain binding is enforced.
+- **Coexistence**: the SDK and the MCP server share the CDP port (9337) and the persistent Hunch
+  browser profile — whichever opened it first is reused, but `web.restart()`/`web.login()` kill
+  whatever holds the port.
+
+Runnable scripts live in [`examples/`](examples/).
+
 ## Credentials: agents use them, never see them
 
 ```
