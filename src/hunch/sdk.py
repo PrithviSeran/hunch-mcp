@@ -334,8 +334,10 @@ class Web:
     def __init__(self, hunch, port, profile=None):
         self._h = hunch
         self.port = port
-        self.profile = profile  # None -> cdp.HUNCH_PROFILE (the personal default)
-        self._computer = None   # per-instance CDPComputer (the server's _cdp equivalent)
+        self.profile = profile      # None -> cdp.HUNCH_PROFILE (the personal default)
+        self.force_sandbox = None   # True forces isolated profiles; None defers to
+                                    #   the HUNCH_FORCE_SANDBOX env var (the app toggle)
+        self._computer = None       # per-instance CDPComputer (the server's _cdp equivalent)
 
     def _session(self):
         if self._computer is None:
@@ -348,8 +350,10 @@ class Web:
         If the profile isn't signed into the site, the returned string says so — call
         login() once, then reopen."""
         import os as _os
-        if _os.environ.get("HUNCH_FORCE_SANDBOX") == "1":
-            isolated = True
+        force = (self.force_sandbox if self.force_sandbox is not None
+                 else _os.environ.get("HUNCH_FORCE_SANDBOX") == "1")
+        if force:
+            isolated = True  # throwaway, no-login profile (the app's Sandbox toggle)
         from .cdp import CDPComputer
         self.close()
         try:

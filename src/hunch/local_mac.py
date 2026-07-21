@@ -158,7 +158,9 @@ def _wait_tree_ready(pid, timeout=18.0):
 # Deterministically alert the user whenever Hunch is about to bring an app to the front (a real
 # focus switch). ON BY DEFAULT so it works under any host (the standalone app, Claude Code, Claude
 # Desktop) — set HUNCH_NOTIFY_FOCUS=0 to silence.
-_NOTIFY_FOCUS = os.environ.get("HUNCH_NOTIFY_FOCUS", "1") != "0"
+def _notify_focus_enabled():
+    # read at call time (not import time) so the env var applies however late it's set
+    return os.environ.get("HUNCH_NOTIFY_FOCUS", "1") != "0"
 
 # The agent's stated WHY for the next focus switch (set at the MCP tool layer, where the reason
 # is known; consumed by the next _announce_front so the warning explains itself).
@@ -197,7 +199,7 @@ def _announce_front(name):
     foreground launch_app), so a focus shift is never silent."""
     global _focus_reason
     reason, _focus_reason = _focus_reason, ""   # consume — a stale reason must not label a later switch
-    if not _NOTIFY_FOCUS or not name:
+    if not _notify_focus_enabled() or not name:
         return
     if time.monotonic() < _suppress_until:
         return  # the user just approved this switch in a dialog — don't re-announce it
