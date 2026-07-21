@@ -205,6 +205,47 @@ hunch.logout()                     # removes what login() stored, and only that
 Other models: the agent loop is Claude-only, but the instance-SDK primitives are provider-agnostic —
 wire `mac.snapshot()` / `mac.act()` into your own OpenAI/Gemini/etc. agent loop as tools.
 
+## Building an app on Hunch
+
+The SDK is developer-first: **one uniform semantics, everything instance-owned, nothing ambient
+unless you opt in.** The MCP server above is itself just the first app built on it — its
+"personal" behavior (the `~/.hunch/config.json` policy, "Hunch"-branded dialogs, shared browser
+profile) is nothing but constructor arguments.
+
+```python
+from hunch import Hunch, ConsentRequest, OAuthToken
+
+mac = Hunch(
+    app_id="com.acme.mailbot",          # pure namespacing — own Keychain slots, browser
+                                        #   profile, and CDP port; never a behavior switch
+    app_name="Acme Mailbot",            # what consent dialogs + notifications say
+    confirm=my_consent_callback,        # ConsentRequest -> bool, rendered in YOUR UI
+    notify=my_toast_handler,            # (message, title) -> your surface, not macOS banners
+    policy={"gates": {"shell": True}},  # instance-owned safety; the user's personal
+                                        #   config can never disarm your app
+    auth=OAuthToken(token),             # exactly the credential YOUR app manages —
+                                        #   or "none" to forbid ambient pickup entirely
+)
+```
+
+What this buys you:
+
+- **Coexistence** — two apps with different `app_id`s get disjoint Keychain services, credential
+  stores, browser profiles, and CDP ports. They can't read each other's logins, log each other
+  out, or kill each other's browser sessions. Structurally, not by convention.
+- **Your brand, your UX** — every dialog, refusal, and notification says your `app_name`;
+  `confirm=` and `notify=` route consent and alerts through your app instead of osascript
+  dialogs and macOS banners. A broken consent callback fails **closed**.
+- **Isolated safety posture** — the machine's `hunch config` (and `HUNCH_NO_INTERNAL_GATE`)
+  govern only the personal MCP server, never your instance.
+- **Explicit auth** — `hunch.ApiKey(...)` / `hunch.OAuthToken(...)` use exactly that credential
+  (reprs are redacted); `auth="none"` guarantees your app never silently rides on the end
+  user's own Claude sign-in.
+
+Programmatic credential management uses the same namespacing: `hunch.creds.set_credential(name,
+user, pw, namespace=your_app_id)` etc. A runnable walkthrough lives in
+[`examples/embedded_app.py`](examples/embedded_app.py).
+
 ## Credentials: agents use them, never see them
 
 ```
@@ -242,9 +283,13 @@ the focus-switch notification is suppressed. A switch is either *asked about* or
 never both, and never silent (turn `gates.app_to_front` off and switches fall back to the
 notification).
 
-All on by default. `hunch config show` / `hunch config set gates.shell off` to adjust;
-changes apply immediately, even to a running server. `auto_approve_all` disables everything and
-makes you confirm you understand the [risk](SECURITY.md).
+All on by default. For the **MCP server**, `hunch config show` / `hunch config set gates.shell off`
+adjusts them; changes apply immediately, even to a running server. `auto_approve_all` disables
+everything and makes you confirm you understand the [risk](SECURITY.md).
+
+For **SDK instances** the gates are instance-owned: `Hunch()` defaults to all gates on and never
+reads the config file — pass `policy={"gates": {...}}`, a `callable(category) -> bool`, or
+`policy="personal"` to opt into the live config-file behavior for your own scripts.
 
 Hunch also refuses to let the agent edit anything under `~/.hunch/` (its own policy and credential
 metadata) via its file tools; permission changes are for humans in a terminal.
