@@ -48,16 +48,78 @@ def test_gate_confirm_off_disables_every_category():
         assert not g.enabled(cat), cat
 
 
-def test_gate_env_override_wins():
+def test_gate_env_override_personal_only():
+    """The env kill-switch (HUNCH_NO_INTERNAL_GATE) belongs to the PERSONAL app
+    (policy='personal', what the MCP server passes). A default instance-owned Gate
+    ignores it — another process's settings must never disarm an SDK app's gates."""
     old = os.environ.get("HUNCH_NO_INTERNAL_GATE")
     os.environ["HUNCH_NO_INTERNAL_GATE"] = "1"
     try:
-        assert not gate.Gate(confirm="dialog").enabled("shell")
+        assert not gate.Gate(confirm="dialog", policy="personal").enabled("shell")
+        assert gate.Gate(confirm="dialog").enabled("shell")   # uniform default: unaffected
     finally:
         if old is None:
             del os.environ["HUNCH_NO_INTERNAL_GATE"]
         else:
             os.environ["HUNCH_NO_INTERNAL_GATE"] = old
+
+
+def test_gate_instance_policy_forms():
+    # None -> every gate on
+    g = gate.Gate(confirm="dialog")
+    assert all(g.enabled(c) for c in policy.DEFAULT_GATES)
+    # dict -> instance-owned, per-category with default True, auto_approve_all wins
+    g = gate.Gate(confirm="dialog", policy={"gates": {"shell": False}})
+    assert not g.enabled("shell") and g.enabled("focus_steal")
+    g = gate.Gate(confirm="dialog", policy={"auto_approve_all": True})
+    assert not g.enabled("shell")
+    # callable -> custom resolver
+    g = gate.Gate(confirm="dialog", policy=lambda c: c == "shell")
+    assert g.enabled("shell") and not g.enabled("focus_steal")
+    # bad form fails fast
+    try:
+        gate.Gate(confirm="dialog", policy=42)
+        assert False, "expected ValueError"
+    except ValueError:
+        pass
+
+
+def test_gate_confirm_callable():
+    from hunch.errors import ConsentRequest
+    seen = []
+    g = gate.Gate(confirm=lambda req: seen.append(req) or True, app_name="Acme Mailbot")
+    assert g.confirm_dialog("Acme Mailbot wants to bring “Mail” to the front. Allow?",
+                            category="app_to_front", detail="Mail") is True
+    assert isinstance(seen[0], ConsentRequest)
+    assert seen[0].category == "app_to_front" and seen[0].detail == "Mail"
+    assert "Acme Mailbot" in seen[0].prompt
+    # deny path
+    assert gate.Gate(confirm=lambda req: False).confirm_dialog("x?") is False
+    # a BROKEN callback fails closed
+    def boom(req):
+        raise RuntimeError("ui crashed")
+    assert gate.Gate(confirm=boom).confirm_dialog("x?") is False
+    # confirm="off" auto-approves without any UI
+    assert gate.Gate(confirm="off").confirm_dialog("x?") is True
+
+
+def test_gate_branding_in_dialogs():
+    seen = []
+    g = gate.Gate(confirm=lambda req: seen.append(req) or False, app_name="Acme Mailbot")
+    msg = g.front_gate("Some App That Is Not Frontmost")
+    assert msg is not None and "did NOT approve" in msg
+    assert seen and seen[0].prompt.startswith("Acme Mailbot wants to bring")
+    assert seen[0].category == "app_to_front"
+
+
+def test_hunch_policy_validation():
+    try:
+        Hunch(check_permissions=False, confirm="off", policy={"gates": {"warp_drive": True}})
+        assert False, "expected HunchError"
+    except hunch.HunchError as e:
+        assert "warp_drive" in str(e)
+    h = Hunch(check_permissions=False, confirm="off", app_name="Acme Mailbot")
+    assert h.app_name == "Acme Mailbot" and h._gate.app_name == "Acme Mailbot"
 
 
 def test_gate_rejects_bad_confirm():

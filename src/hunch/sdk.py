@@ -35,6 +35,7 @@ import base64
 
 from . import gate
 from . import os_ops
+from . import policy as _policy_mod
 from .gate import (HunchError, ApprovalDenied, AccessibilityNotGranted, WebNotOpen)  # re-export
 from .cli import CDP_PORT
 from .local_mac import (LocalComputer, StaleRef, screenshot_b64, list_running_apps,
@@ -58,7 +59,7 @@ class Hunch:
     def __init__(self, app="Finder", confirm="dialog", check_permissions=True,
                  simultaneous=False, cdp_port=None, walk_workers=None,
                  snapshot_max_depth=None, snapshot_max_nodes=None,
-                 agent_backend="auto", auth=None):
+                 agent_backend="auto", auth=None, app_name=None, policy=None):
         """agent_backend: which LLM transport `mac.agent` uses — 'api' (anthropic SDK on a
         metered ANTHROPIC_API_KEY), 'subscription' (claude-agent-sdk on the hunch.login()
         Claude sign-in), or 'auto' (pick by credentials). Overridable per call via
@@ -66,8 +67,28 @@ class Hunch:
 
         auth: the agent loop's credential — None (ambient resolution, hunch.auth order),
         hunch.ApiKey(...) / hunch.OAuthToken(...) (use exactly this credential, nothing
-        ambient), or 'none' (never scavenge; the loop raises until a credential is given)."""
-        self._gate = gate.Gate(confirm=confirm)   # validates confirm
+        ambient), or 'none' (never scavenge; the loop raises until a credential is given).
+
+        confirm: 'dialog' (osascript click-to-approve), 'off' (auto-approve everything),
+        or a callable(ConsentRequest) -> bool to render consent in YOUR app's UI.
+
+        policy: which gates are active — None (ALL gates on, instance-owned: the uniform
+        default; the machine's ~/.hunch/config.json is never consulted), a dict
+        ({"gates": {"shell": False, ...}, "auto_approve_all": bool}), a callable
+        (category) -> bool, or 'personal' (the live config-file resolver — what
+        `hunch serve` uses so `hunch config set` keeps applying to the MCP server).
+
+        app_name: brands consent dialogs and notifications (default 'Hunch')."""
+        if isinstance(policy, dict):
+            unknown = set(policy.get("gates", {})) - set(_policy_mod.DEFAULT_GATES)
+            if unknown:
+                raise HunchError(f"unknown gate(s) in policy: {sorted(unknown)} — valid: "
+                                 f"{sorted(_policy_mod.DEFAULT_GATES)}")
+        self.app_name = app_name or "Hunch"
+        try:
+            self._gate = gate.Gate(confirm=confirm, app_name=self.app_name, policy=policy)
+        except ValueError as e:
+            raise HunchError(str(e)) from None
         if agent_backend not in ("auto", "api", "subscription"):
             raise HunchError(f"unknown agent_backend {agent_backend!r} — "
                              "use 'api', 'subscription', or 'auto'")
@@ -205,17 +226,19 @@ class Hunch:
         if category and self._gate.enabled(category):
             preview = script.strip()[:400].replace("\n", "  ").replace("\r", " ")
             if not self._gate.confirm_dialog(
-                    "Hunch wants to run an AppleScript that can change things or "
-                    f"control apps:  {preview}   — allow?", screen_approval=False):
+                    f"{self.app_name} wants to run an AppleScript that can change things or "
+                    f"control apps:  {preview}   — allow?", screen_approval=False,
+                    category=category, detail=preview):
                 raise ApprovalDenied("user did not approve the AppleScript")
         ok, out = os_ops.run_applescript(script)
         if ok:
             return out
         return f"AppleScript error: {out[:600]}{gate.applescript_hint(out)}"
 
-    def notify(self, message, title="Hunch"):
-        """Best-effort macOS desktop notification."""
-        _notify(message, title, sound="Ping")
+    def notify(self, message, title=None):
+        """Best-effort macOS desktop notification, titled with this instance's app_name
+        unless overridden."""
+        _notify(message, title or self.app_name, sound="Ping")
 
     def list_credentials(self):
         """Names + kinds of saved credentials (never any values). Fill them into a CDP

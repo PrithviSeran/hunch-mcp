@@ -24,6 +24,7 @@ _LAZY = {
     "AuthStatus": ".auth",
     "ApiKey": ".auth",        # injected agent-loop credentials (developer-first)
     "OAuthToken": ".auth",
+    "ConsentRequest": ".errors",   # what a custom confirm callback receives
 }
 
 

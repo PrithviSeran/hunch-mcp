@@ -273,7 +273,9 @@ def _notify(mac, message):
 
 
 def _request_focus(mac, reason):
-    ok = mac._gate.confirm_dialog(f"Hunch wants to {reason}. Allow it to take over your screen?")
+    name = getattr(mac, "app_name", "Hunch")
+    ok = mac._gate.confirm_dialog(f"{name} wants to {reason}. Allow it to take over your screen?",
+                                  category="focus", detail=reason)
     return ("user clicked Go ahead — proceed, then restore their previous app afterwards"
             if ok else "user did not approve — do NOT proceed with the focus-stealing action")
 

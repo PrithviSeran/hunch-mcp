@@ -37,8 +37,10 @@ def _frontmost():
 
 
 # The consent/safety layer lives in gate.py (shared with the Python SDK); this server keeps
-# ONE Gate so approval state behaves exactly as the old module globals did.
-_gate = gate.Gate(confirm="dialog")
+# ONE Gate so approval state behaves exactly as the old module globals did. The server is
+# the PERSONAL app on the SDK: policy="personal" = the live ~/.hunch/config.json resolver
+# (incl. the HUNCH_NO_INTERNAL_GATE env kill-switch), and default "Hunch" branding.
+_gate = gate.Gate(confirm="dialog", policy="personal")
 _as_str = gate.as_str
 
 

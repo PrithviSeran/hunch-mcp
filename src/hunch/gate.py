@@ -1,12 +1,11 @@
 """gate.py — Hunch's consent + safety layer, shared by the MCP server and the Python SDK.
 
-Everything here used to live at module scope in server.py. It is reshaped around a `Gate`
-instance so consent state (the short screen-approval window, the confirm mode) is held
-per-caller instead of per-process: the MCP server keeps one module-level Gate, and every
-`Hunch` SDK instance gets its own. Policy resolution is unchanged — `Gate.enabled` defers
-to policy.gate_enabled, so ~/.hunch/config.json and HUNCH_NO_INTERNAL_GATE keep working
-exactly as before; `confirm="off"` is an additional per-instance auto-approve for SDK
-callers, without touching the env or the config file.
+UNIFORM, instance-owned semantics (the developer-first contract): every Gate carries its
+OWN policy and consent surface. The SDK never reads ~/.hunch/config.json or the
+HUNCH_NO_INTERNAL_GATE env by default — those personal-machine behaviors belong to the
+MCP server, which (as just another app built on the SDK) passes policy="personal" to get
+the live file-backed resolver. Consent renders as an osascript dialog by default, or
+through the app's own UI via a confirm callback, branded with the app's name.
 
 This module must never import server.py (module-load side effects) or the MCP SDK.
 """
@@ -21,7 +20,8 @@ from .local_mac import set_focus_reason, suppress_focus_notice
 
 # Exceptions live in errors.py (dependency-free, importable by auth/cli without pyobjc);
 # re-exported here so `from .gate import HunchError` keeps working everywhere.
-from .errors import HunchError, ApprovalDenied, AccessibilityNotGranted, WebNotOpen  # noqa: F401
+from .errors import (HunchError, ApprovalDenied, AccessibilityNotGranted, WebNotOpen,  # noqa: F401
+                     ConsentRequest)
 
 
 def as_str(s):
@@ -36,43 +36,81 @@ APPROVAL_WINDOW_S = 15
 
 
 class Gate:
-    """Per-caller consent state + dialogs. confirm="dialog" pops click-to-approve dialogs per
-    the policy gates; confirm="off" auto-approves everything for this instance only."""
+    """Per-caller consent state + policy + dialogs — the instance-owned safety layer.
 
-    def __init__(self, confirm="dialog"):
-        if confirm not in ("dialog", "off"):
-            raise ValueError(f"confirm must be 'dialog' or 'off', not {confirm!r}")
+    confirm: "dialog" pops click-to-approve dialogs; "off" auto-approves everything for
+    this instance; a callable routes consent through the app's own UI — it receives a
+    ConsentRequest and returns truthy to approve (an exception counts as a denial).
+
+    policy: who decides which gates are active. None -> ALL gates on (the uniform
+    developer-first default); a dict ({"gates": {...}, "auto_approve_all": bool}) ->
+    instance-owned, never reads global state; a callable(category)->bool -> custom
+    resolver; "personal" -> the live ~/.hunch/config.json resolver incl. the
+    HUNCH_NO_INTERNAL_GATE env kill-switch (what the MCP server passes).
+
+    app_name brands every dialog ("Acme Mailbot wants to ..." instead of "Hunch")."""
+
+    def __init__(self, confirm="dialog", app_name="Hunch", policy=None):
+        if confirm not in ("dialog", "off") and not callable(confirm):
+            raise ValueError(f"confirm must be 'dialog', 'off', or a callable, not {confirm!r}")
+        if not (policy is None or policy == "personal" or callable(policy)
+                or isinstance(policy, dict)):
+            raise ValueError(f"policy must be None, a dict, a callable, or 'personal', "
+                             f"not {policy!r}")
         self.confirm = confirm
+        self.app_name = app_name or "Hunch"
+        self._policy = policy
         self._screen_ok_until = 0.0
 
     def enabled(self, category):
-        """Is the gate for `category` active for this caller? Single choke point for the
-        per-instance bypass; otherwise env + config flow through policy unchanged."""
+        """Is the gate for `category` active for this caller? Single choke point:
+        the per-instance bypass first, then THIS instance's policy — nothing global
+        unless policy='personal' opted in."""
         if self.confirm == "off":
             return False
-        return policy.gate_enabled(category)
-
-    def confirm_dialog(self, prompt, timeout=180, screen_approval=True):
-        """Pop a real click-to-approve dialog with a 'Go ahead' button and BLOCK until the user
-        answers (or `timeout`). Returns True only if they click Go ahead. This is how Hunch gets
-        consent to take over the screen — one click, no typing. (A true inline notification-button
-        would require Hunch to be a signed app bundle using UserNotifications; a Python MCP can't
-        post those, so this is a dialog.)
-
-        `screen_approval=True` (any screen-related dialog): an approval also counts as consent for
-        the focus switch that follows — the app_to_front gate won't re-ask, and the focus-switch
-        notification is suppressed, for a short window. Pass False for non-screen dialogs
-        (risky AppleScript) so approving a script doesn't quietly authorize a screen takeover."""
-        script = (f'tell application "System Events" to display dialog {as_str(prompt)} '
-                  f'with title "Hunch wants your screen" buttons {{"Cancel", "Go ahead"}} '
-                  f'default button "Go ahead" cancel button "Cancel" with icon caution '
-                  f'giving up after {timeout}')
-        try:
-            r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True,
-                               timeout=timeout + 5)
-            ok = "button returned:Go ahead" in (r.stdout or "")
-        except Exception:
+        p = self._policy
+        if p is None:
+            return True                     # uniform default: every gate on
+        if p == "personal":
+            return policy.gate_enabled(category)   # ~/.hunch/config.json + env kill-switch
+        if callable(p):
+            return bool(p(category))
+        if p.get("auto_approve_all"):
             return False
+        return bool(p.get("gates", {}).get(category, True))
+
+    def confirm_dialog(self, prompt, timeout=180, screen_approval=True, category="", detail=""):
+        """Ask the human for consent and BLOCK until they answer. Returns True only on
+        approval. Routing: a callable confirm gets ConsentRequest(prompt, category,
+        detail) — its exceptions count as denial; "off" auto-approves; "dialog" pops a
+        real osascript dialog titled with app_name. (A true inline notification-button
+        would require a signed app bundle using UserNotifications; a Python process
+        can't post those, so the built-in fallback is a dialog.)
+
+        `screen_approval=True` (any screen-related dialog): an approval also counts as
+        consent for the focus switch that follows — the app_to_front gate won't re-ask,
+        and the focus-switch notification is suppressed, for a short window. Pass False
+        for non-screen dialogs (risky AppleScript) so approving a script doesn't quietly
+        authorize a screen takeover."""
+        if callable(self.confirm):
+            try:
+                ok = bool(self.confirm(ConsentRequest(prompt, category, detail)))
+            except Exception:
+                ok = False                  # a broken callback must fail CLOSED
+        elif self.confirm == "off":
+            ok = True                       # instance-wide auto-approve
+        else:
+            script = (f'tell application "System Events" to display dialog {as_str(prompt)} '
+                      f'with title {as_str(self.app_name + " wants your screen")} '
+                      f'buttons {{"Cancel", "Go ahead"}} '
+                      f'default button "Go ahead" cancel button "Cancel" with icon caution '
+                      f'giving up after {timeout}')
+            try:
+                r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True,
+                                   timeout=timeout + 5)
+                ok = "button returned:Go ahead" in (r.stdout or "")
+            except Exception:
+                return False
         if ok and screen_approval:
             self.mark_screen_approval()
         return ok
@@ -97,7 +135,8 @@ class Gate:
         except Exception:
             pass
         why = f" — {reason}" if reason else ""
-        if self.confirm_dialog(f"Hunch wants to bring “{name}” to the front{why}. Allow?"):
+        if self.confirm_dialog(f"{self.app_name} wants to bring “{name}” to the front{why}. "
+                               "Allow?", category="app_to_front", detail=name):
             return None
         return (f"User did NOT approve bringing “{name}” to the front. Work on it in the "
                 "background instead (snapshot / web tools are focus-free), or ask the user "
@@ -114,8 +153,9 @@ def check_focus_steal(computer, actions, gate, confirm=False, reason=""):
     if stealing and not computer.simultaneous and not confirm and gate.enabled("focus_steal"):
         kinds = ", ".join(sorted({a.get("action") for a in stealing}))
         why = f" — {reason}" if reason else ""
-        if not gate.confirm_dialog(f"Hunch wants to take over your screen ({kinds} on "
-                                   f"“{computer.app}”){why}. Allow?"):
+        if not gate.confirm_dialog(f"{gate.app_name} wants to take over your screen ({kinds} on "
+                                   f"“{computer.app}”){why}. Allow?",
+                                   category="focus_steal", detail=kinds):
             return (f"User did NOT approve — skipped {len(stealing)} focus-stealing action(s) "
                     f"[{kinds}]. Ask the user how they'd like to proceed.")
     return None
@@ -163,7 +203,7 @@ def protected(p):
     return rp == HUNCH_DIR or rp.startswith(HUNCH_DIR + os.sep)
 
 
-def domain_mismatch(service, current_url):
+def domain_mismatch(service, current_url, app_name="Hunch"):
     """None if `current_url`'s host is allowed for `service`, else a refusal message.
     A credential bound at add-time (`hunch creds add --domain`) only ever gets typed into that
     site — the last line of defense when a prompt-injected agent lands on a look-alike page."""
@@ -179,6 +219,6 @@ def domain_mismatch(service, current_url):
     if any(host == d or host.endswith("." + d) for d in allowed):
         return None
     return (f"REFUSED: '{service}' is bound to {allowed} but the current page is '{host or 'unknown'}'. "
-            "Hunch won't type this credential into a different site (phishing/prompt-injection "
+            f"{app_name} won't type this credential into a different site (phishing/prompt-injection "
             "protection). If this is legitimate, the user can re-bind it in a terminal: "
             f"hunch creds add {service} --domain {host or '<domain>'}")
