@@ -268,7 +268,7 @@ def _set_simultaneous(mac, on):
 
 
 def _notify(mac, message):
-    mac.notify(message, "Hunch needs you")
+    mac.notify(message, f"{getattr(mac, 'app_name', 'Hunch')} needs you")
     return f"notified the user: {message}"
 
 

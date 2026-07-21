@@ -112,6 +112,81 @@ def test_gate_branding_in_dialogs():
     assert seen[0].category == "app_to_front"
 
 
+def test_two_app_coexistence():
+    """Two app_ids on one Mac: disjoint ports, profiles, keychain names — structurally
+    unable to kill each other's browsers or read each other's credentials. A personal
+    instance (no app_id) keeps every legacy name."""
+    import hunch.auth as auth
+    import hunch.creds as credmod
+    a = Hunch(check_permissions=False, confirm="off", app_id="com.acme.mailbot")
+    b = Hunch(check_permissions=False, confirm="off", app_id="com.other.invoicebot")
+    p = Hunch(check_permissions=False, confirm="off")
+    # CDP: distinct derived ports in 9400-9899, distinct profiles; personal keeps legacy
+    assert a.web.port != b.web.port and 9400 <= a.web.port < 9900
+    assert a.web.profile != b.web.profile
+    assert "com.acme.mailbot" in a.web.profile
+    assert p.web.port == 9337 and p.web.profile is None
+    # stable across constructions (an app must find its own state again)
+    assert Hunch(check_permissions=False, confirm="off",
+                 app_id="com.acme.mailbot").web.port == a.web.port
+    # keychain namespacing: token slot + credential service
+    assert auth._token_service("com.acme.mailbot") != auth._token_service("com.other.invoicebot")
+    assert credmod._service("com.acme.mailbot") != credmod._service("com.other.invoicebot")
+    assert credmod._service(None) == "com.hunch.credentials"
+    # metadata files live under the app dir
+    assert "/apps/com.acme.mailbot/" in credmod._meta_path("creds_index.json", "com.acme.mailbot")
+    # derived app_name; explicit overrides
+    assert a.app_name == "Mailbot"
+    assert Hunch(check_permissions=False, confirm="off", app_id="com.acme.mailbot",
+                 app_name="Acme").app_name == "Acme"
+    # bad app_id fails fast
+    try:
+        Hunch(check_permissions=False, confirm="off", app_id="not ok/slashes")
+        assert False, "expected HunchError"
+    except hunch.HunchError as e:
+        assert "app_id" in str(e)
+
+
+def test_notify_handler_routing():
+    got = []
+    h = Hunch(check_permissions=False, confirm="off", app_id="com.acme.mailbot",
+              notify=lambda msg, title: got.append((msg, title)))
+    h.notify("hello")
+    assert got == [("hello", "Mailbot")]        # handler called, app_name title
+    h.notify("urgent", "Custom title")
+    assert got[-1] == ("urgent", "Custom title")
+    try:
+        Hunch(check_permissions=False, confirm="off", notify="not-a-callable")
+        assert False, "expected HunchError"
+    except hunch.HunchError as e:
+        assert "notify" in str(e)
+
+
+def test_protected_covers_app_dirs():
+    assert gate.protected(os.path.expanduser("~/.hunch/apps/com.acme.mailbot/creds_index.json"))
+    assert gate.protected(os.path.expanduser("~/.hunch/config.json"))
+    assert not gate.protected(os.path.expanduser("~/Documents/x.txt"))
+
+
+def test_creds_namespace_isolation(tmp_path, monkeypatch):
+    """Namespaced metadata reads/writes never touch the personal files (fake HOME)."""
+    import hunch.creds as credmod
+    monkeypatch.setenv("HOME", str(tmp_path))
+    credmod._write_index(["acme-github"], "com.acme.mailbot")
+    assert credmod.list_services("com.acme.mailbot") == ["acme-github"]
+    assert credmod.list_services() == []                        # personal store untouched
+    assert credmod.list_services("com.other.invoicebot") == []  # other app blind to it
+    credmod.set_domains("acme-github", ["github.com"], "com.acme.mailbot")
+    assert credmod.domains_of("acme-github", "com.acme.mailbot") == ["github.com"]
+    assert credmod.domains_of("acme-github") == []
+    # gate.domain_mismatch consults the right namespace + brands the refusal
+    msg = gate.domain_mismatch("acme-github", "https://evil.example.com",
+                               app_name="Acme Mailbot", namespace="com.acme.mailbot")
+    assert msg and msg.startswith("REFUSED") and "Acme Mailbot won't type" in msg
+    assert gate.domain_mismatch("acme-github", "https://github.com",
+                                namespace="com.acme.mailbot") is None
+
+
 def test_hunch_policy_validation():
     try:
         Hunch(check_permissions=False, confirm="off", policy={"gates": {"warp_drive": True}})
@@ -164,19 +239,14 @@ def test_files_protected_paths_refused():
     assert h.files.mkdir("~/.hunch/sub").startswith("REFUSED")
 
 
-def test_shared_domain_mismatch_guard():
-    import tempfile
-    with tempfile.TemporaryDirectory() as d:
-        old_domains = creds._DOMAINS
-        creds._DOMAINS = os.path.join(d, "creds_domains.json")
-        try:
-            creds.set_domains("testsvc", ["google.com"])
-            assert gate.domain_mismatch("testsvc", "https://accounts.google.com/signin") is None
-            refusal = gate.domain_mismatch("testsvc", "https://evil.example.com/login")
-            assert refusal and refusal.startswith("REFUSED")
-            assert gate.domain_mismatch("unbound-svc", "https://anywhere.example") is None
-        finally:
-            creds._DOMAINS = old_domains
+def test_shared_domain_mismatch_guard(monkeypatch, tmp_path):
+    monkeypatch.setattr(creds, "_meta_path",
+                        lambda base, ns=None: str(tmp_path / (ns or "personal") / base))
+    creds.set_domains("testsvc", ["google.com"])
+    assert gate.domain_mismatch("testsvc", "https://accounts.google.com/signin") is None
+    refusal = gate.domain_mismatch("testsvc", "https://evil.example.com/login")
+    assert refusal and refusal.startswith("REFUSED")
+    assert gate.domain_mismatch("unbound-svc", "https://anywhere.example") is None
 
 
 def test_server_delegates_to_gate():

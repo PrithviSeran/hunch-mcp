@@ -96,12 +96,12 @@ class _StubComputer:
         self.session = _StubSession(url)
 
 
-def test_domain_mismatch_guard(tmp_path=None):
-    # Redirect the domains metadata to a temp file so we never touch real state.
+def test_domain_mismatch_guard():
+    # Redirect the domains metadata to a temp dir so we never touch real state.
     import tempfile
     with tempfile.TemporaryDirectory() as d:
-        old_domains = creds._DOMAINS
-        creds._DOMAINS = os.path.join(d, "creds_domains.json")
+        old_meta = creds._meta_path
+        creds._meta_path = lambda base, ns=None: os.path.join(d, ns or "personal", base)
         old_cdp = server._cdp["computer"]
         try:
             creds.set_domains("testsvc", ["google.com"])
@@ -112,7 +112,7 @@ def test_domain_mismatch_guard(tmp_path=None):
             assert refusal and refusal.startswith("REFUSED")
             assert server._domain_mismatch("unbound-svc") is None  # unbound fills anywhere
         finally:
-            creds._DOMAINS = old_domains
+            creds._meta_path = old_meta
             server._cdp["computer"] = old_cdp
 
 

@@ -59,7 +59,8 @@ class Hunch:
     def __init__(self, app="Finder", confirm="dialog", check_permissions=True,
                  simultaneous=False, cdp_port=None, walk_workers=None,
                  snapshot_max_depth=None, snapshot_max_nodes=None,
-                 agent_backend="auto", auth=None, app_name=None, policy=None):
+                 agent_backend="auto", auth=None, app_name=None, policy=None,
+                 app_id=None, cdp_profile=None, notify=None):
         """agent_backend: which LLM transport `mac.agent` uses — 'api' (anthropic SDK on a
         metered ANTHROPIC_API_KEY), 'subscription' (claude-agent-sdk on the hunch.login()
         Claude sign-in), or 'auto' (pick by credentials). Overridable per call via
@@ -78,13 +79,34 @@ class Hunch:
         (category) -> bool, or 'personal' (the live config-file resolver — what
         `hunch serve` uses so `hunch config set` keeps applying to the MCP server).
 
-        app_name: brands consent dialogs and notifications (default 'Hunch')."""
+        app_name: brands consent dialogs and notifications (default: derived from app_id,
+        else 'Hunch').
+
+        app_id: PURE NAMESPACING, never a behavior switch — a stable reverse-DNS id for
+        the app you're shipping ("com.acme.mailbot"). It only picks storage names, so two
+        apps built on the SDK coexist on one Mac: their own Keychain token slot and
+        credential store, their own browser profile and derived CDP port. None -> the
+        legacy/personal names (what the MCP server uses).
+
+        cdp_profile: browser profile dir override (default derives from app_id).
+        notify: callable(message, title) replacing system notifications with your own
+        surface (e.g. an in-app toast)."""
         if isinstance(policy, dict):
             unknown = set(policy.get("gates", {})) - set(_policy_mod.DEFAULT_GATES)
             if unknown:
                 raise HunchError(f"unknown gate(s) in policy: {sorted(unknown)} — valid: "
                                  f"{sorted(_policy_mod.DEFAULT_GATES)}")
-        self.app_name = app_name or "Hunch"
+        if app_id is not None:
+            if not app_id or not all(c.isalnum() or c in "._-" for c in app_id):
+                raise HunchError(f"invalid app_id {app_id!r} — use letters, digits, '.', "
+                                 "'_', '-' (reverse-DNS style, e.g. 'com.acme.mailbot')")
+        if notify is not None and not callable(notify):
+            raise HunchError("notify must be a callable(message, title) or None")
+        self.app_id = app_id
+        self._app_id = app_id            # what Agent/_SubscriptionRunner read
+        self._notify_handler = notify
+        self.app_name = app_name or (app_id.split(".")[-1].replace("-", " ").replace("_", " ")
+                                     .title() if app_id else "Hunch")
         try:
             self._gate = gate.Gate(confirm=confirm, app_name=self.app_name, policy=policy)
         except ValueError as e:
@@ -110,7 +132,14 @@ class Hunch:
                                        walk_workers=walk_workers,
                                        max_depth=snapshot_max_depth,
                                        max_nodes=snapshot_max_nodes)
-        self.web = Web(self, cdp_port or CDP_PORT)
+        # Namespaced defaults (names only — same semantics): derived CDP port + profile.
+        if app_id and cdp_port is None:
+            import zlib
+            cdp_port = 9400 + (zlib.crc32(app_id.encode()) % 500)
+        if app_id and cdp_profile is None:
+            import os as _os
+            cdp_profile = _os.path.expanduser(f"~/.hunch/apps/{app_id}/chrome-cdp")
+        self.web = Web(self, cdp_port or CDP_PORT, profile=cdp_profile)
         self.files = Files(self)
         self.clipboard = Clipboard(self)
         self._agent = None   # the agent loop, created lazily so the LLM SDKs stay optional
@@ -236,19 +265,23 @@ class Hunch:
         return f"AppleScript error: {out[:600]}{gate.applescript_hint(out)}"
 
     def notify(self, message, title=None):
-        """Best-effort macOS desktop notification, titled with this instance's app_name
-        unless overridden."""
-        _notify(message, title or self.app_name, sound="Ping")
+        """Notify the user: through the instance's notify handler if one was given
+        (your app's own surface), else a macOS desktop notification titled app_name."""
+        title = title or self.app_name
+        if self._notify_handler is not None:
+            self._notify_handler(message, title)
+            return
+        _notify(message, title, sound="Ping")
 
     def list_credentials(self):
         """Names + kinds of saved credentials (never any values). Fill them into a CDP
         page with web.fill_login(service) / web.fill_secret(service, ref)."""
         from .creds import list_services, kind_of
-        names = list_services()
+        names = list_services(self.app_id)
         if not names:
             return "No saved credentials. Add them with: hunch creds add <service>"
-        logins = [n for n in names if kind_of(n) != "secret"]
-        secrets = [n for n in names if kind_of(n) == "secret"]
+        logins = [n for n in names if kind_of(n, self.app_id) != "secret"]
+        secrets = [n for n in names if kind_of(n, self.app_id) == "secret"]
         parts = []
         if logins:
             parts.append("logins (web.fill_login): " + ", ".join(logins))
@@ -288,13 +321,15 @@ class Hunch:
 
 
 class Web:
-    """Focus-free browser/Electron control over CDP, on the persistent Hunch profile.
-    Shares the CDP port with the MCP server, so whichever opened the instance first is
-    gracefully reused — but restart()/login() kill whatever holds the port."""
+    """Focus-free browser/Electron control over CDP, on a persistent profile. With no
+    app_id the port/profile are the shared personal ones (whichever process opened the
+    browser first is gracefully reused); with an app_id each app gets its OWN port and
+    profile, so restart()/login() recovery can only ever kill that app's browser."""
 
-    def __init__(self, hunch, port):
+    def __init__(self, hunch, port, profile=None):
         self._h = hunch
         self.port = port
+        self.profile = profile  # None -> cdp.HUNCH_PROFILE (the personal default)
         self._computer = None   # per-instance CDPComputer (the server's _cdp equivalent)
 
     def _session(self):
@@ -314,7 +349,8 @@ class Web:
         self.close()
         try:
             self._computer = CDPComputer(app, port=self.port, url=url or None,
-                                         isolated=isolated, background=True)
+                                         isolated=isolated, background=True,
+                                         profile=self.profile)
         except Exception as e:   # e.g. debug port never bound, or a page-less stale instance
             raise HunchError(f"couldn't open {app} over CDP: {e} — "
                              "web.restart() recovers a stale instance") from e
@@ -338,7 +374,8 @@ class Web:
         quit_cdp(self.port)  # fresh window, no stale-instance reuse
         try:
             self._computer = CDPComputer(app, port=self.port, url=url or None,
-                                         isolated=False, background=True)
+                                         isolated=False, background=True,
+                                         profile=self.profile)
         except Exception as e:
             raise HunchError(f"couldn't open {app} for login: {e}") from e
         s = self._computer.session
@@ -346,8 +383,8 @@ class Web:
             s.navigate(url)
         s.wait_ready()
         s.mark()
-        _notify("Switch to the green 'HUNCH — LOG IN HERE' window to sign in.",
-                "Hunch needs you to sign in", sound="Ping")
+        self._h.notify("Switch to the green 'HUNCH — LOG IN HERE' window to sign in.",
+                       f"{self._h.app_name} needs you to sign in")
         return ("opened a background, banner-tagged window and sent a notification — "
                 "have the user sign in there and leave it open, then continue")
 
@@ -359,7 +396,8 @@ class Web:
         quit_cdp(self.port)
         try:
             self._computer = CDPComputer(app, port=self.port, url=url or None,
-                                         isolated=False, background=True)
+                                         isolated=False, background=True,
+                                         profile=self.profile)
         except Exception as e:
             raise HunchError(f"couldn't reopen {app} over CDP: {e}") from e
         s = self._computer.session
@@ -403,17 +441,19 @@ class Web:
         The values never enter your program: read here, typed into the page, deleted.
         Domain-bound credentials are refused on other sites (returns a REFUSED string)."""
         s = self._session()
+        ns = self._h.app_id
         from .creds import get_credential, has, kind_of
-        if not has(service):
+        if not has(service, ns):
             return (f"No saved credential for '{service}'. See list_credentials(), or add "
                     f"one with: hunch creds add {service}")
-        if kind_of(service) == "secret":
+        if kind_of(service, ns) == "secret":
             return (f"'{service}' is a protected value (API key/token), not a login — use "
                     f"web.fill_secret('{service}', ref) instead.")
-        blocked = gate.domain_mismatch(service, self._page_url())
+        blocked = gate.domain_mismatch(service, self._page_url(),
+                                       app_name=self._h.app_name, namespace=ns)
         if blocked:
             return blocked
-        username, password = get_credential(service)   # stays in this process; never returned
+        username, password = get_credential(service, ns)   # stays in this process; never returned
         if not (username or password):
             return f"Couldn't read the '{service}' credential from the Keychain."
         r = s.fill_login(username, password)
@@ -425,17 +465,19 @@ class Web:
         """Type the saved protected value (API key/token) for `service` into a field by ref
         (or the focused element). The value never enters your program."""
         s = self._session()
+        ns = self._h.app_id
         from .creds import has, kind_of, get_secret
-        if not has(service):
+        if not has(service, ns):
             return (f"No saved credential for '{service}'. See list_credentials(), or add "
                     f"one with: hunch creds add {service} --secret")
-        if kind_of(service) != "secret":
+        if kind_of(service, ns) != "secret":
             return (f"'{service}' is a username+password login — use "
                     f"web.fill_login('{service}') instead.")
-        blocked = gate.domain_mismatch(service, self._page_url())
+        blocked = gate.domain_mismatch(service, self._page_url(),
+                                       app_name=self._h.app_name, namespace=ns)
         if blocked:
             return blocked
-        secret = get_secret(service)   # stays in this process; never returned
+        secret = get_secret(service, ns)   # stays in this process; never returned
         if not secret:
             return f"Couldn't read the '{service}' secret from the Keychain."
         s.type_text(ref or None, secret)

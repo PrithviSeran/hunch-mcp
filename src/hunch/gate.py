@@ -203,13 +203,13 @@ def protected(p):
     return rp == HUNCH_DIR or rp.startswith(HUNCH_DIR + os.sep)
 
 
-def domain_mismatch(service, current_url, app_name="Hunch"):
+def domain_mismatch(service, current_url, app_name="Hunch", namespace=None):
     """None if `current_url`'s host is allowed for `service`, else a refusal message.
     A credential bound at add-time (`hunch creds add --domain`) only ever gets typed into that
     site — the last line of defense when a prompt-injected agent lands on a look-alike page."""
     from urllib.parse import urlparse
     from .creds import domains_of
-    allowed = domains_of(service)
+    allowed = domains_of(service, namespace)
     if not allowed:
         return None   # unbound (legacy / user chose blank): fills anywhere, as before
     try:
