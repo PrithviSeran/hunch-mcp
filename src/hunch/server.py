@@ -58,10 +58,12 @@ _protected = gate.protected
 _HUNCH_DIR = gate.HUNCH_DIR
 
 
-def _run(name, **args):
+def _run(tool, /, **args):
     """Delegate one MCP tool call to the SDK through the same exception-mapped dispatch
-    the agent loop uses. Strings pass through; raw PNG bytes become an MCP Image."""
-    value, _is_error = _dispatch_core(_mac, name, args)
+    the agent loop uses. Strings pass through; raw PNG bytes become an MCP Image.
+    `tool` is positional-only: several tools (launch_app/quit_app/focus_app) have their
+    own `name` argument, which must land in **args without colliding."""
+    value, _is_error = _dispatch_core(_mac, tool, args)
     if isinstance(value, bytes):
         return Image(data=value, format="png")
     return value

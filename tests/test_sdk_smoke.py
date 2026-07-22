@@ -276,6 +276,24 @@ def test_server_run_delegation(monkeypatch):
     assert server._run("nope") == "unknown tool nope"
 
 
+def test_server_run_tools_with_name_arg(monkeypatch):
+    """Regression: launch_app/quit_app/focus_app pass name=... — _run's own first
+    parameter must be positional-only so it can't collide (caught by the live sweep)."""
+    class FakeMac:
+        simultaneous = True
+
+        def launch_app(self, name, force_accessibility=False, reason=""):
+            return f"launched {name}"
+
+        def quit_app(self, name):
+            return f"quit {name}"
+
+    monkeypatch.setattr(server, "_mac", FakeMac())
+    assert server._run("launch_app", name="Mail", force_accessibility=False,
+                       reason="") == "launched Mail"
+    assert server._run("quit_app", name="Mail") == "quit Mail"
+
+
 def test_server_delegates_to_gate():
     # Regression guard for the extraction: server aliases must point at the shared layer.
     assert server._protected is gate.protected
