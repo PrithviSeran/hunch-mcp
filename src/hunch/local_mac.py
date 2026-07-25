@@ -12,6 +12,7 @@ Requires: Accessibility permission granted to the running process
 
 import os
 import base64
+import re
 import subprocess
 import tempfile
 import time
@@ -203,12 +204,8 @@ def _announce_front(name):
         return
     if time.monotonic() < _suppress_until:
         return  # the user just approved this switch in a dialog — don't re-announce it
-    try:
-        front = NSWorkspace.sharedWorkspace().frontmostApplication()
-        if front and front.localizedName() == name:
-            return  # already frontmost — no switch happens
-    except Exception:
-        pass
+    if _frontmost()[0] == name:
+        return  # already frontmost — no switch happens
     _notify_focus(name, reason)
 
 _MAX_NODES = 3000          # default node budget for a FULL-window walk
@@ -259,8 +256,23 @@ _ATTRS = (ax.kAXRoleAttribute, ax.kAXTitleAttribute, ax.kAXDescriptionAttribute,
 
 
 def _frontmost():
-    app = NSWorkspace.sharedWorkspace().frontmostApplication()
-    return (app.localizedName(), app.processIdentifier()) if app else (None, None)
+    """Fresh (name, pid) of the frontmost app, straight from LaunchServices.
+    NSWorkspace.frontmostApplication() must NOT be used for this: it is KVO-cached
+    and never updates in a process that isn't pumping a run loop (this MCP server,
+    any plain script) — activate()'s settle loop saw a frozen value, concluded the
+    raise failed, and act() then refused shared-input actions that would have worked."""
+    try:
+        asn = subprocess.run(["lsappinfo", "front"], capture_output=True,
+                             text=True, timeout=2).stdout.strip()
+        if not asn:
+            return (None, None)
+        info = subprocess.run(["lsappinfo", "info", "-only", "name,pid", asn],
+                              capture_output=True, text=True, timeout=2).stdout
+        name = re.search(r'"?(?:LSDisplayName|name)"?\s*=\s*"([^"]*)"', info)
+        pid = re.search(r'"?pid"?\s*=\s*(\d+)', info)
+        return (name.group(1) if name else None, int(pid.group(1)) if pid else None)
+    except Exception:
+        return (None, None)
 
 
 class StaleRef(Exception):
@@ -295,8 +307,7 @@ class MacSession:
         dismisses its open context menus/popups (which breaks right_click -> menu)."""
         if not self._pid:
             return False
-        front = NSWorkspace.sharedWorkspace().frontmostApplication()
-        if front and front.processIdentifier() == self._pid:
+        if _frontmost()[1] == self._pid:
             return True  # already active — no focus switch happens
         _announce_front(getattr(self, "_app_name", None) or "an app")  # deterministic focus warning
         # `open -a` (LaunchServices) reliably fronts the app. NSRunningApplication.
@@ -318,8 +329,7 @@ class MacSession:
                     app.activateWithOptions_(2)
             settle = time.time() + 1.0
             while time.time() < settle:
-                front = NSWorkspace.sharedWorkspace().frontmostApplication()
-                if front and front.processIdentifier() == self._pid:
+                if _frontmost()[1] == self._pid:
                     return True
                 time.sleep(0.1)
         return False

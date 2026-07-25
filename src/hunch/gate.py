@@ -13,10 +13,9 @@ import os
 import time
 import subprocess
 
-from AppKit import NSWorkspace
-
 from . import policy
-from .local_mac import set_focus_reason, suppress_focus_notice
+from .local_mac import set_focus_reason, suppress_focus_notice, _frontmost
+from .notify import as_str
 
 # Exceptions live in errors.py (dependency-free, importable by auth/cli without pyobjc);
 # re-exported here so `from .gate import HunchError` keeps working everywhere.
@@ -24,9 +23,6 @@ from .errors import (HunchError, ApprovalDenied, AccessibilityNotGranted, WebNot
                      ConsentRequest)
 
 
-def as_str(s):
-    """Quote a Python string as an AppleScript string literal (escape \\ and ", keep UTF-8)."""
-    return '"' + str(s).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 # One user approval covers the immediate follow-through (the switch they just allowed), so the
@@ -128,12 +124,8 @@ class Gate:
         moments ago, the gate is off, or the app is already frontmost (no real switch)."""
         if self.screen_approved() or not self.enabled("app_to_front"):
             return None
-        try:
-            front = NSWorkspace.sharedWorkspace().frontmostApplication()
-            if front and front.localizedName() == name:
-                return None
-        except Exception:
-            pass
+        if _frontmost()[0] == name:
+            return None
         why = f" — {reason}" if reason else ""
         if self.confirm_dialog(f"{self.app_name} wants to bring “{name}” to the front{why}. "
                                "Allow?", category="app_to_front", detail=name):

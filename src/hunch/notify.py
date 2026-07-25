@@ -14,8 +14,13 @@ import subprocess
 ICON = os.path.join(os.path.dirname(__file__), "assets", "hunch.png")
 
 
-def _as_str(s):
+def as_str(s):
+    """Quote a Python string as an AppleScript string literal (escape \\ and ", keep UTF-8).
+    Canonical home (stdlib-only module, importable by anything); gate.py re-exports it."""
     return '"' + str(s).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+_as_str = as_str  # internal alias
 
 
 def notify(message, title="Hunch", sound=None, timeout=5):

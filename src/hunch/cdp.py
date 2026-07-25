@@ -46,7 +46,7 @@ _CONTAINER = {"dialog", "alertdialog", "alert"}
 # Persistent, DEDICATED Hunch profile: the user logs into it once, and CDP reuses it
 # forever. It is a NON-default --user-data-dir, so Chrome 136+ allows the debug port on
 # it (unlike the real/default profile, where the port is silently refused).
-HUNCH_PROFILE = os.path.expanduser("~/.hunch/chrome-cdp")
+from .cli import CHROME_PROFILE as HUNCH_PROFILE  # single home for the path (see cli.py)
 
 # How an agent might name a Chromium browser -> the exact macOS app name `open` needs.
 # Agents frequently pass "Chrome" (real name is "Google Chrome") or even a website like
