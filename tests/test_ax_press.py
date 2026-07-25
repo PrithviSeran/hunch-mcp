@@ -158,3 +158,38 @@ def test_file_op_batch_runs_all_and_reports_per_item():
                                ("copy", "/tmp/c", "/tmp/x")]
     # single-op path unchanged
     assert ag._file_op(mac, {"op": "move", "src": "/a", "dst": "/b"}) == "moved /a -> /b"
+
+
+PREV = """=== App — focused window (snapshot #3) ===
+[e1] AXWindow "Motion"
+  [e2] AXStaticText val='Reduce motion'
+  [e3] AXCheckBox val=0
+  [e4] AXButton 'Done'"""
+
+def test_snapshot_delta_reports_only_changes():
+    cur = PREV.replace("snapshot #3", "snapshot #4").replace("[e3] AXCheckBox val=0",
+                                                             "[e3] AXCheckBox val=1")
+    d = lm._snapshot_delta(PREV, cur)
+    assert d == "~ [e3] AXCheckBox val=1"
+
+def test_snapshot_delta_new_and_gone():
+    cur = """=== App — focused window (snapshot #4) ===
+[e1] AXWindow "Motion"
+  [e2] AXStaticText val='Reduce motion'
+  [e3] AXCheckBox val=0
+  [e5] AXStaticText val='Saved'"""
+    d = lm._snapshot_delta(PREV, cur)
+    assert "+ [e5] AXStaticText val='Saved'" in d
+    assert "gone: e4" in d
+
+def test_snapshot_delta_no_change_and_full_tree_cases():
+    same = PREV.replace("snapshot #3", "snapshot #4")
+    assert lm._snapshot_delta(PREV, same) == "(no visible change since the last view)"
+    assert lm._snapshot_delta(None, same) is None                      # first view
+    assert lm._snapshot_delta(PREV, same.replace('"Motion"', '"General"')) is None  # window changed
+    mostly_new = """=== App — focused window (snapshot #4) ===
+[e1] AXWindow "Motion"
+  [e7] a
+  [e8] b
+  [e9] c"""
+    assert lm._snapshot_delta(PREV, mostly_new) is None                # >50% churn -> full

@@ -79,7 +79,7 @@ AGENT_TOOLS = [
      "input_schema": _obj({"role": {"type": "string"}, "name_contains": {"type": "string"},
                            "app": {"type": "string"}, "max_results": {"type": "integer"}})},
     {"name": "act",
-     "description": ("Run UI actions in order by ref, then get the updated tree. Verbs: click "
+     "description": ("Run UI actions in order by ref, then get what CHANGED on screen (unchanged lines omitted; snapshot gives the full tree). Verbs: click "
                      "(activate), right_click (context menu), select (highlight a row), type (set "
                      "a field by ref = focus-free; no ref types at focus = STEALS FOCUS), menu "
                      "(invoke a menu-bar path, e.g. ['File','Move to Trash'] — the focus-free "

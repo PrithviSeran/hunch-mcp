@@ -112,8 +112,10 @@ def find(role: str = "", name_contains: str = "", app: str = "", max_results: in
 
 @mcp.tool()
 def act(actions: list, confirm: bool = False, reason: str = "") -> str:
-    """Execute one or more UI actions in order (by element ref), then return the
-    updated tree. Each action is an object:
+    """Execute one or more UI actions in order (by element ref), then return what
+    CHANGED on screen since your last view (~ changed, + new, gone: refs; unchanged
+    lines omitted). First look, a window change, or heavy churn returns the full
+    tree; call `snapshot` anytime you want the whole tree again. Each action is an object:
       {"action":"click","ref":"e12"}                # press/activate it — OPENS a chat/email/file (focus-free)
       {"action":"right_click","ref":"e12"}          # open its context menu (focus-free)
       {"action":"select","ref":"e12"}               # only HIGHLIGHTS a row — does NOT open it (focus-free)

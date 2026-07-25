@@ -1136,6 +1136,57 @@ TOOLS = [
 ]
 
 
+_REF_LINE = re.compile(r"\[(e\d+)\]")
+
+
+def _snapshot_delta(prev, cur):
+    """Delta view of a fresh snapshot against the previous one, keyed by stable refs
+    (the _keymap gives the same eN to the same element across snapshots). Returns the
+    delta text, or None when a full tree is the honest answer: first view, the window
+    itself changed, or most lines changed anyway. '(no visible change)' is a valid delta.
+    Emission stays in current-tree order; unchanged lines are omitted — the point:
+    act() was re-sending the entire tree after every action (9 full System Settings
+    trees in one bench run), and the unchanged 95% is pure token cost."""
+    if not prev:
+        return None
+    pl, cl = prev.splitlines(), cur.splitlines()
+    def refmap(lines):
+        m = {}
+        for ln in lines:
+            r = _REF_LINE.search(ln)
+            if r:
+                m.setdefault(r.group(1), ln)
+        return m
+    pm, cm = refmap(pl), refmap(cl)
+    if not pm or not cm:
+        return None
+    def window_line(lines):
+        return next((ln for ln in lines if "AXWindow" in ln), None)
+    if window_line(pl) != window_line(cl):
+        return None   # different window (or retitled) — show the full tree
+    out, changed_n = [], 0
+    for ln in cl:
+        r = _REF_LINE.search(ln)
+        if not r:
+            continue
+        ref = r.group(1)
+        if ref not in pm:
+            out.append("+ " + ln.strip())
+            changed_n += 1
+        elif pm[ref] != ln:
+            out.append("~ " + ln.strip())
+            changed_n += 1
+    gone = [r for r in pm if r not in cm]
+    changed_n += len(gone)
+    if changed_n == 0:
+        return "(no visible change since the last view)"
+    if changed_n > 0.5 * len(cm):
+        return None   # the screen mostly changed — a delta would be noise
+    if gone:
+        out.append("gone: " + ", ".join(sorted(gone, key=lambda x: int(x[1:]))[:40]))
+    return "\n".join(out)
+
+
 class LocalComputer:
     """Drives the real Mac through MacSession, exposing the same tools/handle
     contract the agent loop expects. Swap this in for the Docker Computer."""
@@ -1152,6 +1203,7 @@ class LocalComputer:
         self.max_depth = max_depth   # instance defaults for full snapshots (None -> module defaults)
         self.max_nodes = max_nodes
         self.tools = TOOLS
+        self._last_snap = None   # baseline for act()'s delta view
 
     def snapshot(self, ref=None, max_depth=None, max_nodes=None):
         text, _ = self.session.snapshot(app_name=self.app, compact=True,
@@ -1159,6 +1211,8 @@ class LocalComputer:
                                         ref=ref,
                                         max_depth=max_depth if max_depth is not None else self.max_depth,
                                         max_nodes=max_nodes if max_nodes is not None else self.max_nodes)
+        if ref is None:
+            self._last_snap = text   # full-window views re-baseline the delta; subtree views don't
         return text
 
     def find(self, role=None, name_contains=None, max_results=20):
@@ -1231,7 +1285,13 @@ class LocalComputer:
             total = ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in d.items() if v)
             receipt = (f"\n\nShared-screen use this call: {used} (session total: {total}). "
                        f"Prefer focus-free primitives where possible.")
-        return "Executed:\n" + "\n".join(lines) + receipt + "\n\nScreen now:\n" + self.snapshot()
+        prev = self._last_snap
+        shot = self.snapshot()   # fresh full tree; also re-baselines
+        diff = _snapshot_delta(prev, shot)
+        screen = ("Screen changes since your last view (~ changed, + new; unchanged lines "
+                  "omitted — call snapshot for the full tree):\n" + diff
+                  ) if diff is not None else "Screen now:\n" + shot
+        return "Executed:\n" + "\n".join(lines) + receipt + "\n\n" + screen
 
     def handle(self, tool_use):
         name = tool_use.name
