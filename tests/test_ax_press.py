@@ -193,3 +193,49 @@ def test_snapshot_delta_no_change_and_full_tree_cases():
   [e8] b
   [e9] c"""
     assert lm._snapshot_delta(PREV, mostly_new) is None                # >50% churn -> full
+
+
+def test_set_window_targets_main_and_reads_back(monkeypatch):
+    import hunch.ax_tree_mac as axm
+    state = {"pos": (100, 100), "size": (400, 300), "subrole": "AXStandardWindow"}
+    monkeypatch.setattr(lm, "AXUIElementCreateApplication", lambda pid: "app")
+    monkeypatch.setattr(axm, "get_window", lambda app: "win")
+    def get_attr(el, attr):
+        if attr == "AXSubrole": return state["subrole"]
+        if attr == axm.kAXPositionAttribute: return state["pos"]
+        if attr == axm.kAXSizeAttribute: return state["size"]
+        return None
+    monkeypatch.setattr(axm, "get_attr", get_attr)
+    monkeypatch.setattr(axm, "values_to_bounds", lambda p, s: {"x": p[0], "y": p[1], "w": s[0], "h": s[1]})
+    def set_attr(el, attr, val):
+        if attr == axm.kAXPositionAttribute: state["pos"] = (int(val.x), int(val.y)) if hasattr(val,"x") else state["pos"]
+        if attr == axm.kAXSizeAttribute:     state["size"] = (int(val.width), int(val.height)) if hasattr(val,"width") else state["size"]
+        return 0
+    # AXValueCreate is opaque; fake it to carry the numbers so set_attr can read them
+    class V:
+        def __init__(s2, x=None, y=None, width=None, height=None): s2.x,s2.y,s2.width,s2.height = x,y,width,height
+    monkeypatch.setattr(lm, "AXValueCreate", lambda t, v: V(width=v.width, height=v.height) if hasattr(v,"width") else V(x=v.x, y=v.y))
+    monkeypatch.setattr(lm, "CGPoint", lambda x, y: type("P",(),{"x":x,"y":y})())
+    monkeypatch.setattr(lm, "CGSize", lambda w, h: type("S",(),{"width":w,"height":h})())
+    monkeypatch.setattr(lm, "AXUIElementSetAttributeValue", set_attr)
+    s = _bare_session(); s._pid = 123
+    out = s.set_window(x=0, y=0, w=760, h=980)
+    assert "760×980" in out and "(0,0)" in out
+    assert state["pos"] == (0, 0) and state["size"] == (760, 980)
+
+def test_set_window_flags_attached_sheet(monkeypatch):
+    import hunch.ax_tree_mac as axm
+    monkeypatch.setattr(lm, "AXUIElementCreateApplication", lambda pid: "app")
+    monkeypatch.setattr(axm, "get_window", lambda app: "win")
+    monkeypatch.setattr(axm, "get_attr", lambda el, attr: "AXSheet" if attr == "AXSubrole" else (0,0) if "Position" in attr else (260,300))
+    monkeypatch.setattr(axm, "values_to_bounds", lambda p, s: {"x":p[0],"y":p[1],"w":s[0],"h":s[1]})
+    monkeypatch.setattr(lm, "AXUIElementSetAttributeValue", lambda *a: 0)
+    monkeypatch.setattr(lm, "AXValueCreate", lambda t, v: v)
+    monkeypatch.setattr(lm, "CGPoint", lambda x, y: type("P",(),{"x":x,"y":y})())
+    monkeypatch.setattr(lm, "CGSize", lambda w, h: type("S",(),{"width":w,"height":h})())
+    s = _bare_session(); s._pid = 123
+    assert "sheet is attached" in s.set_window(w=760)
+
+def test_set_window_no_app():
+    s = _bare_session(); s._pid = None
+    assert "no target app" in s.set_window(w=100)

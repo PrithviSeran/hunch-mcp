@@ -22,9 +22,10 @@ from ApplicationServices import (
     AXUIElementCreateApplication, AXUIElementPerformAction,
     AXUIElementSetAttributeValue, AXUIElementSetMessagingTimeout,
     AXUIElementCreateSystemWide, kAXFocusedAttribute, kAXValueAttribute,
-    AXIsProcessTrusted,
+    AXIsProcessTrusted, AXValueCreate, kAXValueCGPointType, kAXValueCGSizeType,
 )
 from AppKit import NSWorkspace, NSRunningApplication
+from Quartz import CGPoint, CGSize
 import Quartz
 
 
@@ -902,6 +903,46 @@ class MacSession:
         _press_key(key, modifiers or [])
         return f"key {'+'.join((modifiers or []) + [key])}"
 
+    def set_window(self, x=None, y=None, w=None, h=None, app_name=None):
+        """Move/resize the target app's MAIN window via AX — focus-free, no cursor.
+        Targets AXMainWindow (via get_window), NOT 'window 1' by index: a modal SHEET
+        (a save panel, a locked-note password prompt) can BE window 1, and a blind
+        index resize hits the sheet instead. Sets only the axes given, reads the
+        result back, and reports the ACTUAL geometry (never assumes the set stuck —
+        some windows clamp to a min size or refuse)."""
+        if not self._pid and app_name:
+            match = _resolve_app(app_name)   # window ops need no ref, so may run before any snapshot
+            if match:
+                self._pid, self._app_name = match["pid"], match["name"]
+        if not self._pid:
+            return "no target app for window op — snapshot the app first, or check it's running"
+        ax_app = AXUIElementCreateApplication(self._pid)
+        win = ax.get_window(ax_app)
+        if win is None:
+            return f"{self._app_name or 'app'} exposes no window to move/resize"
+        # refuse to act on a sheet-obscured window: the geometry the user means is
+        # the main window's, and a sheet must be dismissed first
+        sheet = ax.get_attr(win, "AXSubrole")
+        if x is not None or y is not None:
+            cur = ax.get_attr(win, ax.kAXPositionAttribute)
+            b = ax.values_to_bounds(cur, ax.get_attr(win, ax.kAXSizeAttribute)) or {}
+            nx = x if x is not None else int(b.get("x", 0))
+            ny = y if y is not None else int(b.get("y", 0))
+            AXUIElementSetAttributeValue(win, ax.kAXPositionAttribute,
+                                         AXValueCreate(kAXValueCGPointType, CGPoint(nx, ny)))
+        if w is not None or h is not None:
+            cur = ax.values_to_bounds(ax.get_attr(win, ax.kAXPositionAttribute),
+                                      ax.get_attr(win, ax.kAXSizeAttribute)) or {}
+            nw = w if w is not None else int(cur.get("w", 0))
+            nh = h if h is not None else int(cur.get("h", 0))
+            AXUIElementSetAttributeValue(win, ax.kAXSizeAttribute,
+                                         AXValueCreate(kAXValueCGSizeType, CGSize(nw, nh)))
+        got = ax.values_to_bounds(ax.get_attr(win, ax.kAXPositionAttribute),
+                                  ax.get_attr(win, ax.kAXSizeAttribute)) or {}
+        note = " (a sheet is attached — dismiss it first if this looks wrong)" if sheet == "AXSheet" else ""
+        return (f"window now at ({got.get('x')},{got.get('y')}) "
+                f"{got.get('w')}×{got.get('h')}{note}")
+
     def menu(self, path):
         """Invoke a menu-bar command by path, e.g. ["File", "Move to Trash"], via AXPress —
         FOCUS-FREE: it runs the command WITHOUT bringing the app to the front. This is the
@@ -1104,16 +1145,20 @@ TOOLS = [
                      "menu (invoke a menu-bar command by path, e.g. path=['File','Move to Trash'] — "
                      "FOCUS-FREE, the preferred stand-in for keyboard shortcuts like ⌘⌫/⌘S/⌘W), "
                      "key (press a key with optional modifiers — STEALS FOCUS, only when no menu/field "
-                     "equivalent exists), click_xy (pixel click — last-resort fallback, STEALS FOCUS). "
-                     "Prefer the focus-free primitives (click/select/right_click/type-into-ref/menu)."),
+                     "equivalent exists), window (move/resize the app's MAIN window FOCUS-FREE via "
+                     "x/y/w/h — the right way to tile/position windows; targets the main window, not a "
+                     "sheet/dialog), click_xy (pixel click — last-resort fallback, STEALS FOCUS). "
+                     "Prefer the focus-free primitives (click/select/right_click/type-into-ref/menu/window)."),
      "input_schema": {"type": "object", "properties": {"actions": {"type": "array", "items": {
          "type": "object", "properties": {
              "action": {"type": "string",
-                        "enum": ["click", "right_click", "select", "type", "menu", "key", "click_xy"]},
+                        "enum": ["click", "right_click", "select", "type", "menu", "key",
+                                 "window", "click_xy"]},
              "ref": {"type": "string"}, "text": {"type": "string"},
              "path": {"type": "array", "items": {"type": "string"}},
              "key": {"type": "string"}, "modifiers": {"type": "array", "items": {"type": "string"}},
-             "x": {"type": "integer"}, "y": {"type": "integer"}},
+             "x": {"type": "integer"}, "y": {"type": "integer"},
+             "w": {"type": "integer"}, "h": {"type": "integer"}},
          "required": ["action"]}}}, "required": ["actions"]}},
     {"name": "screenshot", "description": "See the screen as an image.",
      "input_schema": {"type": "object", "properties": {}}},
@@ -1263,6 +1308,9 @@ class LocalComputer:
                                  if a.get("ref") else self.session.type_text(a.get("text", "")))
                 elif act == "key":
                     lines.append(self.session.press_key(a["key"], a.get("modifiers")))
+                elif act == "window":
+                    lines.append(self.session.set_window(
+                        x=a.get("x"), y=a.get("y"), w=a.get("w"), h=a.get("h"), app_name=self.app))
                 elif act == "click_xy":
                     self.session.disturbances["pixel_clicks"] += 1
                     _mouse_click(int(a["x"]), int(a["y"]))

@@ -122,6 +122,7 @@ def act(actions: list, confirm: bool = False, reason: str = "") -> str:
       {"action":"menu","path":["File","Move to Trash"]}  # invoke a menu-bar command (FOCUS-FREE)
       {"action":"type","ref":"e12","text":"hello"}  # into a ref = focus-free; no ref = types at focus (STEALS FOCUS)
       {"action":"key","key":"return","modifiers":["command"]}   # keystroke (STEALS FOCUS)
+      {"action":"window","x":0,"y":0,"w":760,"h":980}  # move/resize the MAIN window (FOCUS-FREE) — how to tile/position
       {"action":"click_xy","x":640,"y":400}         # pixel fallback, last resort (STEALS FOCUS)
     Prefer the focus-free primitives. For a keyboard shortcut (⌘⌫ move-to-trash, ⌘S save,
     ⌘W close, ⌘N new, ⌘F find …) use a `menu` action with the menu-bar path instead of `key`

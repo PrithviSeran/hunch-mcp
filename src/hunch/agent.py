@@ -38,11 +38,11 @@ _ACTION_ITEM = {
     "type": "object",
     "properties": {
         "action": {"type": "string",
-                   "enum": ["click", "right_click", "select", "type", "menu", "key", "click_xy"]},
+                   "enum": ["click", "right_click", "select", "type", "menu", "key", "window", "click_xy"]},
         "ref": {"type": "string"}, "text": {"type": "string"},
         "path": {"type": "array", "items": {"type": "string"}},
         "key": {"type": "string"}, "modifiers": {"type": "array", "items": {"type": "string"}},
-        "x": {"type": "integer"}, "y": {"type": "integer"}},
+        "x": {"type": "integer"}, "y": {"type": "integer"}, "w": {"type": "integer"}, "h": {"type": "integer"}},
     "required": ["action"]}
 
 # The web/CDP action item — a smaller verb set (no menu/pixel; navigate instead).
@@ -79,7 +79,7 @@ AGENT_TOOLS = [
      "input_schema": _obj({"role": {"type": "string"}, "name_contains": {"type": "string"},
                            "app": {"type": "string"}, "max_results": {"type": "integer"}})},
     {"name": "act",
-     "description": ("Run UI actions in order by ref, then get what CHANGED on screen (unchanged lines omitted; snapshot gives the full tree). Verbs: click "
+     "description": ("Run UI actions in order by ref, then get what CHANGED on screen (unchanged lines omitted; snapshot gives the full tree). To tile/position a window use the 'window' verb (x/y/w/h, focus-free, targets the main window). Verbs: click "
                      "(activate), right_click (context menu), select (highlight a row), type (set "
                      "a field by ref = focus-free; no ref types at focus = STEALS FOCUS), menu "
                      "(invoke a menu-bar path, e.g. ['File','Move to Trash'] — the focus-free "
