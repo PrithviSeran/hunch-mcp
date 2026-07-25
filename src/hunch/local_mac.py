@@ -296,7 +296,8 @@ class MacSession:
         # Shared-input use — the receipt behind "focus-free": every path that touches
         # the ONE cursor/keyboard or raises an app increments these; act() reports the
         # per-call delta so a disturbance is never silent in the transcript either.
-        self.disturbances = {"pixel_clicks": 0, "keystrokes": 0, "key_combos": 0, "app_raises": 0}
+        self.disturbances = {"pixel_clicks": 0, "keystrokes": 0, "key_combos": 0,
+                             "app_raises": 0, "drags": 0}
         if walk_workers is None:
             try:
                 walk_workers = int(os.environ.get("HUNCH_WALK_WORKERS", "8"))
@@ -986,6 +987,24 @@ def _mouse_click(x, y, button="left"):
     Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
 
 
+def _mouse_drag(x1, y1, x2, y2, steps=12):
+    """Press-move-release from (x1,y1) to (x2,y2). Intermediate dragged events matter —
+    many targets (canvas drag-and-drop, sliders, reorder lists) ignore a down/up with no
+    motion between. Coordinates are POINTS (same space as click_xy and the point-scaled
+    screenshot)."""
+    L = Quartz.kCGMouseButtonLeft
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap,
+                       Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventLeftMouseDown, (x1, y1), L))
+    for i in range(1, steps + 1):
+        x = x1 + (x2 - x1) * i / steps
+        y = y1 + (y2 - y1) * i / steps
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap,
+                           Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventLeftMouseDragged, (x, y), L))
+        time.sleep(0.012)
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap,
+                       Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventLeftMouseUp, (x2, y2), L))
+
+
 def _type_text(text):
     """Type arbitrary text by attaching the unicode string to a synthetic key
     event — no per-character keycode mapping needed."""
@@ -1028,7 +1047,23 @@ def _press_key(key, modifiers):
     Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
 
 
+def _main_display_points():
+    """(width, height, scale) of the main display in POINTS — the coordinate space
+    click_xy/CGEvent uses. Returns (None, None, 1.0) if AppKit is unavailable."""
+    try:
+        from AppKit import NSScreen
+        scr = NSScreen.mainScreen()
+        fr = scr.frame().size
+        return int(fr.width), int(fr.height), float(scr.backingScaleFactor())
+    except Exception:
+        return None, None, 1.0
+
+
 def screenshot_b64():
+    """PNG of the main display, base64. DOWNSCALED to POINTS so a coordinate the model
+    reads off the image maps 1:1 to click_xy: `screencapture` grabs NATIVE pixels, which
+    on a Retina display is 2x the point space CGEvent clicks in — un-scaled, every
+    vision click lands ~2x too far. sips resizes to points (no-op on a 1x display)."""
     with tempfile.NamedTemporaryFile(suffix=".png") as f:
         try:
             subprocess.run(["screencapture", "-x", "-t", "png", f.name], check=True)
@@ -1039,6 +1074,12 @@ def screenshot_b64():
                 "→ Screen Recording, enable the MCP host app (toggle off/on if already listed), "
                 "then restart it. Meanwhile, prefer `snapshot` — it reads UI without this "
                 "permission.")
+        w, h, scale = _main_display_points()
+        if w and h and scale and scale != 1.0:
+            # native (2x on Retina) -> points, so image coords == click_xy coords. `sips -z`
+            # takes height then width. Best-effort: if sips fails, return the native shot.
+            subprocess.run(["sips", "-z", str(h), str(w), f.name],
+                           check=False, capture_output=True)
         return base64.b64encode(open(f.name, "rb").read()).decode()
 
 
@@ -1153,12 +1194,15 @@ TOOLS = [
          "type": "object", "properties": {
              "action": {"type": "string",
                         "enum": ["click", "right_click", "select", "type", "menu", "key",
-                                 "window", "click_xy"]},
+                                 "window", "drag", "click_xy"]},
              "ref": {"type": "string"}, "text": {"type": "string"},
              "path": {"type": "array", "items": {"type": "string"}},
              "key": {"type": "string"}, "modifiers": {"type": "array", "items": {"type": "string"}},
              "x": {"type": "integer"}, "y": {"type": "integer"},
-             "w": {"type": "integer"}, "h": {"type": "integer"}},
+             "w": {"type": "integer"}, "h": {"type": "integer"},
+             "from_ref": {"type": "string"}, "to_ref": {"type": "string"},
+             "from_x": {"type": "integer"}, "from_y": {"type": "integer"},
+             "to_x": {"type": "integer"}, "to_y": {"type": "integer"}},
          "required": ["action"]}}}, "required": ["actions"]}},
     {"name": "screenshot", "description": "See the screen as an image.",
      "input_schema": {"type": "object", "properties": {}}},
@@ -1269,7 +1313,16 @@ class LocalComputer:
     def _is_shared_input(a):
         """Actions that use the ONE shared cursor/keyboard (collide with the user)."""
         act = a.get("action")
-        return act in ("key", "click_xy") or (act == "type" and not a.get("ref"))
+        return act in ("key", "click_xy", "drag") or (act == "type" and not a.get("ref"))
+
+    def _endpoint(self, a, side):
+        """Resolve a drag endpoint: {side}_ref -> that element's center, else
+        ({side}_x, {side}_y) as point coords. Returns (x, y) or None."""
+        ref = a.get(f"{side}_ref")
+        if ref:
+            return self.session._center(self.session._el(ref))
+        x, y = a.get(f"{side}_x"), a.get(f"{side}_y")
+        return (int(x), int(y)) if x is not None and y is not None else None
 
     def act(self, actions):
         sim = self.simultaneous
@@ -1311,6 +1364,15 @@ class LocalComputer:
                 elif act == "window":
                     lines.append(self.session.set_window(
                         x=a.get("x"), y=a.get("y"), w=a.get("w"), h=a.get("h"), app_name=self.app))
+                elif act == "drag":
+                    fp, tp = self._endpoint(a, "from"), self._endpoint(a, "to")
+                    if not fp or not tp:
+                        lines.append("drag needs a from and a to point: from_ref/to_ref (element "
+                                     "centers) or from_x/from_y/to_x/to_y (point coords)")
+                    else:
+                        self.session.disturbances["drags"] += 1
+                        _mouse_drag(fp[0], fp[1], tp[0], tp[1])
+                        lines.append(f"dragged {fp} -> {tp}")
                 elif act == "click_xy":
                     self.session.disturbances["pixel_clicks"] += 1
                     _mouse_click(int(a["x"]), int(a["y"]))

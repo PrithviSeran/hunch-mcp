@@ -123,6 +123,7 @@ def act(actions: list, confirm: bool = False, reason: str = "") -> str:
       {"action":"type","ref":"e12","text":"hello"}  # into a ref = focus-free; no ref = types at focus (STEALS FOCUS)
       {"action":"key","key":"return","modifiers":["command"]}   # keystroke (STEALS FOCUS)
       {"action":"window","x":0,"y":0,"w":760,"h":980}  # move/resize the MAIN window (FOCUS-FREE) — how to tile/position
+      {"action":"drag","from_ref":"e5","to_x":800,"to_y":400}  # press-move-release (canvas DnD, reorder) — STEALS FOCUS
       {"action":"click_xy","x":640,"y":400}         # pixel fallback, last resort (STEALS FOCUS)
     Prefer the focus-free primitives. For a keyboard shortcut (⌘⌫ move-to-trash, ⌘S save,
     ⌘W close, ⌘N new, ⌘F find …) use a `menu` action with the menu-bar path instead of `key`
@@ -162,7 +163,9 @@ def screenshot() -> Image:
     image, a photo/file-preview thumbnail). NOT for reading UI you could get from `snapshot`: if the
     tree looked thin, `click` into the pane and re-`snapshot` instead. A screenshot only shows the
     FRONTMOST app, so in the background it usually shows the user's OTHER app, not your target — and
-    it can't be acted on (no refs). Reach for it to VERIFY visual content, not to navigate."""
+    it can't be acted on (no refs). Reach for it to VERIFY visual content, not to navigate.
+    Pixel coordinates in the image map 1:1 to click_xy (the shot is in point space), so a point you
+    read here can be passed straight to a click_xy action."""
     return _run("screenshot")
 
 

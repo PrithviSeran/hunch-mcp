@@ -38,11 +38,14 @@ _ACTION_ITEM = {
     "type": "object",
     "properties": {
         "action": {"type": "string",
-                   "enum": ["click", "right_click", "select", "type", "menu", "key", "window", "click_xy"]},
+                   "enum": ["click", "right_click", "select", "type", "menu", "key", "window", "drag", "click_xy"]},
         "ref": {"type": "string"}, "text": {"type": "string"},
         "path": {"type": "array", "items": {"type": "string"}},
         "key": {"type": "string"}, "modifiers": {"type": "array", "items": {"type": "string"}},
-        "x": {"type": "integer"}, "y": {"type": "integer"}, "w": {"type": "integer"}, "h": {"type": "integer"}},
+        "x": {"type": "integer"}, "y": {"type": "integer"}, "w": {"type": "integer"}, "h": {"type": "integer"},
+        "from_ref": {"type": "string"}, "to_ref": {"type": "string"},
+        "from_x": {"type": "integer"}, "from_y": {"type": "integer"},
+        "to_x": {"type": "integer"}, "to_y": {"type": "integer"}},
     "required": ["action"]}
 
 # The web/CDP action item — a smaller verb set (no menu/pixel; navigate instead).
@@ -90,7 +93,8 @@ AGENT_TOOLS = [
     {"name": "screenshot",
      "description": ("See the frontmost app as a PNG — only for genuinely visual content the tree "
                      "can't convey (an image, a chart). To read UI text or check an action, "
-                     "re-snapshot instead."),
+                     "re-snapshot instead. Image pixels are in point space, so a coordinate read "
+                     "here can go straight to a click_xy action."),
      "input_schema": _obj()},
     {"name": "list_apps", "description": "List the running GUI apps you can target with snapshot.",
      "input_schema": _obj()},

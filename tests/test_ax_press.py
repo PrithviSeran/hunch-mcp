@@ -239,3 +239,69 @@ def test_set_window_flags_attached_sheet(monkeypatch):
 def test_set_window_no_app():
     s = _bare_session(); s._pid = None
     assert "no target app" in s.set_window(w=100)
+
+
+def test_screenshot_downscales_to_points_on_retina(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(lm, "_main_display_points", lambda: (1512, 982, 2.0))
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        class R: returncode=0
+        return R()
+    monkeypatch.setattr(lm.subprocess, "run", fake_run)
+    # fake the tempfile + read
+    import base64
+    monkeypatch.setattr(lm.base64, "b64encode", lambda b: b"ZmFrZQ==")
+    class FakeTmp:
+        name=str(tmp_path/"s.png")
+        def __enter__(s): open(s.name,"wb").write(b"x"); return s
+        def __exit__(s,*a): pass
+    monkeypatch.setattr(lm.tempfile, "NamedTemporaryFile", lambda **k: FakeTmp())
+    lm.screenshot_b64()
+    sips = [c for c in calls if c and c[0]=="sips"]
+    assert sips == [["sips","-z","982","1512", FakeTmp.name]], sips  # height then width, in POINTS
+
+
+def test_screenshot_skips_resize_on_1x(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(lm, "_main_display_points", lambda: (1920, 1080, 1.0))
+    monkeypatch.setattr(lm.subprocess, "run", lambda cmd, **kw: calls.append(cmd) or type("R",(),{"returncode":0})())
+    monkeypatch.setattr(lm.base64, "b64encode", lambda b: b"ZmFrZQ==")
+    class FakeTmp:
+        name=str(tmp_path/"s.png")
+        def __enter__(s): open(s.name,"wb").write(b"x"); return s
+        def __exit__(s,*a): pass
+    monkeypatch.setattr(lm.tempfile, "NamedTemporaryFile", lambda **k: FakeTmp())
+    lm.screenshot_b64()
+    assert not any(c and c[0]=="sips" for c in calls)  # 1x display -> no resize
+
+
+def test_drag_is_shared_input():
+    # drag uses the one shared cursor -> must be gated/refused in simultaneous mode
+    assert lm.LocalComputer._is_shared_input({"action": "drag"}) is True
+
+
+def test_drag_endpoint_resolution(monkeypatch):
+    lc = object.__new__(lm.LocalComputer)
+    sess = object.__new__(lm.MacSession)
+    sess.registry = {"e5": "elA"}
+    monkeypatch.setattr(lm.MacSession, "_el", lambda self, r: self.registry[r])
+    monkeypatch.setattr(lm.MacSession, "_center", lambda self, el: (300, 400))
+    lc.session = sess
+    assert lc._endpoint({"from_x": 10, "from_y": 20}, "from") == (10, 20)      # xy coords
+    assert lc._endpoint({"to_ref": "e5"}, "to") == (300, 400)                  # ref -> center
+    assert lc._endpoint({}, "from") is None                                    # neither -> None
+
+
+def test_mouse_drag_posts_down_moves_up(monkeypatch):
+    events = []
+    monkeypatch.setattr(lm.Quartz, "CGEventCreateMouseEvent",
+                        lambda src, kind, pt, btn: ("ev", kind, (round(pt[0]), round(pt[1]))))
+    monkeypatch.setattr(lm.Quartz, "CGEventPost", lambda tap, ev: events.append(ev[1:]))
+    monkeypatch.setattr(lm.time, "sleep", lambda s: None)
+    lm._mouse_drag(0, 0, 100, 200, steps=4)
+    kinds = [e[0] for e in events]
+    assert kinds[0] == lm.Quartz.kCGEventLeftMouseDown
+    assert kinds[-1] == lm.Quartz.kCGEventLeftMouseUp
+    assert kinds.count(lm.Quartz.kCGEventLeftMouseDragged) == 4     # intermediate motion
+    assert events[0][1] == (0, 0) and events[-1][1] == (100, 200)   # correct endpoints
