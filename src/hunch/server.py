@@ -412,6 +412,10 @@ def applescript(script: str, confirm: bool = False) -> str:
     'tell application "Music" to play', or 'tell application "Safari" to get URL of current
     tab of front window'). Returns the script's output or the error.
 
+    FOCUS RULE: never use 'activate', and never create windows the task doesn't need
+    (e.g. Mail drafts: omit 'visible:true' — a visible compose window drags Mail frontmost).
+    Apple Events work with the app in the background; keep it there.
+
     SAFETY: read-only queries (get / count) run directly. Scripts that mutate, send, delete,
     quit, or use 'do shell script' pop a one-click 'Go ahead' dialog on the user's screen and
     only run if approved (pass confirm=true to skip the dialog if the user already approved).
