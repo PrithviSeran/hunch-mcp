@@ -13,6 +13,7 @@ from hunch import ax_tree_mac as ax
 def _bare_session():
     s = object.__new__(lm.MacSession)
     s._app_name = "FakeApp"
+    s.disturbances = {"pixel_clicks": 0, "keystrokes": 0, "key_combos": 0, "app_raises": 0}
     return s
 
 
@@ -127,3 +128,33 @@ def test_click_pixel_fallback_announces_cursor_use(monkeypatch):
     out = s.click("e1")
     assert clicks == [(10, 20)]
     assert "moved the shared cursor" in out
+    assert s.disturbances["pixel_clicks"] == 1  # the receipt counter saw it
+
+
+def test_file_op_batch_runs_all_and_reports_per_item():
+    import hunch.agent as ag
+
+    class FakeFiles:
+        def __init__(self): self.calls = []
+        def move(self, s, d): self.calls.append(("move", s, d)); return f"moved {s} -> {d}"
+        def copy(self, s, d): self.calls.append(("copy", s, d)); return f"copied {s} -> {d}"
+        def mkdir(self, s): self.calls.append(("mkdir", s, "")); return f"created {s}"
+
+    class FakeMac:
+        files = FakeFiles()
+
+    mac = FakeMac()
+    out = ag._file_op(mac, {"batch": [
+        {"op": "mkdir", "src": "/tmp/x"},
+        {"op": "move", "src": "/tmp/a", "dst": "/tmp/x"},
+        {"op": "bogus", "src": "/tmp/b"},
+        {"op": "copy", "src": "/tmp/c", "dst": "/tmp/x"},
+    ]})
+    lines = out.splitlines()
+    assert len(lines) == 4
+    assert lines[0] == "created /tmp/x"
+    assert "unknown op 'bogus'" in lines[2]
+    assert mac.files.calls == [("mkdir", "/tmp/x", ""), ("move", "/tmp/a", "/tmp/x"),
+                               ("copy", "/tmp/c", "/tmp/x")]
+    # single-op path unchanged
+    assert ag._file_op(mac, {"op": "move", "src": "/a", "dst": "/b"}) == "moved /a -> /b"

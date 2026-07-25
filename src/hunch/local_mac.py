@@ -292,6 +292,10 @@ class MacSession:
         self._counter = 0
         self.snapshot_count = 0
         self._pid = None  # target app pid, for activation before acting
+        # Shared-input use — the receipt behind "focus-free": every path that touches
+        # the ONE cursor/keyboard or raises an app increments these; act() reports the
+        # per-call delta so a disturbance is never silent in the transcript either.
+        self.disturbances = {"pixel_clicks": 0, "keystrokes": 0, "key_combos": 0, "app_raises": 0}
         if walk_workers is None:
             try:
                 walk_workers = int(os.environ.get("HUNCH_WALK_WORKERS", "8"))
@@ -330,6 +334,7 @@ class MacSession:
             settle = time.time() + 1.0
             while time.time() < settle:
                 if _frontmost()[1] == self._pid:
+                    self.disturbances["app_raises"] += 1
                     return True
                 time.sleep(0.1)
         return False
@@ -837,6 +842,7 @@ class MacSession:
             return (f"{ref}: no AX action vocabulary, and couldn't bring "
                     f"'{self._app_name or 'the app'}' to the front for a pixel click — "
                     f"skipped. Try a 'menu' action or a different element.")
+        self.disturbances["pixel_clicks"] += 1
         _mouse_click(*c)
         return f"clicked {ref} at {c} (pixel fallback: raised the app, moved the shared cursor)"
 
@@ -864,6 +870,7 @@ class MacSession:
         if not self.activate():
             return (f"{ref}: no AX menu action, and couldn't bring "
                     f"'{self._app_name or 'the app'}' to the front for a pixel right-click — skipped.")
+        self.disturbances["pixel_clicks"] += 1
         _mouse_click(*c, button="right")
         return f"right-clicked {ref} (pixel fallback: raised the app, moved the shared cursor)"
 
@@ -881,14 +888,17 @@ class MacSession:
                     f"'{self._app_name or 'the app'}' to the front — keystrokes land on the "
                     f"frontmost app, so typing blind was skipped.")
         AXUIElementSetAttributeValue(el, kAXFocusedAttribute, True)
+        self.disturbances["keystrokes"] += 1
         _type_text(text)
         return f"typed into {ref} (keystroke fallback: raised the app, used the shared keyboard)"
 
     def type_text(self, text):
+        self.disturbances["keystrokes"] += 1
         _type_text(text)
         return f"typed {len(text)} chars"
 
     def press_key(self, key, modifiers=None):
+        self.disturbances["key_combos"] += 1
         _press_key(key, modifiers or [])
         return f"key {'+'.join((modifiers or []) + [key])}"
 
@@ -1164,6 +1174,7 @@ class LocalComputer:
 
     def act(self, actions):
         sim = self.simultaneous
+        _dist_before = dict(self.session.disturbances)
         # Only bring the app forward if the batch actually contains a focus-stealing action.
         # Focus-free primitives (click / select / right_click / set-field / menu) never
         # activate the app — so they never disturb the user's foreground.
@@ -1199,6 +1210,7 @@ class LocalComputer:
                 elif act == "key":
                     lines.append(self.session.press_key(a["key"], a.get("modifiers")))
                 elif act == "click_xy":
+                    self.session.disturbances["pixel_clicks"] += 1
                     _mouse_click(int(a["x"]), int(a["y"]))
                     lines.append(f"clicked ({a['x']},{a['y']})")
                 else:
@@ -1211,7 +1223,15 @@ class LocalComputer:
                 lines.append(f"error on {act}: {e}")
                 break
         time.sleep(0.8)
-        return "Executed:\n" + "\n".join(lines) + "\n\nScreen now:\n" + self.snapshot()
+        d = self.session.disturbances
+        delta = {k: d[k] - _dist_before[k] for k in d if d[k] > _dist_before[k]}
+        receipt = ""
+        if delta:
+            used = ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in delta.items())
+            total = ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in d.items() if v)
+            receipt = (f"\n\nShared-screen use this call: {used} (session total: {total}). "
+                       f"Prefer focus-free primitives where possible.")
+        return "Executed:\n" + "\n".join(lines) + receipt + "\n\nScreen now:\n" + self.snapshot()
 
     def handle(self, tool_use):
         name = tool_use.name

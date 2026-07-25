@@ -173,10 +173,16 @@ AGENT_TOOLS = [
                      "this to delete files instead of driving Finder."),
      "input_schema": _obj({"paths": {"type": "array", "items": {"type": "string"}}}, ["paths"])},
     {"name": "file_op",
-     "description": ("Focus-free filesystem op by path: op='move'|'copy' (src -> dst) or op='mkdir' "
-                     "(create a folder at src). To delete, use trash."),
+     "description": ("Focus-free filesystem ops by path: op='move'|'copy' (src -> dst) or op='mkdir' "
+                     "(create a folder at src). For MULTIPLE operations pass batch=[{op,src,dst},...] "
+                     "in ONE call (e.g. sort a whole folder at once). To delete, use trash."),
      "input_schema": _obj({"op": {"type": "string", "enum": ["move", "copy", "mkdir"]},
-                           "src": {"type": "string"}, "dst": {"type": "string"}}, ["op", "src"])},
+                           "src": {"type": "string"}, "dst": {"type": "string"},
+                           "batch": {"type": "array", "items": {
+                               "type": "object", "properties": {
+                                   "op": {"type": "string", "enum": ["move", "copy", "mkdir"]},
+                                   "src": {"type": "string"}, "dst": {"type": "string"}},
+                               "required": ["op", "src"]}}})},
     {"name": "open_file",
      "description": ("Open a file/folder/URL/app-deep-link with its default (or a named) app — "
                      "focus-free launch (also 'mailto:', 'spotify:track:...')."),
@@ -284,14 +290,20 @@ def _request_focus(mac, reason):
 
 
 def _file_op(mac, a):
-    op, src, dst = a.get("op"), a.get("src", ""), a.get("dst", "")
-    if op == "move":
-        return mac.files.move(src, dst)
-    if op == "copy":
-        return mac.files.copy(src, dst)
-    if op == "mkdir":
-        return mac.files.mkdir(src)
-    return f"unknown op {op!r} — use 'move', 'copy', or 'mkdir' (or the trash tool to delete)"
+    def one(op, src, dst):
+        if op == "move":
+            return mac.files.move(src, dst)
+        if op == "copy":
+            return mac.files.copy(src, dst)
+        if op == "mkdir":
+            return mac.files.mkdir(src)
+        return f"unknown op {op!r} — use 'move', 'copy', or 'mkdir' (or the trash tool to delete)"
+    batch = a.get("batch")
+    if batch:
+        # whole file jobs in ONE call (a folder sort is one tool call, not one per file);
+        # keeps going on per-item failures and reports each line, like trash()
+        return "\n".join(one(i.get("op"), i.get("src", ""), i.get("dst", "")) for i in batch)
+    return one(a.get("op"), a.get("src", ""), a.get("dst", ""))
 
 
 def _dispatch_core(mac, name, args):

@@ -372,10 +372,12 @@ def trash(paths: list) -> str:
 
 
 @mcp.tool()
-def file_op(op: str, src: str, dst: str = "") -> str:
+def file_op(op: str = "", src: str = "", dst: str = "", batch: list | None = None) -> str:
     """Focus-free filesystem operations by path: op='move' or 'copy' (src -> dst; dst may be a
-    folder or a new path), or op='mkdir' (create a folder at src). To delete, use `trash`."""
-    return _run("file_op", op=op, src=src, dst=dst)
+    folder or a new path), or op='mkdir' (create a folder at src). For MULTIPLE operations pass
+    batch=[{"op","src","dst"},...] and they all run in ONE call — sorting a folder is one call,
+    not one per file. To delete, use `trash`."""
+    return _run("file_op", op=op, src=src, dst=dst, batch=batch)
 
 
 @mcp.tool()
