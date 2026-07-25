@@ -42,6 +42,7 @@ from ApplicationServices import (
     AXUIElementCopyAttributeValue,
     AXUIElementCopyMultipleAttributeValues,
     AXUIElementCopyAttributeNames,
+    AXUIElementCopyActionNames,
     AXUIElementPerformAction,
     AXValueGetType,
     AXValueGetTypeID,
@@ -112,6 +113,14 @@ def get_attr(element, attr):
     if err != 0:
         return None
     return value
+
+
+def get_actions(element):
+    """Names of the AX actions the element itself advertises (AXPress, AXOpen, ...)."""
+    err, names = AXUIElementCopyActionNames(element, None)
+    if err != 0 or names is None:
+        return []
+    return [str(n) for n in names]
 
 
 _AX_VALUE_TYPE_ID = AXValueGetTypeID()

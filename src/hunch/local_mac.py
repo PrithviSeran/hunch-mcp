@@ -735,20 +735,100 @@ class MacSession:
             return None
         return int(b["x"] + b["w"] / 2), int(b["y"] + b["h"] / 2)
 
-    def click(self, ref, allow_pixel=True):
-        """Activate the element via its own AX action — occlusion-proof and no
-        cursor movement. Falls back to a coordinate click only if it exposes no
-        press action AND allow_pixel (a coordinate click moves the shared cursor)."""
-        el = self._el(ref)
+    # press-like actions worth trying when AXPress isn't offered, in order
+    _PRESS_ALTERNATIVES = ("AXOpen", "AXConfirm", "AXPick", "AXShowDefaultUI")
+    # AXPress on these returns success WITHOUT doing anything — a lie that makes
+    # the agent believe it toggled something (observed on System Settings labels)
+    _INERT_ROLES = ("AXStaticText", "AXImage")
+
+    def _ax_fire(self, el):
+        """Trigger the element through its own AX vocabulary: AXPress, press-like
+        alternative actions, then — for checkbox/switch roles — an AXValue flip
+        VERIFIED by reading the value back (SwiftUI switches accept the write and
+        silently drop it, and also lie about AXPress on their labels). Inert roles
+        (labels, images) are never 'pressed' — macOS reports success on them
+        without any effect. Returns a message on success, else None."""
+        a = ax.get_attrs(el, (ax.kAXRoleAttribute, "AXSubrole", kAXValueAttribute))
+        role = str(a[ax.kAXRoleAttribute] or "")
+        sub = str(a.get("AXSubrole") or "")
+        if role in self._INERT_ROLES:
+            return None
         if AXUIElementPerformAction(el, "AXPress") == 0:
-            return f"pressed {ref}"
+            return "pressed"
+        actions = ax.get_actions(el)
+        for name in self._PRESS_ALTERNATIVES:
+            if name in actions and AXUIElementPerformAction(el, name) == 0:
+                return f"performed {name}"
+        if role in ("AXCheckBox", "AXRadioButton") or sub in ("AXSwitch", "AXToggle"):
+            try:
+                new = 0 if int(a[kAXValueAttribute]) else 1
+            except (TypeError, ValueError):
+                new = 1
+            if AXUIElementSetAttributeValue(el, kAXValueAttribute, new) == 0:
+                time.sleep(0.15)
+                try:
+                    if int(ax.get_attr(el, kAXValueAttribute)) == new:
+                        return f"toggled to {new}"
+                except (TypeError, ValueError):
+                    pass
+        return None
+
+    def _ax_sweep(self, root):
+        """_ax_fire over a bounded breadth-first sweep below root."""
+        level, seen = [root], 0
+        for _ in range(3):
+            nxt = []
+            for parent in level:
+                for c in list(ax.get_attr(parent, ax.kAXChildrenAttribute) or [])[:16]:
+                    seen += 1
+                    if seen > 48:
+                        return None
+                    msg = self._ax_fire(c)
+                    if msg:
+                        return f"{msg} (inner control)"
+                    nxt.append(c)
+            level = nxt
+        return None
+
+    def _ax_activate(self, el):
+        """_ax_fire on the element itself; then its descendants (refs often land on
+        the wrapper row around the real control); then one parent sweep (refs just
+        as often land on the LABEL, whose control is a sibling in the same row).
+        One ancestor only — further up, the first control found could be a
+        different row's."""
+        msg = self._ax_fire(el)
+        if msg:
+            return msg
+        msg = self._ax_sweep(el)
+        if msg:
+            return msg
+        parent = ax.get_attr(el, "AXParent")
+        if parent is not None:
+            return self._ax_sweep(parent)
+        return None
+
+    def click(self, ref, allow_pixel=True):
+        """Activate the element via the AX layer — occlusion-proof and no cursor
+        movement: its own press action, a press-like alternative, a checkbox/switch
+        value flip, or the real control nested inside the ref. Falls back to a
+        coordinate click only if the AX layer offers nothing AND allow_pixel — and
+        then only after deliberately raising the app, because a pixel click both
+        moves the shared cursor and lands on whichever window is frontmost."""
+        el = self._el(ref)
+        msg = self._ax_activate(el)
+        if msg:
+            return f"{msg} {ref}"
         if not allow_pixel:
             return f"{ref}: no AX press action; a pixel click would move the shared cursor — skipped"
         c = self._center(el)
         if c is None:
             return f"{ref} not pressable and has no bounds"
+        if not self.activate():
+            return (f"{ref}: no AX action vocabulary, and couldn't bring "
+                    f"'{self._app_name or 'the app'}' to the front for a pixel click — "
+                    f"skipped. Try a 'menu' action or a different element.")
         _mouse_click(*c)
-        return f"clicked {ref} at {c}"
+        return f"clicked {ref} at {c} (pixel fallback: raised the app, moved the shared cursor)"
 
     def select(self, ref):
         """Select the element via AX (list rows, table cells, selectable items) —
@@ -771,8 +851,11 @@ class MacSession:
         c = self._center(el)
         if c is None:
             return f"{ref} has no bounds"
+        if not self.activate():
+            return (f"{ref}: no AX menu action, and couldn't bring "
+                    f"'{self._app_name or 'the app'}' to the front for a pixel right-click — skipped.")
         _mouse_click(*c, button="right")
-        return f"right-clicked {ref}"
+        return f"right-clicked {ref} (pixel fallback: raised the app, moved the shared cursor)"
 
     def set_text(self, ref, text, allow_keystrokes=True):
         """Set a text field's value directly via AX (focus-free). Falls back to real
@@ -783,9 +866,13 @@ class MacSession:
             return f"set text on {ref}"
         if not allow_keystrokes:
             return f"{ref}: field not AX-settable; typing would use the shared keyboard — skipped"
+        if not self.activate():
+            return (f"{ref}: field not AX-settable, and couldn't bring "
+                    f"'{self._app_name or 'the app'}' to the front — keystrokes land on the "
+                    f"frontmost app, so typing blind was skipped.")
         AXUIElementSetAttributeValue(el, kAXFocusedAttribute, True)
         _type_text(text)
-        return f"typed into {ref}"
+        return f"typed into {ref} (keystroke fallback: raised the app, used the shared keyboard)"
 
     def type_text(self, text):
         _type_text(text)
