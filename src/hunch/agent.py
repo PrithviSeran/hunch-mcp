@@ -43,6 +43,7 @@ _ACTION_ITEM = {
         "path": {"type": "array", "items": {"type": "string"}},
         "key": {"type": "string"}, "modifiers": {"type": "array", "items": {"type": "string"}},
         "x": {"type": "integer"}, "y": {"type": "integer"}, "w": {"type": "integer"}, "h": {"type": "integer"},
+        "app": {"type": "string"},
         "from_ref": {"type": "string"}, "to_ref": {"type": "string"},
         "from_x": {"type": "integer"}, "from_y": {"type": "integer"},
         "to_x": {"type": "integer"}, "to_y": {"type": "integer"}},
@@ -82,7 +83,7 @@ AGENT_TOOLS = [
      "input_schema": _obj({"role": {"type": "string"}, "name_contains": {"type": "string"},
                            "app": {"type": "string"}, "max_results": {"type": "integer"}})},
     {"name": "act",
-     "description": ("Run UI actions in order by ref, then get what CHANGED on screen (unchanged lines omitted; snapshot gives the full tree). To tile/position a window use the 'window' verb (x/y/w/h, focus-free, targets the main window). Verbs: click "
+     "description": ("Run UI actions in order by ref, then get what CHANGED on screen (unchanged lines omitted; snapshot gives the full tree). To tile/position a window use the 'window' verb (x/y/w/h, focus-free, targets the main window; pass `app` to target a specific app — to tile TWO apps give each window action its own `app`, e.g. app:'TextEdit' x:0 then app:'Notes' x:756). Verbs: click "
                      "(activate), right_click (context menu), select (highlight a row), type (set "
                      "a field by ref = focus-free; no ref types at focus = STEALS FOCUS), menu "
                      "(invoke a menu-bar path, e.g. ['File','Move to Trash'] — the focus-free "

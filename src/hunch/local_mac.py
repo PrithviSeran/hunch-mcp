@@ -293,6 +293,7 @@ class MacSession:
         self._counter = 0
         self.snapshot_count = 0
         self._pid = None  # target app pid, for activation before acting
+        self._app_name = None  # target app name; set by snapshot(), read by activate()/window ops
         # Shared-input use — the receipt behind "focus-free": every path that touches
         # the ONE cursor/keyboard or raises an app increments these; act() reports the
         # per-call delta so a disturbance is never silent in the transcript either.
@@ -911,16 +912,25 @@ class MacSession:
         index resize hits the sheet instead. Sets only the axes given, reads the
         result back, and reports the ACTUAL geometry (never assumes the set stuck —
         some windows clamp to a min size or refuse)."""
-        if not self._pid and app_name:
+        # Resolve the target. An explicit app_name that differs from the current target
+        # re-resolves (so ONE act batch can tile SEVERAL apps — e.g. TextEdit left, Notes
+        # right); otherwise use the session's app, establishing it on the first window-op
+        # when nothing has been snapshotted yet. A named app resolves to a LOCAL pid so a
+        # one-off window op on another app never clobbers the session's main target.
+        pid, name = self._pid, self._app_name
+        if app_name and (not pid or (name or "").lower() != app_name.lower()):
             match = _resolve_app(app_name)   # window ops need no ref, so may run before any snapshot
-            if match:
-                self._pid, self._app_name = match["pid"], match["name"]
-        if not self._pid:
+            if not match:
+                return f"no running app named {app_name!r} to move/resize — check it's running"
+            pid, name = match["pid"], match["name"]
+            if not self._pid:                # first target also becomes the session's app
+                self._pid, self._app_name = pid, name
+        if not pid:
             return "no target app for window op — snapshot the app first, or check it's running"
-        ax_app = AXUIElementCreateApplication(self._pid)
+        ax_app = AXUIElementCreateApplication(pid)
         win = ax.get_window(ax_app)
         if win is None:
-            return f"{self._app_name or 'app'} exposes no window to move/resize"
+            return f"{name or 'app'} exposes no window to move/resize"
         # refuse to act on a sheet-obscured window: the geometry the user means is
         # the main window's, and a sheet must be dismissed first
         sheet = ax.get_attr(win, "AXSubrole")
@@ -941,7 +951,7 @@ class MacSession:
         got = ax.values_to_bounds(ax.get_attr(win, ax.kAXPositionAttribute),
                                   ax.get_attr(win, ax.kAXSizeAttribute)) or {}
         note = " (a sheet is attached — dismiss it first if this looks wrong)" if sheet == "AXSheet" else ""
-        return (f"window now at ({got.get('x')},{got.get('y')}) "
+        return (f"{name}: window now at ({got.get('x')},{got.get('y')}) "
                 f"{got.get('w')}×{got.get('h')}{note}")
 
     def menu(self, path):
@@ -1186,9 +1196,12 @@ TOOLS = [
                      "menu (invoke a menu-bar command by path, e.g. path=['File','Move to Trash'] — "
                      "FOCUS-FREE, the preferred stand-in for keyboard shortcuts like ⌘⌫/⌘S/⌘W), "
                      "key (press a key with optional modifiers — STEALS FOCUS, only when no menu/field "
-                     "equivalent exists), window (move/resize the app's MAIN window FOCUS-FREE via "
+                     "equivalent exists), window (move/resize an app's MAIN window FOCUS-FREE via "
                      "x/y/w/h — the right way to tile/position windows; targets the main window, not a "
-                     "sheet/dialog), click_xy (pixel click — last-resort fallback, STEALS FOCUS). "
+                     "sheet/dialog. Pass `app` to target a specific app's window; to tile TWO different "
+                     "apps side by side give each window action its own `app`, e.g. "
+                     "{action:window,app:'TextEdit',x:0,w:756,...} then {action:window,app:'Notes',x:756,w:756,...}), "
+                     "click_xy (pixel click — last-resort fallback, STEALS FOCUS). "
                      "Prefer the focus-free primitives (click/select/right_click/type-into-ref/menu/window)."),
      "input_schema": {"type": "object", "properties": {"actions": {"type": "array", "items": {
          "type": "object", "properties": {
@@ -1200,6 +1213,7 @@ TOOLS = [
              "key": {"type": "string"}, "modifiers": {"type": "array", "items": {"type": "string"}},
              "x": {"type": "integer"}, "y": {"type": "integer"},
              "w": {"type": "integer"}, "h": {"type": "integer"},
+             "app": {"type": "string"},
              "from_ref": {"type": "string"}, "to_ref": {"type": "string"},
              "from_x": {"type": "integer"}, "from_y": {"type": "integer"},
              "to_x": {"type": "integer"}, "to_y": {"type": "integer"}},
@@ -1363,7 +1377,8 @@ class LocalComputer:
                     lines.append(self.session.press_key(a["key"], a.get("modifiers")))
                 elif act == "window":
                     lines.append(self.session.set_window(
-                        x=a.get("x"), y=a.get("y"), w=a.get("w"), h=a.get("h"), app_name=self.app))
+                        x=a.get("x"), y=a.get("y"), w=a.get("w"), h=a.get("h"),
+                        app_name=a.get("app") or self.app))
                 elif act == "drag":
                     fp, tp = self._endpoint(a, "from"), self._endpoint(a, "to")
                     if not fp or not tp:
