@@ -74,7 +74,8 @@ AGENT_TOOLS = [
                      "ref='e42' re-walks just that element's subtree; truncated trees end in `…` "
                      "markers naming what was dropped."),
      "input_schema": _obj({"app": {"type": "string"}, "ref": {"type": "string"},
-                           "max_depth": {"type": "integer"}, "max_nodes": {"type": "integer"}})},
+                           "max_depth": {"type": "integer"}, "max_nodes": {"type": "integer"},
+                           "max_children": {"type": "integer"}})},
     {"name": "find",
      "description": ("Search an app's WHOLE tree for matching elements without reading a full "
                      "snapshot — the cheap way to locate one control in a big window. Filter by "
@@ -237,7 +238,8 @@ def _img(png_bytes):
 # screenshot tools — each backend formats bytes into its own image-block shape).
 _DISPATCH = {
     "snapshot": lambda m, a: m.snapshot(a.get("app", ""), ref=a.get("ref") or None,
-                                        max_depth=a.get("max_depth"), max_nodes=a.get("max_nodes")),
+                                        max_depth=a.get("max_depth"), max_nodes=a.get("max_nodes"),
+                                        max_children=a.get("max_children")),
     "find": lambda m, a: m.find(role=a.get("role") or None, name_contains=a.get("name_contains") or None,
                                 app=a.get("app", ""), max_results=a.get("max_results", 20)),
     # `confirm` isn't in the agent tool schema (an agent must not self-approve); the MCP

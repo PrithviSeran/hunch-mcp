@@ -135,7 +135,28 @@ def test_sibling_marker():
                  children=[FakeEl("AXButton", f"B{i}") for i in range(205)])
     with _patched(Fetcher()):
         text = _snapshot_tree(_session(), win)
-    assert "…(+5 more siblings not shown)" in text
+    assert "5 more of 205 siblings not shown" in text   # actionable, names the total
+    assert "snapshot(ref='e1')" in text                 # points at the (emitted) container
+
+
+def test_sibling_cap_recoverable():
+    # A scaffolding container (not emitted) with 250 children: the full walk caps at
+    # 200, marks it with a MINTED ref, and scoping that ref pages the rest in.
+    import re
+    grp = FakeEl("AXGroup", children=[FakeEl("AXButton", f"B{i}") for i in range(250)])
+    win = FakeEl("AXWindow", "W", children=[grp])
+    s = _session()
+    with _patched(Fetcher()):
+        full = _snapshot_tree(s, win)
+    assert full.count('"B') == 200                       # first 200 of 250 buttons
+    assert "50 more of 250 siblings not shown" in full
+    m = re.search(r"snapshot\(ref='(e\d+)'\)", full)
+    assert m, full
+    ref = m.group(1)
+    assert s.registry.get(ref) is grp                    # minted ref points at the container
+    with _patched(Fetcher()):
+        text, info = s._snapshot_scoped(ref, None, None, True)
+    assert text.count('"B') == 250                       # scoped cap (1000) shows all 250
 
 
 def test_budget_footer_and_absence():

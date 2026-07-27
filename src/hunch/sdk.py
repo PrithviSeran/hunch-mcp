@@ -161,16 +161,19 @@ class Hunch:
 
     # ── native apps: AX tree ──────────────────────────────────────────────────
 
-    def snapshot(self, app="", ref=None, max_depth=None, max_nodes=None):
+    def snapshot(self, app="", ref=None, max_depth=None, max_nodes=None, max_children=None):
         """The app's focused window as a ref-annotated accessibility tree (focus-free).
         Empty `app` targets the frontmost app. Pass ref="e42" to expand ONLY that
         element's subtree at full depth (other refs stay valid). Truncation is never
-        silent: capped output ends in an explicit …marker naming the ref to expand."""
+        silent: capped output ends in an explicit …marker naming the ref to expand.
+        max_children raises the per-node sibling cap to page a big list in."""
         if ref is not None:
-            return self._computer.snapshot(ref=ref, max_depth=max_depth, max_nodes=max_nodes)
+            return self._computer.snapshot(ref=ref, max_depth=max_depth, max_nodes=max_nodes,
+                                           max_children=max_children)
         prev = self._computer.app
         self._computer.app = app or _frontmost()
-        out = self._computer.snapshot(max_depth=max_depth, max_nodes=max_nodes)
+        out = self._computer.snapshot(max_depth=max_depth, max_nodes=max_nodes,
+                                      max_children=max_children)
         if isinstance(out, str) and out.startswith("(app '") and "not found" in out:
             self._computer.app = prev   # a failed target must not poison later calls
         return out

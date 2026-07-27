@@ -214,7 +214,8 @@ _MAX_DEPTH = 18            # default depth for a FULL-window walk
 _SCOPED_MAX_NODES = 10000  # defaults for scoped (ref=) subtree walks and find()
 _SCOPED_MAX_DEPTH = 100    # "full depth" while still guarding Python recursion
 _NODES_CEILING = 50000     # hard safety ceiling everywhere
-_MAX_CHILDREN = 200        # per-node sibling cap (marked, not silent)
+_MAX_CHILDREN = 200        # per-node sibling cap for a FULL-window walk (marked + recoverable)
+_SCOPED_MAX_CHILDREN = 1000  # raised cap for scoped (ref=) walks and find(): page a big list in
 # Cap on a single element's text value in the serialized tree. Must be generous: chat messages,
 # code blocks, notes, and email bodies are real content the agent needs IN FULL (the old 120-char
 # cap silently truncated Discord messages so Hunch could neither read nor copy them). Only truly
@@ -231,6 +232,12 @@ def _cap_depth(v, default):
 
 
 def _cap_nodes(v, default):
+    """None/0/negative -> default; always clamped to the safety ceiling."""
+    v = default if (v is None or v <= 0) else v
+    return min(v, _NODES_CEILING)
+
+
+def _cap_children(v, default):
     """None/0/negative -> default; always clamped to the safety ceiling."""
     v = default if (v is None or v <= 0) else v
     return min(v, _NODES_CEILING)
@@ -418,16 +425,18 @@ class MacSession:
         return False
 
     def snapshot(self, app_name=None, compact=True, max_depth=None, activate_app=True,
-                 ref=None, max_nodes=None):
+                 ref=None, max_nodes=None, max_children=None):
         """Compact tree of the target app's focused window (frontmost app by
         default). Returns (text, info) and refreshes the ref registry.
         Pass ref='eNN' to re-walk ONLY that element's subtree (deeper defaults,
-        does NOT clear other refs). max_depth/max_nodes=None -> defaults; when a
-        cap truncates output, an explicit …marker line says what was dropped."""
+        does NOT clear other refs). max_depth/max_nodes/max_children=None ->
+        defaults; when a cap truncates output, an explicit …marker line says what
+        was dropped and how to see more."""
         if ref is not None:
-            return self._snapshot_scoped(ref, max_depth, max_nodes, compact)
+            return self._snapshot_scoped(ref, max_depth, max_nodes, compact, max_children)
         max_depth = _cap_depth(max_depth, _MAX_DEPTH)
         max_nodes = _cap_nodes(max_nodes, _MAX_NODES)
+        max_children = _cap_children(max_children, _MAX_CHILDREN)
         self.registry = {}
         self.snapshot_count += 1
         win, app_name, err = self._resolve_window(app_name)
@@ -435,7 +444,7 @@ class MacSession:
             return err
         lines = [f"=== {app_name} — focused window (snapshot #{self.snapshot_count}) ==="]
         budget = {"left": max_nodes, "hit": False}
-        self._walk(win, 0, "", lines, compact, max_depth, budget)
+        self._walk(win, 0, "", lines, compact, max_depth, budget, max_children=max_children)
         if budget["hit"]:
             lines.append(_TRUNC_FOOTER.format(n=max_nodes))
         text = "\n".join(lines)
@@ -509,10 +518,12 @@ class MacSession:
                 {"est_tokens": 40, "refs": 0, "app": app_name})
         return win, app_name, None
 
-    def _snapshot_scoped(self, ref, max_depth, max_nodes, compact):
+    def _snapshot_scoped(self, ref, max_depth, max_nodes, compact, max_children=None):
         """Re-walk ONLY the subtree under a known ref, at generous depth. Does NOT
         clear the registry: every other ref stays live, subtree refs are updated in
-        place (the persistent _keymap makes them identical to full-walk refs)."""
+        place (the persistent _keymap makes them identical to full-walk refs).
+        The sibling cap defaults HIGHER here (_SCOPED_MAX_CHILDREN) so scoping into
+        a big list's container pages in far more rows than the full-window walk."""
         el = self.registry.get(ref)
         key = self._ref_keys.get(ref)
         app = getattr(self, "_app_name", None) or "app"
@@ -525,10 +536,12 @@ class MacSession:
                     {"est_tokens": 15, "refs": len(self.registry), "app": app})
         max_depth = _cap_depth(max_depth, _SCOPED_MAX_DEPTH)
         max_nodes = _cap_nodes(max_nodes, _SCOPED_MAX_NODES)
+        max_children = _cap_children(max_children, _SCOPED_MAX_CHILDREN)
         self.snapshot_count += 1
         lines = [f"=== {app} — subtree of [{ref}] (snapshot #{self.snapshot_count}) ==="]
         budget = {"left": max_nodes, "hit": False}
-        self._walk(el, 0, "", lines, compact, max_depth, budget, root_key=key)
+        self._walk(el, 0, "", lines, compact, max_depth, budget, root_key=key,
+                   max_children=max_children)
         if budget["hit"]:
             lines.append(_TRUNC_FOOTER.format(n=max_nodes))
         text = "\n".join(lines)
@@ -581,7 +594,9 @@ class MacSession:
             shown = (title or name)[:40]
             child_crumbs = crumbs + [shown] if shown else crumbs
             child_sib = {}
-            for child in list(children)[:_MAX_CHILDREN]:
+            # Higher cap than the full-window walk so find() can reach deep-list
+            # items (past the 200th child) — its own max_nodes budget bounds the search.
+            for child in list(children)[:_SCOPED_MAX_CHILDREN]:
                 if len(results) >= max_results:
                     more[0] = True
                     return
@@ -602,7 +617,7 @@ class MacSession:
                       "app": app_name, "matches": len(results), "searched": searched[0]}
 
     def _walk(self, el, depth, parent_key, lines, compact, max_depth, budget, sib=None,
-              root_key=None):
+              root_key=None, max_children=_MAX_CHILDREN):
         if budget["left"] <= 0:
             budget["hit"] = True
             return
@@ -646,10 +661,19 @@ class MacSession:
         if not children:
             return
         child_sib = {}
-        for child in list(children)[:_MAX_CHILDREN]:
-            self._walk(child, depth_out, key, lines, compact, max_depth, budget, child_sib)
-        if len(children) > _MAX_CHILDREN:
-            lines.append("  " * depth_out + f"…(+{len(children) - _MAX_CHILDREN} more siblings not shown)")
+        for child in list(children)[:max_children]:
+            self._walk(child, depth_out, key, lines, compact, max_depth, budget, child_sib,
+                       max_children=max_children)
+        if len(children) > max_children:
+            # Recoverable, like the depth/node caps: give the truncated container a
+            # ref (mint one if it wasn't emitted — a list container is usually
+            # scaffolding) and point the model at snapshot(ref=...), which re-walks
+            # this subtree at the higher scoped child cap.
+            trunc_ref = ref if ref is not None else self._ref_for(key)
+            self.registry[trunc_ref] = el
+            lines.append("  " * depth_out + f"…(+{len(children) - max_children} more of "
+                         f"{len(children)} siblings not shown — snapshot(ref='{trunc_ref}') "
+                         "to see the rest, or find(name_contains=...) to jump to one)")
 
     # ── actions ─────────────────────────────────────────────────────────
     def _el(self, ref):
@@ -1220,12 +1244,13 @@ class LocalComputer:
         self.tools = TOOLS
         self._last_snap = None   # baseline for act()'s delta view
 
-    def snapshot(self, ref=None, max_depth=None, max_nodes=None):
+    def snapshot(self, ref=None, max_depth=None, max_nodes=None, max_children=None):
         text, _ = self.session.snapshot(app_name=self.app, compact=True,
                                         activate_app=not self.simultaneous,
                                         ref=ref,
                                         max_depth=max_depth if max_depth is not None else self.max_depth,
-                                        max_nodes=max_nodes if max_nodes is not None else self.max_nodes)
+                                        max_nodes=max_nodes if max_nodes is not None else self.max_nodes,
+                                        max_children=max_children)
         if ref is None:
             self._last_snap = text   # full-window views re-baseline the delta; subtree views don't
         return text

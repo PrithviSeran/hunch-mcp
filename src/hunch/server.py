@@ -71,7 +71,7 @@ def _run(tool, /, **args):
 
 @mcp.tool()
 def snapshot(app: str = "", ref: str = "", max_depth: int | None = None,
-             max_nodes: int | None = None) -> str:
+             max_nodes: int | None = None, max_children: int | None = None) -> str:
     """See the screen as an accessibility tree. Each element is one line tagged with
     a [ref] like [e12]; you act on elements by ref. Pass an app name to target that
     app's focused window, or leave blank for the frontmost app.
@@ -80,8 +80,9 @@ def snapshot(app: str = "", ref: str = "", max_depth: int | None = None,
     output ends in `…` marker lines naming what was dropped. Pass ref="e42" to
     re-walk ONLY that element's subtree at full depth (its refs match the full
     snapshot's, and every other ref stays valid) — the way to see inside a
-    truncated container. `find` locates elements without reading a full tree.
-    max_depth/max_nodes override the defaults when you truly need a bigger walk.
+    truncated container, including a long list capped at its sibling limit. `find`
+    locates elements without reading a full tree. max_depth/max_nodes/max_children
+    override the defaults when you truly need a bigger walk.
 
     A PARTIAL tree is NOT a dead end. Some apps (chat/mail/master-detail, and Catalyst apps like
     WhatsApp) only expose the pane you're IN — the first snapshot may show just the sidebar/list.
@@ -91,7 +92,8 @@ def snapshot(app: str = "", ref: str = "", max_depth: int | None = None,
     or steal focus (focus_app / launch_app foreground / click_xy) just because the first read was
     thin. Reserve `screenshot` for confirming truly VISUAL content (an image, a file-preview
     thumbnail) — to check what an action did or read UI text, RE-SNAPSHOT, don't screenshot."""
-    return _run("snapshot", app=app, ref=ref, max_depth=max_depth, max_nodes=max_nodes)
+    return _run("snapshot", app=app, ref=ref, max_depth=max_depth, max_nodes=max_nodes,
+                max_children=max_children)
 
 
 @mcp.tool()

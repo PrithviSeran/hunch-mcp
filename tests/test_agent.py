@@ -79,7 +79,7 @@ class _FakeHunch:
         if name in self._raise_on:
             raise self._raise_on[name]
 
-    def snapshot(self, app="", ref=None, max_depth=None, max_nodes=None):
+    def snapshot(self, app="", ref=None, max_depth=None, max_nodes=None, max_children=None):
         self._rec("snapshot")
         return f"tree of {app or 'frontmost'}"
 
