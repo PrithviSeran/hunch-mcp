@@ -78,6 +78,17 @@ resort. Concretely:
 
 ## AX-layer knowledge (hard-won — read before touching `local_mac.py`)
 
+- **The walk is serial by design — batching is the IPC win, concurrency is not** (measured,
+  `bench/ax_traversal_bench.py` + `ax_bottleneck_probe.py` + `ax_multiapp_probe.py`). Each AX read
+  is a synchronous Mach round-trip to the target app. `ax.get_attrs`
+  (`AXUIElementCopyMultipleAttributeValues`) reads **all** of an element's attributes in **one**
+  round-trip — that's the ~5–7x speedup and the whole game. Reading the tree across a **thread pool
+  does NOT help** (benchmarked ~20–26% *slower*): the target app answers AX on its **single main
+  thread**, so concurrent reads of one app's tree can't overlap. It is **not** the GIL — the pyobjc
+  call releases it (bracket ratio 0.98) — the limit is server-side in the other process, so
+  free-threaded Python won't change it. A concurrent BFS prefetch (`_prefetch`/`walk_workers`) was
+  **removed in 0.5.1; do not re-add it.** (Concurrency only scales across *different* apps — separate
+  main threads — never within one.)
 - **Stable refs**: `snapshot` assigns `[eN]` per element via a keymap; the same element keeps its
   ref across snapshots. `act()` returns a **delta** (`~ changed / + new / gone:`) vs the last
   snapshot, full tree only on first view / window change / >50% churn. Don't assume `act` re-sends
