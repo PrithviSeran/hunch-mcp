@@ -284,7 +284,7 @@ class MacSession:
     """Per-snapshot ref registry mapping [e1..eN] to LIVE AXUIElement handles, so
     the agent acts on real elements (AXPress) not coordinates."""
 
-    def __init__(self, walk_workers=None):
+    def __init__(self):
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 2.0)
         self.registry = {}
         self._keymap = {}
@@ -299,13 +299,12 @@ class MacSession:
         # per-call delta so a disturbance is never silent in the transcript either.
         self.disturbances = {"pixel_clicks": 0, "keystrokes": 0, "key_combos": 0,
                              "app_raises": 0, "drags": 0}
-        if walk_workers is None:
-            try:
-                walk_workers = int(os.environ.get("HUNCH_WALK_WORKERS", "8"))
-            except ValueError:
-                walk_workers = 8
-        # 0/1 = serial walk; >1 = concurrent BFS prefetch of AX attributes
-        self.walk_workers = max(0, min(int(walk_workers), 32))
+        # The walk is SERIAL by design. Batching (get_attrs = all attrs of one
+        # element in a single Mach round-trip) is the real IPC win; reading a tree
+        # across threads does NOT help, because the target app answers AX on its one
+        # main thread — concurrent reads of a single app's tree can't overlap (this
+        # is server-side, not the GIL, which the pyobjc call does release). Measured
+        # in bench/ax_traversal_bench.py, ax_bottleneck_probe.py, ax_multiapp_probe.py.
 
     def activate(self):
         """Bring the target app to the front so its window is discoverable and
@@ -351,18 +350,16 @@ class MacSession:
             self._ref_keys[ref] = key   # single write site: every registry write mints here first
         return ref
 
-    def _accessible_name(self, el, cap=8, fetch=None):
+    def _accessible_name(self, el, cap=8):
         """A container's label computed from its own + descendant text (bounded) —
         the accessible-name pattern, so a nameless AXRow can be labelled by the
-        filename in its cell. `fetch` serves cached full-attr dicts (a superset of
-        the three attrs read here); misses fall back to a live fetch."""
+        filename in its cell."""
         parts, budget = [], [cap]
         def collect(e, d):
             if budget[0] <= 0 or d > 5:
                 return
             budget[0] -= 1
-            a = fetch(e) if fetch else \
-                ax.get_attrs(e, (ax.kAXTitleAttribute, ax.kAXValueAttribute, ax.kAXChildrenAttribute))
+            a = ax.get_attrs(e, (ax.kAXTitleAttribute, ax.kAXValueAttribute, ax.kAXChildrenAttribute))
             for x in (a[ax.kAXTitleAttribute], a[ax.kAXValueAttribute]):
                 s = str(x or "").strip()
                 if s and s not in parts:
@@ -372,7 +369,7 @@ class MacSession:
         collect(el, 0)
         return " ".join(parts)[:100]
 
-    def _describe(self, el, a, fetch=None):
+    def _describe(self, el, a):
         """Unpack a fetched attrs dict into display fields. `name` applies the row
         rule (title, else value, else accessible name from the subtree)."""
         role = str(a[ax.kAXRoleAttribute] or "?")
@@ -382,7 +379,7 @@ class MacSession:
         value = str(v).strip() if v is not None else ""
         enabled = a[ax.kAXEnabledAttribute]
         is_row = role in _ROW_ROLES
-        name = (title or value or self._accessible_name(el, fetch=fetch)) if is_row else title
+        name = (title or value or self._accessible_name(el)) if is_row else title
         return role, title, desc, value, enabled, name, is_row
 
     @staticmethod
@@ -437,24 +434,12 @@ class MacSession:
         if err is not None:
             return err
         lines = [f"=== {app_name} — focused window (snapshot #{self.snapshot_count}) ==="]
-        cache = self._prefetch(win, max_depth, max_nodes, compact)
-        fetch = self._fetcher(cache)
         budget = {"left": max_nodes, "hit": False}
-        self._walk(win, 0, "", lines, compact, max_depth, budget, fetch=fetch)
+        self._walk(win, 0, "", lines, compact, max_depth, budget)
         if budget["hit"]:
             lines.append(_TRUNC_FOOTER.format(n=max_nodes))
         text = "\n".join(lines)
         return text, {"est_tokens": round(len(text) / 3.5), "refs": len(self.registry), "app": app_name}
-
-    @staticmethod
-    def _fetcher(cache):
-        """Cache-backed attribute fetcher for _walk/_accessible_name (None -> live serial)."""
-        if cache is None:
-            return None
-        def fetch(el):
-            hit = cache.get(id(el))
-            return hit[1] if hit is not None else ax.get_attrs(el, _ATTRS)
-        return fetch
 
     def _resolve_window(self, app_name):
         """Resolve app -> (window element, real app name, error). On failure the
@@ -541,13 +526,9 @@ class MacSession:
         max_depth = _cap_depth(max_depth, _SCOPED_MAX_DEPTH)
         max_nodes = _cap_nodes(max_nodes, _SCOPED_MAX_NODES)
         self.snapshot_count += 1
-        cache = self._prefetch(el, max_depth, max_nodes, compact)
-        if cache is not None:
-            cache[id(el)] = (el, a)   # root already fetched by the staleness probe
-        fetch = self._fetcher(cache)
         lines = [f"=== {app} — subtree of [{ref}] (snapshot #{self.snapshot_count}) ==="]
         budget = {"left": max_nodes, "hit": False}
-        self._walk(el, 0, "", lines, compact, max_depth, budget, fetch=fetch, root_key=key)
+        self._walk(el, 0, "", lines, compact, max_depth, budget, root_key=key)
         if budget["hit"]:
             lines.append(_TRUNC_FOOTER.format(n=max_nodes))
         text = "\n".join(lines)
@@ -562,9 +543,6 @@ class MacSession:
             return err
         max_nodes = _cap_nodes(max_nodes, _SCOPED_MAX_NODES)
         max_depth = _SCOPED_MAX_DEPTH
-        # compact=False: find searches INSIDE rows too, so prefetch must descend them
-        cache = self._prefetch(win, max_depth, max_nodes, compact=False)
-        fetch = self._fetcher(cache)
         want_role = role.lower() if role else None
         if want_role and want_role.startswith("ax"):
             want_role = want_role[2:]
@@ -586,8 +564,8 @@ class MacSession:
                 more[0] = True
                 return
             searched[0] += 1
-            a = fetch(el) if fetch else ax.get_attrs(el, _ATTRS)
-            role_, title, desc, value, enabled, name, is_row = self._describe(el, a, fetch)
+            a = ax.get_attrs(el, _ATTRS)
+            role_, title, desc, value, enabled, name, is_row = self._describe(el, a)
             key = self._seg_key(parent_key, sib, role_, name, desc)
             if matches(role_, title, desc, value, name):
                 r = self._ref_for(key)
@@ -624,15 +602,15 @@ class MacSession:
                       "app": app_name, "matches": len(results), "searched": searched[0]}
 
     def _walk(self, el, depth, parent_key, lines, compact, max_depth, budget, sib=None,
-              fetch=None, root_key=None):
+              root_key=None):
         if budget["left"] <= 0:
             budget["hit"] = True
             return
         budget["left"] -= 1
         if sib is None:
             sib = {}
-        a = fetch(el) if fetch else ax.get_attrs(el, _ATTRS)
-        role, title, desc, value, enabled, name, is_row = self._describe(el, a, fetch)
+        a = ax.get_attrs(el, _ATTRS)
+        role, title, desc, value, enabled, name, is_row = self._describe(el, a)
         if root_key is not None and depth == 0:
             # Scoped walk: the root's #occ disambiguator is uncomputable from inside the
             # subtree (its siblings aren't walked) — seed the stored key verbatim so this
@@ -669,75 +647,9 @@ class MacSession:
             return
         child_sib = {}
         for child in list(children)[:_MAX_CHILDREN]:
-            self._walk(child, depth_out, key, lines, compact, max_depth, budget, child_sib,
-                       fetch=fetch)
+            self._walk(child, depth_out, key, lines, compact, max_depth, budget, child_sib)
         if len(children) > _MAX_CHILDREN:
             lines.append("  " * depth_out + f"…(+{len(children) - _MAX_CHILDREN} more siblings not shown)")
-
-    _PREFETCH_DEADLINE_S = 20.0
-
-    def _prefetch(self, root, max_depth, max_nodes, compact):
-        """Phase A of the walk: fetch each element's attributes CONCURRENTLY (wave
-        BFS on a thread pool) so the serial assembly in _walk never waits on IPC.
-        The AX client API is synchronous Mach messaging with no documented thread
-        guarantee, so this is best-effort: ANY failure returns None and the caller
-        walks fully serial (today's behavior). Partial caches are safe — assembly
-        falls back to a live fetch per miss. Returns {id(el): (el, attrs)}; the
-        tuple keeps el referenced so id() stays unique for the cache's lifetime."""
-        if self.walk_workers <= 1:
-            return None
-        try:
-            from concurrent.futures import ThreadPoolExecutor
-            deadline = time.time() + self._PREFETCH_DEADLINE_S
-            cache = {}
-            limit = max_nodes + 512   # slack: DFS-with-budget ≠ first-N-BFS exactly
-            # Level entries: (el, depth, rowctr, rel). Inside a row subtree rowctr is a
-            # shared countdown ([n] mirroring _accessible_name's budget of 8 nodes ≤ 5
-            # levels) and rel the relative depth; elsewhere both are None.
-            level = [(root, 0, None, None)]
-            with ThreadPoolExecutor(max_workers=min(self.walk_workers, 32)) as pool:
-                while level and len(cache) < limit and time.time() < deadline:
-                    level = level[:limit - len(cache)]
-                    futs = [(item, pool.submit(ax.get_attrs, item[0], _ATTRS)) for item in level]
-                    nxt = []
-                    for (el, depth, rowctr, rel), fut in futs:
-                        a = fut.result()
-                        cache[id(el)] = (el, a)
-                        children = a[ax.kAXChildrenAttribute] or []
-                        if not children:
-                            continue
-                        if rowctr is not None:           # inside a row's name fan-out
-                            if rel >= 5:
-                                continue
-                            for c in list(children)[:_MAX_CHILDREN]:
-                                if rowctr[0] <= 0:
-                                    break
-                                rowctr[0] -= 1
-                                nxt.append((c, depth + 1, rowctr, rel + 1))
-                            continue
-                        role = str(a[ax.kAXRoleAttribute] or "?")
-                        if compact and role in _ROW_ROLES:
-                            # assembly never descends rows, but _accessible_name reads a
-                            # few descendants when the row is nameless — prefetch those
-                            title = str(a[ax.kAXTitleAttribute] or "").strip()
-                            v = a[ax.kAXValueAttribute]
-                            value = str(v).strip() if v is not None else ""
-                            if not (title or value):
-                                ctr = [7]   # _accessible_name budget 8 minus the row itself
-                                for c in list(children)[:_MAX_CHILDREN]:
-                                    if ctr[0] <= 0:
-                                        break
-                                    ctr[0] -= 1
-                                    nxt.append((c, depth + 1, ctr, 1))
-                            continue
-                        if depth >= max_depth:
-                            continue
-                        for c in list(children)[:_MAX_CHILDREN]:
-                            nxt.append((c, depth + 1, None, None))
-                    level = nxt
-            return cache
-        except Exception:
-            return None   # any weirdness -> serial walk, correctness unaffected
 
     # ── actions ─────────────────────────────────────────────────────────
     def _el(self, ref):
@@ -1294,7 +1206,7 @@ class LocalComputer:
     """Drives the real Mac through MacSession, exposing the same tools/handle
     contract the agent loop expects. Swap this in for the Docker Computer."""
 
-    def __init__(self, app="Finder", simultaneous=False, walk_workers=None,
+    def __init__(self, app="Finder", simultaneous=False,
                  max_depth=None, max_nodes=None):
         self.app = app
         # simultaneous=True: never steal the user's cursor/keyboard. Runs the
@@ -1302,7 +1214,7 @@ class LocalComputer:
         # forward, and REFUSES the shared-input ones (typed keystrokes, key combos,
         # pixel clicks) instead of disrupting whatever the user is doing.
         self.simultaneous = simultaneous
-        self.session = MacSession(walk_workers=walk_workers)
+        self.session = MacSession()
         self.max_depth = max_depth   # instance defaults for full snapshots (None -> module defaults)
         self.max_nodes = max_nodes
         self.tools = TOOLS

@@ -57,7 +57,7 @@ class Hunch:
     """A deterministic client for this Mac. See the module docstring for the contract."""
 
     def __init__(self, app="Finder", confirm="dialog", check_permissions=True,
-                 simultaneous=False, cdp_port=None, walk_workers=None,
+                 simultaneous=False, cdp_port=None,
                  snapshot_max_depth=None, snapshot_max_nodes=None,
                  agent_backend="auto", auth=None, app_name=None, policy=None,
                  app_id=None, cdp_profile=None, notify=None):
@@ -129,7 +129,6 @@ class Hunch:
             self._check_accessibility()
         # ONE persistent computer per instance, so element [refs] survive snapshot -> act.
         self._computer = LocalComputer(app=app, simultaneous=simultaneous,
-                                       walk_workers=walk_workers,
                                        max_depth=snapshot_max_depth,
                                        max_nodes=snapshot_max_nodes)
         # Namespaced defaults (names only — same semantics): derived CDP port + profile.
