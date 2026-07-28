@@ -82,7 +82,7 @@ brew install prithviseran/hunch/hunch
 Then, one time:
 
 ```
-hunch setup      # walk the macOS permission grants + create the browser profile
+hunch setup      # walk the macOS permission grants
 hunch doctor     # verify every layer; fix anything it flags
 hunch connect claude-desktop   # or: claude-code, cursor
 ```
