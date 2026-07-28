@@ -348,9 +348,10 @@ once, in the background, to set it. Master-detail and Catalyst apps (WhatsApp, M
 the pane you're in: the agent should click into an item by ref and re-snapshot; the detail pane
 then appears. Also check the app actually has a window open.
 
-**The web layer won't connect.** Chrome 136+ blocks CDP on your default profile by design. Hunch
-uses its own profile at `~/.hunch/chrome-cdp`; run `hunch setup` to create it and sign into your
-sites there.
+**The web layer won't connect.** Chrome 136+ blocks the CDP debug port on your default profile, so
+Hunch drives its own Chrome (a separate data dir at `~/.hunch/chrome-cdp`), not your everyday one.
+Sign that profile into your Google account once (via `hunch setup` or `web_login`) and Chrome Sync
+brings your logins with it; from then on it's already signed in.
 
 **My host shows the server instructions truncated.** Cosmetic: some host UIs shorten the playbook
 in their server-info display; the model receives it in full.
