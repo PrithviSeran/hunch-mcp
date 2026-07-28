@@ -55,8 +55,8 @@ Across 5 complex multi-step tasks (n=3):
 | Tool | Success | Cost | Disturbance (focus·cursor) | Timeouts |
 |---|---|---|---|---|
 | **Hunch** | **15/15** | **$1.52** | **1·0** | **0** |
-| Peekaboo | 13/15 | $14.60 | 22·16 | 2 |
-| cua-driver | 15/15 | $17.70 | 22·0 | 0 |
+| [Peekaboo](https://github.com/steipete/Peekaboo) | 13/15 | $14.60 | 22·16 | 2 |
+| [cua-driver](https://github.com/trycua/cua) | 15/15 | $17.70 | 22·0 | 0 |
 
 Perfect reliability, ~10x cheaper, ~5–10x faster, and it essentially never touches your screen (`0`
 cursor moves, `1` focus switch across 15 trials). Full methodology and per-task tables are in the
