@@ -8,8 +8,11 @@
 <meta property="og:title" content="Why concurrency didn&#x27;t speed up our macOS accessibility-tree reads (and how we proved it) | Hunch">
 <meta property="og:description" content="We built a concurrent prefetch to read a Mac&#x27;s accessibility tree faster. Benchmarking showed it was ~20-26% slower. Here&#x27;s the full investigation: the traversal benchmark, the parallelism probe, a GIL bracket test, and a multi-app control that pinned the real cause on the target app&#x27;s single main thread.">
 <meta property="og:type" content="article">
-<meta property="og:image" content="/assets/logo-app.png">
-<meta name="twitter:card" content="summary">
+<meta property="og:image" content="https://www.tryhunch.ca/assets/og-why-concurrency-didnt-speed-up-ax-reads.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://www.tryhunch.ca/assets/og-why-concurrency-didnt-speed-up-ax-reads.png">
 <link rel="icon" href="/assets/favicon.png">
 <link rel="stylesheet" href="/styles.css">
 <script>(function(){var r=document.documentElement;try{if(localStorage.getItem('hunch-theme')==='dark')r.setAttribute('data-theme','dark');}catch(e){}})();</script>
