@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hunch-sdk"
-version = "0.5.2"
+version = "0.5.3"
 description = "Drive your Mac focus-free over MCP: OS APIs, AppleScript, CDP, and Accessibility."
 readme = "README.md"
 license = "Apache-2.0"
@@ -37,6 +37,10 @@ agent = ["anthropic>=0.80", "claude-agent-sdk>=0.2"]   # both backends
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hunch"]
+
+[tool.hatch.build.targets.sdist]
+# ship only the package + metadata; keep bench/, site/, etc. out of the sdist
+include = ["src/hunch", "README.md", "LICENSE"]
 
 [project.scripts]
 hunch = "hunch.cli:main"
