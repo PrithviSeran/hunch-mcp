@@ -1,4 +1,5 @@
 {
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.prithviseran/hunch",
   "description": "Focus-free macOS control for AI agents: drive your real Mac apps in the background, no stolen focus.",
   "version": "0.5.2",
@@ -11,7 +12,9 @@
       "registryType": "pypi",
       "identifier": "hunch-sdk",
       "version": "0.5.2",
-      "transport": { "type": "stdio" }
+      "transport": {
+        "type": "stdio"
+      }
     }
   ]
 }
