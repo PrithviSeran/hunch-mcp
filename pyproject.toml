@@ -38,6 +38,10 @@ agent = ["anthropic>=0.80", "claude-agent-sdk>=0.2"]   # both backends
 [tool.hatch.build.targets.wheel]
 packages = ["src/hunch"]
 
+[tool.hatch.build.targets.sdist]
+# ship only the package + metadata; keep bench/, site/, etc. out of the sdist
+include = ["src/hunch", "README.md", "LICENSE"]
+
 [project.scripts]
 hunch = "hunch.cli:main"
 
