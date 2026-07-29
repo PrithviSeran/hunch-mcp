@@ -16,11 +16,23 @@ import markdown as md
 SITE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(SITE)
 CONTENT = os.path.join(SITE, "content")
+ORIGIN = "https://www.tryhunch.ca"
+DEFAULT_OG = f"{ORIGIN}/assets/og-hunch.png"
 
 # order + display date; slug is the filename (front-matter date is a placeholder)
 POSTS = [
-    {"file": "do-macos-agents-hijack-your-screen.md",     "date": "July 2026"},
-    {"file": "why-concurrency-didnt-speed-up-ax-reads.md", "date": "July 2026"},
+    {
+        "file": "do-macos-agents-hijack-your-screen.md",
+        "date": "July 2026",
+        "og_image": f"{ORIGIN}/assets/og-do-macos-agents-hijack-your-screen.png",
+        "og_w": 1200, "og_h": 630,
+    },
+    {
+        "file": "why-concurrency-didnt-speed-up-ax-reads.md",
+        "date": "July 2026",
+        "og_image": f"{ORIGIN}/assets/og-why-concurrency-didnt-speed-up-ax-reads.png",
+        "og_w": 1200, "og_h": 630,
+    },
 ]
 
 def nav(active):
@@ -45,8 +57,9 @@ FOOTER = '''<footer><div class="wrap"><div class="foot-inner">
   <span><a href="https://github.com/PrithviSeran/hunch-mcp" target="_blank" rel="noopener">GitHub</a> · <a href="/blogs">Blogs</a></span>
 </div></div></footer>'''
 
-def page(title, desc, ogtype, active, content):
+def page(title, desc, ogtype, active, content, og_image=None, og_w=1731, og_h=909):
     t = _html.escape(title, quote=True); d = _html.escape(desc, quote=True)
+    img = og_image or DEFAULT_OG
     return f'''<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -57,8 +70,11 @@ def page(title, desc, ogtype, active, content):
 <meta property="og:title" content="{t}">
 <meta property="og:description" content="{d}">
 <meta property="og:type" content="{ogtype}">
-<meta property="og:image" content="/assets/logo-app.png">
-<meta name="twitter:card" content="summary">
+<meta property="og:image" content="{img}">
+<meta property="og:image:width" content="{og_w}">
+<meta property="og:image:height" content="{og_h}">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="{img}">
 <link rel="icon" href="/assets/favicon.png">
 <link rel="stylesheet" href="/styles.css">
 <script>(function(){{var r=document.documentElement;try{{if(localStorage.getItem('hunch-theme')==='dark')r.setAttribute('data-theme','dark');}}catch(e){{}}}})();</script>
@@ -110,7 +126,8 @@ def build():
                    '\n<a class="art-back" style="margin:44px 0 0" href="/blogs">← Blogs</a>\n'
                    '</div></article></div>')
         open(os.path.join(SITE, "blog", post["slug"] + ".html"), "w", encoding="utf-8").write(
-            page(f'{fm["title"]} | Hunch', fm["description"], "article", "blogs", article))
+            page(f'{fm["title"]} | Hunch', fm["description"], "article", "blogs", article,
+                 og_image=post.get("og_image"), og_w=post.get("og_w", 1200), og_h=post.get("og_h", 630)))
         print("  wrote blog/%s.html" % post["slug"])
     rows = "\n".join(
         f'''      <a class="post" href="/blog/{m["slug"]}">
