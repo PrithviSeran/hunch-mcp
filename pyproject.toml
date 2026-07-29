@@ -42,5 +42,6 @@ packages = ["src/hunch"]
 hunch = "hunch.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/prithviseran/hunch-mcp"
-Issues = "https://github.com/prithviseran/hunch-mcp/issues"
+Homepage = "https://www.tryhunch.ca"
+Repository = "https://github.com/PrithviSeran/hunch-mcp"
+Issues = "https://github.com/PrithviSeran/hunch-mcp/issues"
