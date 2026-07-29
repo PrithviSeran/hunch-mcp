@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hunch: an agent that runs your Mac without taking it over</title>
+<meta name="description" content="Hunch lets an LLM operate your real, already-signed-in Mac apps in the background, reading the accessibility tree and driving native APIs, focus-free.">
+<meta property="og:title" content="Hunch: an agent that runs your Mac without taking it over">
+<meta property="og:description" content="Hunch lets an LLM operate your real, already-signed-in Mac apps in the background, reading the accessibility tree and driving native APIs, focus-free.">
+<meta property="og:type" content="website">
+<meta property="og:image" content="/assets/logo-app.png">
+<meta name="twitter:card" content="summary">
+<link rel="icon" href="/assets/favicon.png">
+<link rel="stylesheet" href="/styles.css">
+<script>(function(){var r=document.documentElement;try{if(localStorage.getItem('hunch-theme')==='dark')r.setAttribute('data-theme','dark');}catch(e){}})();</script>
+</head>
+<body>
+<nav>
+  <div class="nav-inner">
+    <a class="brand" href="/"><img class="brand-logo" src="/assets/logo-mark.png" alt=""><span>Hunch</span></a>
+    <div class="nav-links">
+      <a href="/" aria-current="page">Home</a>
+      <a href="/blogs">Blogs</a>
+    </div>
+    <button class="toggle" id="themeBtn" aria-label="Toggle color theme">
+      <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg>
+      <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="4.2"/><path d="M12 2v2M12 20v2M4.2 4.2l1.5 1.5M18.3 18.3l1.5 1.5M2 12h2M20 12h2M4.2 19.8l1.5-1.5M18.3 5.7l1.5-1.5"/></svg>
+    </button>
+  </div>
+</nav>
+<main>
+<div class="wrap">
+    <div class="hero">
+      <img class="hero-logo" src="/assets/logo-app.png" alt="Hunch">
+      <div class="hero-content">
+        <h1>An agent that runs your Mac, without taking it over.</h1>
+      <p class="lede">Hunch lets an LLM operate your real, already-signed-in apps in the background. It reads the accessibility tree and drives native APIs, so it does real work while you keep using your machine.</p>
+      <div class="cta">
+        <a class="btn primary" href="https://github.com/PrithviSeran/hunch-mcp" target="_blank" rel="noopener">View on GitHub ↗</a>
+        <a class="btn" href="/blogs">Read the engineering →</a>
+      </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- the numbers -->
+  <div class="block"><div class="wrap">
+    <h2>Benchmark results</h2>
+    <p class="intro">We gave three macOS agents the identical model and task prompts on a real, logged-in Mac; only the tool changed. Alongside task success we measured <em>disturbance</em>: how many times the foreground app changed and how far the cursor moved while the agent ran. It's the dimension every VM-based benchmark structurally can't see.</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Tool</th><th>Success</th><th>Total cost</th><th>Disturbance&nbsp;(focus·cursor)</th></tr></thead>
+        <tbody>
+          <tr class="win"><td>Hunch</td><td class="num">53/54</td><td class="num">$6.03</td><td class="num">14 · 3</td></tr>
+          <tr><td>Peekaboo</td><td class="num">41/53</td><td class="num">$31.03</td><td class="num">80 · 46</td></tr>
+          <tr><td>cua-driver</td><td class="num">31/54</td><td class="num">$37.42</td><td class="num">97 · 71</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">Hunch registered <strong>0 focus switches and 0 cursor moves on every native-API, cross-app, and web task</strong>; its whole footprint came from the three tiers that inherently touch the GUI. n=5 per task, one Apple Silicon Mac, Claude Sonnet held constant. <a class="link" href="https://github.com/PrithviSeran/mac-agent-bench" target="_blank" rel="noopener">Full methodology &amp; per-task table ↗</a></p>
+  </div></div>
+
+  <!-- how it works: the ladder -->
+  <div class="block"><div class="wrap">
+    <h2>How it works</h2>
+    <p class="intro">Every action runs through a single ladder that tries the least disruptive path it can. A screenshot-and-click loop starts at the bottom of this ladder; Hunch starts at the top, which is why it can drive a real Mac without raising an app or moving the pointer.</p>
+    <div class="ladder">
+      <div class="layer"><span class="n">01</span><span class="name">OS APIs<small>Files, clipboard, apps: the direct call, never a click.</small></span><span class="tag">focus-free</span></div>
+      <div class="layer"><span class="n">02</span><span class="name">AppleScript<small>Native automation for scriptable apps: Mail, Notes, Music, Reminders.</small></span><span class="tag">focus-free</span></div>
+      <div class="layer"><span class="n">03</span><span class="name">Web · Chrome DevTools<small>Drives a real, logged-in Chrome for things that only live on the web.</small></span><span class="tag">focus-free</span></div>
+      <div class="layer"><span class="n">04</span><span class="name">Accessibility tree<small>Reads &amp; acts on any app's UI in the background, even Electron apps like Discord.</small></span><span class="tag">focus-free</span></div>
+      <div class="layer gated"><span class="n">05</span><span class="name">Vision: screenshot + click<small>Gated last resort, only when no tree exists. This is the only layer that touches the screen.</small></span><span class="tag">gated</span></div>
+    </div>
+  </div></div>
+
+  <!-- quickstart -->
+  <div class="block"><div class="wrap">
+    <h2>Quickstart</h2>
+    <p class="intro">Point any MCP client at it, or import the session object directly in Python. Both are the same engine: one exposed as tools, one as a library.</p>
+    <div class="code-grid">
+      <div>
+        <p class="code-label">Install &amp; grant permissions</p>
+<pre><code><span class="tok-c"># PyPI (or: brew install prithviseran/hunch/hunch)</span>
+pipx install hunch-sdk
+hunch setup      <span class="tok-c"># walk the macOS grants</span>
+
+<span class="tok-c"># then point Claude / Cursor / your agent at:</span>
+hunch serve</code></pre>
+      </div>
+      <div>
+        <p class="code-label">Or drive it from Python</p>
+<pre><code><span class="tok-k">from</span> hunch <span class="tok-k">import</span> MacSession
+
+mac = MacSession()
+
+<span class="tok-c"># read any app's UI as text, focus-free</span>
+tree, _ = mac.snapshot(<span class="tok-k">"Discord"</span>)
+
+<span class="tok-c"># ...then act on an element in the tree</span>
+mac.act(<span class="tok-k">"press"</span>, ref=...)</code></pre>
+      </div>
+    </div>
+  </div></div>
+</main>
+<footer><div class="wrap"><div class="foot-inner">
+  <span class="foot-brand"><img class="foot-logo" src="/assets/logo-mark.png" alt="">Hunch · focus-free computer use for macOS.</span>
+  <span><a href="https://github.com/PrithviSeran/hunch-mcp" target="_blank" rel="noopener">GitHub</a> · <a href="/blogs">Blogs</a></span>
+</div></div></footer>
+<script src="/theme.js"></script>
+</body>
+</html>

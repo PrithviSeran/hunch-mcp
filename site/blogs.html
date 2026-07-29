@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blog | Hunch</title>
+<meta name="description" content="Engineering write-ups from building Hunch: focus-free macOS computer use, the accessibility tree, and benchmarking screen disturbance.">
+<meta property="og:title" content="Blog | Hunch">
+<meta property="og:description" content="Engineering write-ups from building Hunch: focus-free macOS computer use, the accessibility tree, and benchmarking screen disturbance.">
+<meta property="og:type" content="website">
+<meta property="og:image" content="/assets/logo-app.png">
+<meta name="twitter:card" content="summary">
+<link rel="icon" href="/assets/favicon.png">
+<link rel="stylesheet" href="/styles.css">
+<script>(function(){var r=document.documentElement;try{if(localStorage.getItem('hunch-theme')==='dark')r.setAttribute('data-theme','dark');}catch(e){}})();</script>
+</head>
+<body>
+<nav>
+  <div class="nav-inner">
+    <a class="brand" href="/"><img class="brand-logo" src="/assets/logo-mark.png" alt=""><span>Hunch</span></a>
+    <div class="nav-links">
+      <a href="/">Home</a>
+      <a href="/blogs" aria-current="page">Blogs</a>
+    </div>
+    <button class="toggle" id="themeBtn" aria-label="Toggle color theme">
+      <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg>
+      <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="4.2"/><path d="M12 2v2M12 20v2M4.2 4.2l1.5 1.5M18.3 18.3l1.5 1.5M2 12h2M20 12h2M4.2 19.8l1.5-1.5M18.3 5.7l1.5-1.5"/></svg>
+    </button>
+  </div>
+</nav>
+<main>
+  <div class="wrap">
+    <div class="page-head"><h1>Blogs</h1></div>
+    <div class="post-list">
+      <a class="post" href="/blog/do-macos-agents-hijack-your-screen">
+        <h3>Do macOS agents hijack your screen? Benchmarking focus-free computer use</h3>
+        <p class="date">July 2026</p>
+        <p class="desc">How we benchmarked three macOS computer-use agents on a real, logged-in Mac, measuring a dimension every public benchmark ignores: whether the agent steals your cursor and foreground while it works.</p>
+      </a>
+      <a class="post" href="/blog/why-concurrency-didnt-speed-up-ax-reads">
+        <h3>Why concurrency didn&#x27;t speed up our macOS accessibility-tree reads (and how we proved it)</h3>
+        <p class="date">July 2026</p>
+        <p class="desc">We built a concurrent prefetch to read a Mac&#x27;s accessibility tree faster. Benchmarking showed it was ~20-26% slower. Here&#x27;s the full investigation: the traversal benchmark, the parallelism probe, a GIL bracket test, and a multi-app control that pinned the real cause on the target app&#x27;s single main thread.</p>
+      </a>
+    </div>
+  </div>
+</main>
+<footer><div class="wrap"><div class="foot-inner">
+  <span class="foot-brand"><img class="foot-logo" src="/assets/logo-mark.png" alt="">Hunch · focus-free computer use for macOS.</span>
+  <span><a href="https://github.com/PrithviSeran/hunch-mcp" target="_blank" rel="noopener">GitHub</a> · <a href="/blogs">Blogs</a></span>
+</div></div></footer>
+<script src="/theme.js"></script>
+</body>
+</html>

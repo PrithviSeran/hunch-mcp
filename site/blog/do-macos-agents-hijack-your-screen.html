@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Do macOS agents hijack your screen? Benchmarking focus-free computer use | Hunch</title>
+<meta name="description" content="How we benchmarked three macOS computer-use agents on a real, logged-in Mac, measuring a dimension every public benchmark ignores: whether the agent steals your cursor and foreground while it works.">
+<meta property="og:title" content="Do macOS agents hijack your screen? Benchmarking focus-free computer use | Hunch">
+<meta property="og:description" content="How we benchmarked three macOS computer-use agents on a real, logged-in Mac, measuring a dimension every public benchmark ignores: whether the agent steals your cursor and foreground while it works.">
+<meta property="og:type" content="article">
+<meta property="og:image" content="/assets/logo-app.png">
+<meta name="twitter:card" content="summary">
+<link rel="icon" href="/assets/favicon.png">
+<link rel="stylesheet" href="/styles.css">
+<script>(function(){var r=document.documentElement;try{if(localStorage.getItem('hunch-theme')==='dark')r.setAttribute('data-theme','dark');}catch(e){}})();</script>
+</head>
+<body>
+<nav>
+  <div class="nav-inner">
+    <a class="brand" href="/"><img class="brand-logo" src="/assets/logo-mark.png" alt=""><span>Hunch</span></a>
+    <div class="nav-links">
+      <a href="/">Home</a>
+      <a href="/blogs" aria-current="page">Blogs</a>
+    </div>
+    <button class="toggle" id="themeBtn" aria-label="Toggle color theme">
+      <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg>
+      <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="4.2"/><path d="M12 2v2M12 20v2M4.2 4.2l1.5 1.5M18.3 18.3l1.5 1.5M2 12h2M20 12h2M4.2 19.8l1.5-1.5M18.3 5.7l1.5-1.5"/></svg>
+    </button>
+  </div>
+</nav>
+<main>
+<div class="wrap"><article><div class="art-body">
+<a class="art-back" href="/blogs">← Blogs</a>
+<h1>Do macOS agents hijack your screen? Benchmarking focus-free computer use</h1>
+<p class="art-date">July 2026</p>
+<p>There is a whole class of "computer-use agent" now: give a model a screenshot and a mouse, and it clicks around your machine to get things done. The benchmarks that score these agents all measure the same thing (did the task succeed?), and they almost all run inside a VM.</p>
+<p>That leaves out the question we actually care about on a real, logged-in Mac: <strong>while the agent worked, did it take over your screen?</strong> Did it yank the cursor out from under you, raise apps to the foreground, and make the machine unusable until it finished? A VM has no user sitting at it, so no VM benchmark can even ask.</p>
+<p>We built a benchmark that does. It runs 3 agents on a real Mac, scores task success with programmatic checks, and measures the thing we hadn't seen anywhere else: <strong>disturbance</strong>, meaning how many times the foreground app changed and how far the cursor moved while the agent was running.</p>
+<h2>The metric the field ignores: disturbance</h2>
+<p>As of mid-2026 there are three credible macOS-native agent benchmarks: macOSWorld (NeurIPS 2025), MacArena (2026), and MacAgentBench (2026), plus OSWorld as the cross-OS standard. They are real, peer-reviewed work. They also share one structural blind spot: <strong>every one runs the task inside a macOS VM</strong> (AWS AMI, a local UTM image, or Docker-QEMU), and assumes a screenshot-driven agent that owns the foreground.</p>
+<p>That design can't score the thing that decides whether you'd actually let an agent run on your own machine: whether it lets you keep working. So we defined a metric for it.</p>
+<p><strong>Disturbance = focus switches + cursor travel, measured on the host while the agent runs.</strong> A tool that drives your Mac through background APIs and the accessibility tree can complete a task with <strong>zero</strong> focus switches and <strong>zero</strong> cursor movement. You wouldn't know it ran. A tool that drives by moving the visible mouse and clicking racks up both. It is a direct, quantitative proxy for "did this hijack my machine."</p>
+<h2>Same brain, different hands</h2>
+<p>The core fairness principle: hold the intelligence constant, vary only the tool.</p>
+<p>Every trial is an identical <code>claude -p "&lt;task prompt&gt;"</code> running Claude Sonnet. The <em>only</em> thing that changes between runs is which MCP server the model is allowed to call: the "hands." We tested 3 sets of hands:</p>
+<ul>
+<li><strong>Hunch</strong> (main @ 8eed22a): our tool. Drives native apps through OS APIs, AppleScript, the accessibility tree, and Chrome DevTools Protocol, all focus-free.</li>
+<li><strong>cua-driver</strong> (trycua cua-driver 0.12.6): trycua's open-source driver. Markets focus-free host control via Apple's SkyLight window layer, exposed as primitive MCP tools.</li>
+<li><strong>Peekaboo</strong> (@steipete/peekaboo 3.9.8): a screenshot-and-click vision loop.</li>
+</ul>
+<p>Rules that make it a measurement and not a demo:</p>
+<ul>
+<li><strong>Locked hands.</strong> Each run is <code>--strict-mcp-config</code> with every built-in tool denied except the MCP server under test (plus <code>ToolSearch</code>, needed to load deferred tool schemas). We verified isolation held by checking the transcripts: the model's occasional attempts to reach for <code>Read</code>/<code>Grep</code> were all denied. No tool got an escape hatch.</li>
+<li><strong>Real outcomes, no LLM judge.</strong> Each task has a shell/AppleScript checker that inspects actual state: the draft exists in Mail, the reminder exists in Reminders, the two windows are actually tiled. A model grading itself is not evidence.</li>
+<li><strong>Hands-off, under <code>caffeinate</code>.</strong> 5 trials per task. We left the machine alone; any cursor movement is attributable to the tool.</li>
+<li><strong>Cost from the source.</strong> We read <code>total_cost_usd</code> from each run's result event, the CLI's own accounting.</li>
+</ul>
+<h2>Building the instrument was harder than the benchmark</h2>
+<p>This is the part worth reading if you ever measure the same thing, because the naive approach silently produces all zeros.</p>
+<p><strong>The frozen-frontmost trap.</strong> The obvious way to read the current foreground app in a pyobjc process is <code>NSWorkspace.frontmostApplication()</code>. It is <strong>KVO-cached and never updates in a process that isn't pumping an <code>NSRunLoop</code></strong> (i.e. any plain script or MCP server). It returns a frozen value forever. Our first monitor used it, reported <code>0</code> focus switches for everything, and looked great, until we watched a vision agent visibly drag files across the screen with the cursor while the monitor insisted nothing had happened. The fix: poll <code>lsappinfo front</code> (a fresh LaunchServices query) at 5 Hz, and track the cursor with a fresh Quartz <code>CGEventGetLocation</code> each sample. <em>Every focus number produced before we caught this measured nothing.</em></p>
+<p><strong>Retina misclicks.</strong> <code>screencapture</code> grabs the screen at native resolution (2x pixels on a Retina panel), but the click API posts events in points (1x). Nothing conveys the backing-scale factor to the model, so vision clicks land at half-coordinates. It's intermittent because it disappears on a 1x external display. Worth knowing before you trust any vision-path result.</p>
+<p><strong>SwiftUI lies.</strong> System Settings and similar apps return <code>AXPress</code> <em>success</em> on inert static text while doing nothing, and their toggles accept an accessibility value write and then silently drop it. If you don't read the state back after acting, you record successes that never happened.</p>
+<p><strong>Windows you can't enumerate.</strong> For apps launched in the background, <code>System Events</code> (and even a direct <code>AXWindows</code> query) sometimes reports <strong>zero windows</strong>, while the app's own AppleScript reports one, a Spaces/enumeration quirk. Our window-tiling checker's first version depended on the fragile path and produced false failures for every tool. We rewrote it to read each app's own window geometry, which is robust.</p>
+<p>The theme: on a real machine, the measurement apparatus lies to you in more ways than the agents do. Getting the instrument honest took longer than running the sweep.</p>
+<h2>The tasks</h2>
+<p>11 scored tasks, spanning the layers a real assistant hits: native-API tasks (sort files, create a calendar event, save a Mail draft, copy a value to the clipboard), a GUI-only accessibility setting, window tiling, an Electron/CEF app (play a track in Spotify), two cross-app chains (read a file into a note; clipboard into a reminder), and a web task via CDP. Each has a deterministic checker and a setup/teardown that resets state between trials.</p>
+<p>We excluded two by design (one has no accessibility tree at all, a genuine frontier case both tools fail; one needs a bot token to verify) and dropped one mid-analysis when its data store hung at the filesystem level inconsistently across tools. Excluding a broken task is more honest than scoring noise.</p>
+<h2>Results</h2>
+<p>Success, cost, and disturbance (focus switches · cursor moves), summed over the trials:</p>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Success</th>
+<th>Total cost</th>
+<th>Disturbance (focus · cursor)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Hunch</strong></td>
+<td><strong>53/54</strong></td>
+<td><strong>$6.03</strong></td>
+<td><strong>14 · 3</strong></td>
+</tr>
+<tr>
+<td>Peekaboo</td>
+<td>41/53</td>
+<td>$31.03</td>
+<td>80 · 46</td>
+</tr>
+<tr>
+<td>cua-driver</td>
+<td>31/54</td>
+<td>$37.42</td>
+<td>97 · 71</td>
+</tr>
+</tbody>
+</table></div>
+<figure>
+<div class="chartcard"><svg viewBox="0 0 660 470" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Scatter plot of screen disturbance per task: focus switches on the x-axis, cursor moves on the y-axis. Hunch clusters at the origin; cua-driver and Peekaboo scatter far out." font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif">
+<text x="330" y="26" text-anchor="middle" fill="#e5e7eb" font-size="17" font-weight="600">Screen disturbance per task (n=5 totals)</text>
+<line x1="70" y1="50" x2="70" y2="400" stroke="#374151" stroke-width="1"/>
+<text x="70" y="420" text-anchor="middle" fill="#9ca3af" font-size="12">0</text>
+<line x1="178" y1="50" x2="178" y2="400" stroke="#374151" stroke-width="1"/>
+<text x="178" y="420" text-anchor="middle" fill="#9ca3af" font-size="12">5</text>
+<line x1="285" y1="50" x2="285" y2="400" stroke="#374151" stroke-width="1"/>
+<text x="285" y="420" text-anchor="middle" fill="#9ca3af" font-size="12">10</text>
+<line x1="392" y1="50" x2="392" y2="400" stroke="#374151" stroke-width="1"/>
+<text x="392" y="420" text-anchor="middle" fill="#9ca3af" font-size="12">15</text>
+<line x1="500" y1="50" x2="500" y2="400" stroke="#374151" stroke-width="1"/>
+<text x="500" y="420" text-anchor="middle" fill="#9ca3af" font-size="12">20</text>
+<line x1="70" y1="400" x2="500" y2="400" stroke="#374151" stroke-width="1"/>
+<text x="60" y="404" text-anchor="end" fill="#9ca3af" font-size="12">0</text>
+<line x1="70" y1="303" x2="500" y2="303" stroke="#374151" stroke-width="1"/>
+<text x="60" y="307" text-anchor="end" fill="#9ca3af" font-size="12">10</text>
+<line x1="70" y1="206" x2="500" y2="206" stroke="#374151" stroke-width="1"/>
+<text x="60" y="210" text-anchor="end" fill="#9ca3af" font-size="12">20</text>
+<line x1="70" y1="108" x2="500" y2="108" stroke="#374151" stroke-width="1"/>
+<text x="60" y="112" text-anchor="end" fill="#9ca3af" font-size="12">30</text>
+<text x="285" y="446" text-anchor="middle" fill="#e5e7eb" font-size="13">Focus switches (app raised) - more disruptive</text>
+<text x="24" y="225" text-anchor="middle" fill="#e5e7eb" font-size="13" transform="rotate(-90 24 225)">Cursor moves</text>
+<circle cx="70.0" cy="400.0" r="6.5" fill="#22c55e" fill-opacity="0.72" stroke="#22c55e" stroke-width="1"/>
+<circle cx="70.0" cy="400.0" r="6.5" fill="#22c55e" fill-opacity="0.72" stroke="#22c55e" stroke-width="1"/>
+<circle cx="70.0" cy="400.0" r="6.5" fill="#22c55e" fill-opacity="0.72" stroke="#22c55e" stroke-width="1"/>
+<circle cx="70.0" cy="400.0" r="6.5" fill="#22c55e" fill-opacity="0.72" stroke="#22c55e" stroke-width="1"/>
+<circle cx="70.0" cy="400.0" r="6.5" fill="#22c55e" fill-opacity="0.72" stroke="#22c55e" stroke-width="1"/>
+<circle cx="177.5" cy="390.3" r="6.5" fill="#22c55e" fill-opacity="0.72" stroke="#22c55e" stroke-width="1"/>
+<circle cx="134.5" cy="380.6" r="6.5" fill="#22c55e" fill-opacity="0.72" stroke="#22c55e" stroke-width="1"/>
+<circle cx="199.0" cy="400.0" r="6.5" fill="#22c55e" fill-opacity="0.72" stroke="#22c55e" stroke-width="1"/>
+<circle cx="70.0" cy="400.0" r="6.5" fill="#22c55e" fill-opacity="0.72" stroke="#22c55e" stroke-width="1"/>
+<circle cx="70.0" cy="400.0" r="6.5" fill="#22c55e" fill-opacity="0.72" stroke="#22c55e" stroke-width="1"/>
+<circle cx="70.0" cy="400.0" r="6.5" fill="#22c55e" fill-opacity="0.72" stroke="#22c55e" stroke-width="1"/>
+<circle cx="328.0" cy="322.2" r="6.5" fill="#3b82f6" fill-opacity="0.72" stroke="#3b82f6" stroke-width="1"/>
+<circle cx="156.0" cy="400.0" r="6.5" fill="#3b82f6" fill-opacity="0.72" stroke="#3b82f6" stroke-width="1"/>
+<circle cx="156.0" cy="390.3" r="6.5" fill="#3b82f6" fill-opacity="0.72" stroke="#3b82f6" stroke-width="1"/>
+<circle cx="435.5" cy="254.2" r="6.5" fill="#3b82f6" fill-opacity="0.72" stroke="#3b82f6" stroke-width="1"/>
+<circle cx="435.5" cy="351.4" r="6.5" fill="#3b82f6" fill-opacity="0.72" stroke="#3b82f6" stroke-width="1"/>
+<circle cx="177.5" cy="341.7" r="6.5" fill="#3b82f6" fill-opacity="0.72" stroke="#3b82f6" stroke-width="1"/>
+<circle cx="306.5" cy="390.3" r="6.5" fill="#3b82f6" fill-opacity="0.72" stroke="#3b82f6" stroke-width="1"/>
+<circle cx="113.0" cy="390.3" r="6.5" fill="#3b82f6" fill-opacity="0.72" stroke="#3b82f6" stroke-width="1"/>
+<circle cx="199.0" cy="400.0" r="6.5" fill="#3b82f6" fill-opacity="0.72" stroke="#3b82f6" stroke-width="1"/>
+<circle cx="91.5" cy="351.4" r="6.5" fill="#3b82f6" fill-opacity="0.72" stroke="#3b82f6" stroke-width="1"/>
+<circle cx="91.5" cy="361.1" r="6.5" fill="#3b82f6" fill-opacity="0.72" stroke="#3b82f6" stroke-width="1"/>
+<circle cx="457.0" cy="361.1" r="6.5" fill="#ef4444" fill-opacity="0.72" stroke="#ef4444" stroke-width="1"/>
+<circle cx="70.0" cy="400.0" r="6.5" fill="#ef4444" fill-opacity="0.72" stroke="#ef4444" stroke-width="1"/>
+<circle cx="220.5" cy="341.7" r="6.5" fill="#ef4444" fill-opacity="0.72" stroke="#ef4444" stroke-width="1"/>
+<circle cx="177.5" cy="263.9" r="6.5" fill="#ef4444" fill-opacity="0.72" stroke="#ef4444" stroke-width="1"/>
+<circle cx="220.5" cy="390.3" r="6.5" fill="#ef4444" fill-opacity="0.72" stroke="#ef4444" stroke-width="1"/>
+<circle cx="220.5" cy="400.0" r="6.5" fill="#ef4444" fill-opacity="0.72" stroke="#ef4444" stroke-width="1"/>
+<circle cx="392.5" cy="59.7" r="6.5" fill="#ef4444" fill-opacity="0.72" stroke="#ef4444" stroke-width="1"/>
+<circle cx="70.0" cy="400.0" r="6.5" fill="#ef4444" fill-opacity="0.72" stroke="#ef4444" stroke-width="1"/>
+<circle cx="328.0" cy="400.0" r="6.5" fill="#ef4444" fill-opacity="0.72" stroke="#ef4444" stroke-width="1"/>
+<circle cx="220.5" cy="400.0" r="6.5" fill="#ef4444" fill-opacity="0.72" stroke="#ef4444" stroke-width="1"/>
+<circle cx="478.5" cy="293.1" r="6.5" fill="#ef4444" fill-opacity="0.72" stroke="#ef4444" stroke-width="1"/>
+<circle cx="540" cy="70" r="6.5" fill="#22c55e" fill-opacity="0.72" stroke="#22c55e"/>
+<text x="554" y="74" fill="#e5e7eb" font-size="13">Hunch  53/54</text>
+<circle cx="540" cy="94" r="6.5" fill="#3b82f6" fill-opacity="0.72" stroke="#3b82f6"/>
+<text x="554" y="98" fill="#e5e7eb" font-size="13">Peekaboo  41/53</text>
+<circle cx="540" cy="118" r="6.5" fill="#ef4444" fill-opacity="0.72" stroke="#ef4444"/>
+<text x="554" y="122" fill="#e5e7eb" font-size="13">cua-driver  31/54</text>
+<text x="536" y="156" fill="#9ca3af" font-size="11">each dot = one task</text>
+<text x="536" y="172" fill="#9ca3af" font-size="11">lower-left = less</text>
+<text x="536" y="188" fill="#9ca3af" font-size="11">disturbance</text>
+<text x="536" y="216" fill="#22c55e" font-size="11.5" font-weight="600">8 of Hunch’s 11</text>
+<text x="536" y="231" fill="#22c55e" font-size="11.5" font-weight="600">tasks land at 0,0</text>
+</svg></div>
+<figcaption>Screen disturbance per task across 11 tasks (n=5 totals). Lower-left is better. Hunch registers 0 focus / 0 cursor on all eight native-API, cross-app, and web tasks; cua-driver and Peekaboo scatter into cursor-dragging and app-raising. Source: mac-agent-bench, 2026-07-27.</figcaption>
+</figure>
+<p>Hunch finishes first on every axis at once: highest success, ~6.2x/~5.1x lower cost, and far less screen disturbance. Hunch registered <strong>0 focus switches and 0 cursor moves on all eight native-API, cross-app, and web tasks</strong>; its entire footprint (14 focus switches, 3 cursor moves) came from the three tiers that inherently touch the GUI, namely the accessibility toggle, window tiling, and the Spotify app. That's what native APIs and background accessibility buy you on a <em>host-native</em> suite. The number that carries the argument isn't the win rate; it's the disturbance column, because it's the one no other benchmark reports.</p>
+<h2>The surprise: the "focus-free twin" degrades under load</h2>
+<p>The result we didn't expect came from cua-driver, the one competitor that makes the <em>same</em> claim we do. It drives the host, not a VM, and targets windows through Apple's SkyLight layer specifically to avoid stealing focus. On paper it's our architectural twin.</p>
+<p>And on simple actions, the claim holds: pressing one accessibility control, creating a note, and playing a track all came in at <strong>0 · 0</strong>, genuinely focus-free.</p>
+<p>Then the tasks got real. Sorting files, tiling windows, chaining steps, and the focus-free path collapsed. It fell back to <strong>cursor-dragging and raising apps to the foreground</strong>, ending the sweep with the <em>most</em> disturbance of any tool (97 focus switches, 71 cursor moves), the highest cost ($37.42), and the most timeouts (20 of its runs hit the wall). With no OS-API layer to fall back to, it couldn't complete some tasks a single API call handles.</p>
+<p>The lesson generalizes past our tool: <strong>a focus-free layer is only worth having if it survives real work.</strong> "Focus-free" measured on a button press is marketing; measured across a task suite it's an engineering property, and it's one you have to design the whole stack for, not bolt onto a screenshot loop.</p>
+<h2>How Hunch stays out of your way</h2>
+<p>The 0 focus / 0 cursor columns are not a trick of the harness; they fall out of the architecture. An MCP client sees Hunch as a set of tools, and a developer imports its SDK object directly, but both are apps on the same core, and every action runs through one engine that tries the most direct layer first: an OS API, then AppleScript, then the web (Chrome DevTools), then the accessibility tree, and only as a gated last resort, vision. A screenshot-and-click loop starts at the bottom of that ladder; Hunch starts at the top, which is why it can drive a real Mac without raising an app or moving the pointer.</p>
+<div class="arch">
+<div class="row">
+<div class="box"><b>MCP client</b><small>Claude Desktop / Claude Code</small></div>
+<div class="box"><b>Your Python app</b><small>imports the SDK object directly</small></div>
+</div>
+<div class="arrow">↓</div>
+<div class="box"><b>One engine: _dispatch_core</b><small>the single tool-execution core shared by every face · consent + focus-free gate · Keychain auth</small></div>
+<div class="arrow">↓</div>
+<div class="box"><b>Execution backends</b><small>local_mac + ax_tree (AX read + actions) · cdp (web / Electron) · os_ops (files · clipboard · AppleScript)</small></div>
+<div class="arrow">↓</div>
+<div class="ladline">OS-API → AppleScript → Web / CDP → Accessibility → Vision (gated last resort)</div>
+<div class="arrow">↓</div>
+<div class="box"><b>Real macOS</b><small>background apps &amp; windows, no stolen cursor or foreground</small></div>
+<div class="cap">The focus-free ladder: every call enters one engine and takes the most direct layer first.</div>
+</div>
+<h2>What we'd caveat</h2>
+<p>Publishing a benchmark your own tool wins demands showing the seams:</p>
+<ul>
+<li><strong>Small n and one machine.</strong> These are confirmatory n=5 results on one model (Claude Sonnet) and one Apple Silicon Mac. Directional, not a universal leaderboard.</li>
+<li><strong>Timeouts bill $0.</strong> A timed-out run never emits a cost event, so it counts as zero. The slower tools timed out more, which means their cost totals are <strong>floors</strong>: the gap is understated, not inflated.</li>
+<li><strong>Environment noise and checker edges.</strong> One task's data store hung (excluded); one setup timed out per tool; and Hunch's lone non-pass was a checker false-negative, where Spotify was playing the correct track but returned an empty artist field. None is scored as a capability difference.</li>
+<li><strong>Scope.</strong> This is a <em>host-native, focus-free-weighted</em> suite. On a cross-OS or VM suite the ranking would look different, and we'd say so. We're measuring the axis we think matters for an agent on your actual machine, not claiming universal superiority.</li>
+</ul>
+<h2>Run it yourself</h2>
+<p>The point of a vendor benchmark is that nobody has to trust the vendor. The harness is "same brain, different hands": an adapter is a few lines of JSON pointing at an MCP server, and adding your own tool or task is a pull request. If you build a computer-use agent, submit it as an adapter and tell us where our numbers are wrong; we'd rather find out from you than from a reader.</p>
+<h2>Conclusion</h2>
+<p>The interesting question about a computer-use agent on your own Mac isn't only "can it do the task," it's "can it do the task without taking the machine away from me." That's measurable, it's the axis the VM benchmarks structurally can't see, and when you measure it the differences are stark, including a competitor whose focus-free promise held only until the work got hard. If you want an agent that drives your Mac while you keep using it, that's the whole design goal of Hunch, and now there's a number for it.</p>
+<h2>FAQ</h2>
+<h3>Why not just use an existing macOS agent benchmark?</h3>
+<p>They run in VMs and score only task success. None measures host disturbance (whether the agent steals your cursor and foreground), which is the property that decides if you'd run one on your real machine.</p>
+<h3>Is "same brain, different hands" fair to the other tools?</h3>
+<p>It holds the model constant and varies only the MCP tool layer, so differences are attributable to the hands. The trade-off: a tool that ships its own tuned agent loop is being driven by our shared model instead, which we disclose. It's the fairest apples-to-apples we found; alternatives (each tool's own agent + model) measure agent loops, not tools.</p>
+<a class="art-back" style="margin:44px 0 0" href="/blogs">← Blogs</a>
+</div></article></div>
+</main>
+<footer><div class="wrap"><div class="foot-inner">
+  <span class="foot-brand"><img class="foot-logo" src="/assets/logo-mark.png" alt="">Hunch · focus-free computer use for macOS.</span>
+  <span><a href="https://github.com/PrithviSeran/hunch-mcp" target="_blank" rel="noopener">GitHub</a> · <a href="/blogs">Blogs</a></span>
+</div></div></footer>
+<script src="/theme.js"></script>
+</body>
+</html>

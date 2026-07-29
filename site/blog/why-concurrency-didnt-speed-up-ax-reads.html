@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Why concurrency didn&#x27;t speed up our macOS accessibility-tree reads (and how we proved it) | Hunch</title>
+<meta name="description" content="We built a concurrent prefetch to read a Mac&#x27;s accessibility tree faster. Benchmarking showed it was ~20-26% slower. Here&#x27;s the full investigation: the traversal benchmark, the parallelism probe, a GIL bracket test, and a multi-app control that pinned the real cause on the target app&#x27;s single main thread.">
+<meta property="og:title" content="Why concurrency didn&#x27;t speed up our macOS accessibility-tree reads (and how we proved it) | Hunch">
+<meta property="og:description" content="We built a concurrent prefetch to read a Mac&#x27;s accessibility tree faster. Benchmarking showed it was ~20-26% slower. Here&#x27;s the full investigation: the traversal benchmark, the parallelism probe, a GIL bracket test, and a multi-app control that pinned the real cause on the target app&#x27;s single main thread.">
+<meta property="og:type" content="article">
+<meta property="og:image" content="/assets/logo-app.png">
+<meta name="twitter:card" content="summary">
+<link rel="icon" href="/assets/favicon.png">
+<link rel="stylesheet" href="/styles.css">
+<script>(function(){var r=document.documentElement;try{if(localStorage.getItem('hunch-theme')==='dark')r.setAttribute('data-theme','dark');}catch(e){}})();</script>
+</head>
+<body>
+<nav>
+  <div class="nav-inner">
+    <a class="brand" href="/"><img class="brand-logo" src="/assets/logo-mark.png" alt=""><span>Hunch</span></a>
+    <div class="nav-links">
+      <a href="/">Home</a>
+      <a href="/blogs" aria-current="page">Blogs</a>
+    </div>
+    <button class="toggle" id="themeBtn" aria-label="Toggle color theme">
+      <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg>
+      <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="4.2"/><path d="M12 2v2M12 20v2M4.2 4.2l1.5 1.5M18.3 18.3l1.5 1.5M2 12h2M20 12h2M4.2 19.8l1.5-1.5M18.3 5.7l1.5-1.5"/></svg>
+    </button>
+  </div>
+</nav>
+<main>
+<div class="wrap"><article><div class="art-body">
+<a class="art-back" href="/blogs">← Blogs</a>
+<h1>Why concurrency didn&#x27;t speed up our macOS accessibility-tree reads (and how we proved it)</h1>
+<p class="art-date">July 2026</p>
+<p>Hunch drives a Mac for an LLM without touching the screen. To do that, it reads the macOS accessibility tree, the same structured description of every window and control that VoiceOver uses, and turns it into a compact text outline the model can point at. The whole interaction is a loop: read the tree, act on an element, read the tree again. So the read has to be fast, because the agent does it constantly.</p>
+<p>We had a nice optimization for that read: a concurrent prefetch that fanned the accessibility API calls out across a thread pool. It looked obviously right. It had a clean design, a fallback path, and a comment explaining how it beat the IPC bottleneck.</p>
+<p>Then someone asked whether it had actually been benchmarked. It hadn't. So we measured it, and the optimization turned out to be a <strong>~20-26% slowdown</strong>. This post is the investigation that followed: how we confirmed the regression, and the sequence of experiments that traced it from "concurrency doesn't help" all the way down to the one line of macOS architecture that made it impossible. Along the way we killed our own leading hypothesis with a measurement.</p>
+<h2>The cost model: every attribute read is a round-trip</h2>
+<p>The macOS accessibility API (<code>AXUIElement</code>) is not a struct you read from memory. Every attribute you fetch is a <strong>synchronous Mach message to the process that owns the element</strong>. Ask Finder for a file cell's title, and you send a message, block, and wait for Finder to answer. One attribute, one cross-process round-trip.</p>
+<p>That is fine for a dialog with a dozen controls. It is catastrophic for a real tree. Our first probe: generate a folder of 800 files, open it in Finder's list view, and walk it. The tree had <strong>823 rows and 8,159 nodes</strong>, and a naive walk reading attributes one at a time is issuing tens of thousands of blocking round-trips in series. This is the "reading the Mail inbox takes minutes" problem, and for an agent that wants to read, act, and re-read in a loop, minutes is the same as broken.</p>
+<p>There are only two honest ways to make N serialized round-trips faster: issue fewer of them, or stop serializing them. We tried both. Only one worked.</p>
+<h2>Lever one: batching (this is the whole win)</h2>
+<p>macOS ships a batched accessor, <code>AXUIElementCopyMultipleAttributeValues</code>, that returns several attributes of one element in a <strong>single</strong> round-trip. Our reader needs eight attributes per node (role, title, description, value, enabled, position, size, children), so batching collapses eight round-trips into one.</p>
+<p>The effect is not subtle:</p>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>tree</th>
+<th>one-attr-at-a-time</th>
+<th>batched (one call per node)</th>
+<th>speedup</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Finder window (~281-node compact walk)</td>
+<td>4.6s</td>
+<td>0.90s</td>
+<td><strong>5.1x</strong></td>
+</tr>
+<tr>
+<td>Mail inbox</td>
+<td>4.2s</td>
+<td>0.60s</td>
+<td><strong>7.1x</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p>That is the optimization. Batching does not fight the round-trip cost, it <em>removes</em> round-trips, and it does it without any concurrency, thread-safety worries, or extra moving parts.</p>
+<h2>Lever two: the concurrency bet</h2>
+<p>Batching still leaves you with one round-trip <em>per node</em>, issued serially by a depth-first walk. The obvious next move: overlap them. Reading node A's attributes and node B's attributes are independent operations, both bound on IPC latency, so fire them concurrently and hide the waiting.</p>
+<p>So we built a two-phase walk. Phase A, a wave of breadth-first prefetching that submitted every node's batched read to a <code>ThreadPoolExecutor</code> and cached the results. Phase B, the normal depth-first assembly, now reading attributes out of the cache instead of blocking on IPC. The theory was multiplicative: 5-7x from batching, times some N from concurrency.</p>
+<p>It shipped as the default (<code>HUNCH_WALK_WORKERS=8</code>). It had a graceful serial fallback. It had a confident code comment. It had never been benchmarked against the serial path. That last part is the whole story.</p>
+<h2>Confirming the regression: the traversal benchmark</h2>
+<p>The first experiment was a straight three-way comparison on the same real tree, with three read strategies holding everything else constant:</p>
+<ul>
+<li><strong>naive</strong>: one attribute per call, serial.</li>
+<li><strong>batched-serial</strong>: batched reads, one worker (no concurrency).</li>
+<li><strong>batched-wN</strong>: batched reads across N threads (the prefetch).</li>
+</ul>
+<p>To keep it honest we ran interleaved trials (rotating the config order each round so app-side warmup spread evenly), and asserted the emitted tree text was <strong>byte-identical</strong> across every config, so we were comparing speed on identical output.</p>
+<p>The result, on Finder and on a real Mail inbox:</p>
+<ul>
+<li>batched-serial beat naive by 5-7x (the batching win, confirmed).</li>
+<li>batched-<strong>w8</strong> (the shipping default) came in at <strong>0.79x to 0.9x</strong> versus batched-serial, at every tree size we tried.</li>
+</ul>
+<p>Not "no faster." <em>Slower.</em> Adding eight threads to the batched read consistently gave back a fifth to a quarter of the speed. The optimization we were shipping by default was a regression against the one-line change it was built on top of.</p>
+<p>But a slow end-to-end number does not tell you <em>why</em>. The concurrent path does more than just thread the reads: it also prefetches breadth-first, over-fetching some nodes the depth-first walk never needs. Was the loss from the threading, or from the over-fetching? Time to isolate.</p>
+<h2>Isolating the primitive: the parallelism probe</h2>
+<p>To separate "threading doesn't help" from "the prefetch does extra work," we stripped the traversal away entirely and measured the raw primitive. Gather a fixed flat list of 4,000 real accessibility elements once, then read all their attributes two ways: serially, and across a thread pool. Same elements, same reads, no prefetch, no assembly, no over-fetching. Just: does threading these reads make them faster?</p>
+<figure>
+<div class="chartfig"><svg viewBox="0 0 560 300" role="img" aria-label="Bar chart: reading 4,000 accessibility elements, speedup versus thread count. Serial 1.00x, 2 workers 1.19x, 4 workers 1.15x, 8 workers 1.10x, 16 workers 1.05x, 32 workers 1.06x — all near 1.0x." font-family="system-ui,-apple-system,sans-serif">
+<rect x="0" y="0" width="560" height="300" fill="#ffffff"/>
+<text x="280" y="30" text-anchor="middle" font-size="15" font-weight="700" fill="#1a1a1a">Reading 4,000 elements: speedup vs thread count</text>
+<line x1="70" y1="55" x2="70" y2="250" stroke="#d5d9de" stroke-width="1"/>
+<line x1="70" y1="250" x2="540" y2="250" stroke="#333" stroke-width="1"/>
+<line x1="70" y1="90" x2="540" y2="90" stroke="#c0392b" stroke-width="1.2" stroke-dasharray="5 4"/>
+<text x="62" y="94" text-anchor="end" font-size="11" fill="#c0392b">1.0×</text>
+<g text-anchor="middle">
+<rect x="87" y="90" width="46" height="160" fill="#9aa5b1"/><text x="110" y="82" font-size="12.5" font-weight="600" fill="#1a1a1a">1.00×</text><text x="110" y="268" font-size="12" fill="#4b5563">serial</text>
+<rect x="157" y="60" width="46" height="190" fill="#2d6cdf"/><text x="180" y="52" font-size="12.5" font-weight="600" fill="#1a1a1a">1.19×</text><text x="180" y="268" font-size="12" fill="#4b5563">w2</text>
+<rect x="227" y="66" width="46" height="184" fill="#2d6cdf"/><text x="250" y="58" font-size="12.5" font-weight="600" fill="#1a1a1a">1.15×</text><text x="250" y="268" font-size="12" fill="#4b5563">w4</text>
+<rect x="297" y="74" width="46" height="176" fill="#2d6cdf"/><text x="320" y="66" font-size="12.5" font-weight="600" fill="#1a1a1a">1.10×</text><text x="320" y="268" font-size="12" fill="#4b5563">w8</text>
+<rect x="367" y="82" width="46" height="168" fill="#2d6cdf"/><text x="390" y="74" font-size="12.5" font-weight="600" fill="#1a1a1a">1.05×</text><text x="390" y="268" font-size="12" fill="#4b5563">w16</text>
+<rect x="437" y="80" width="46" height="170" fill="#2d6cdf"/><text x="460" y="72" font-size="12.5" font-weight="600" fill="#1a1a1a">1.06×</text><text x="460" y="268" font-size="12" fill="#4b5563">w32</text>
+</g>
+</svg></div>
+<figcaption>Serial 2.686s baseline. Speedup peaks at 1.19x (2 workers) and <em>degrades</em> toward 1.05x as threads are added.</figcaption>
+</figure>
+<p>The primitive barely parallelizes: a best case of 1.19x at two workers, sliding <em>down</em> to ~1.05x by 32 workers. That downward slope is itself a fingerprint. It says you have run out of parallelism to exploit and are now just paying for threads (scheduling, contention, futures overhead). For reference, thread-pool submission overhead measured at 6.5µs per task against a 140µs read, so the pool machinery itself is cheap; the problem is that there is nothing to overlap.</p>
+<p>So the end-to-end regression was over-determined: the prefetch over-fetches ~6x the nodes the walk needs, <em>and</em> threading can't overlap the reads, so you do more work at no parallelism and come out behind. But we still did not know the mechanism. Two suspects remained, and they call for completely different fixes:</p>
+<ol>
+<li><strong>Client-side (the GIL):</strong> pyobjc holds Python's Global Interpreter Lock through the call, so the threads serialize on the interpreter. Fixable with free-threaded Python or a native reader.</li>
+<li><strong>Server-side:</strong> the target app answers accessibility queries on one thread, so the requests queue there no matter what the client does. Not fixable from our side at all.</li>
+</ol>
+<p>We assumed it was the GIL. We were wrong, and here is how we found out.</p>
+<h2>Killing the GIL hypothesis: a bracket test</h2>
+<p>To ask "does this call release the GIL?" directly, we built a bracket. Run a pure-Python counter thread that does nothing but increment in a loop (pure GIL-bound work), and measure its throughput two ways: alone, and while a second thread runs some competitor workload. The ratio (paired throughput / solo throughput) tells you what fraction of the competitor's runtime the GIL was <em>available</em> to other threads.</p>
+<p>The trick is calibration. Bracket the accessibility call between two known quantities:</p>
+<ul>
+<li>A competitor that is a <strong>pure Python spin loop</strong> (definitely holds the GIL). Two CPU-bound threads share the interpreter roughly 50/50, so the counter should run at about half speed. This is the floor.</li>
+<li>A competitor that calls <strong><code>time.sleep</code></strong> in a loop (definitely releases the GIL while blocked). The counter should run at nearly full speed. This is the ceiling.</li>
+</ul>
+<p>Then drop the real accessibility reads in and see where they land.</p>
+<figure>
+<div class="chartfig"><svg viewBox="0 0 560 300" role="img" aria-label="Bar chart: GIL availability, paired over solo throughput. Python spin loop 0.51 (GIL-held floor), AX reads 0.98, time.sleep 1.01 (GIL-free ceiling). AX reads sit at the ceiling." font-family="system-ui,-apple-system,sans-serif">
+<rect x="0" y="0" width="560" height="300" fill="#ffffff"/>
+<text x="280" y="30" text-anchor="middle" font-size="15" font-weight="700" fill="#1a1a1a">GIL availability during the AX call (paired / solo)</text>
+<line x1="80" y1="55" x2="80" y2="250" stroke="#d5d9de" stroke-width="1"/>
+<line x1="80" y1="250" x2="540" y2="250" stroke="#333" stroke-width="1"/>
+<line x1="80" y1="77" x2="540" y2="77" stroke="#2e7d32" stroke-width="1.1" stroke-dasharray="5 4"/>
+<text x="72" y="81" text-anchor="end" font-size="11" fill="#2e7d32">1.0</text>
+<line x1="80" y1="164" x2="540" y2="164" stroke="#c0392b" stroke-width="1.1" stroke-dasharray="5 4"/>
+<text x="72" y="168" text-anchor="end" font-size="11" fill="#c0392b">0.5</text>
+<g text-anchor="middle">
+<rect x="120" y="162" width="90" height="88" fill="#c0392b"/><text x="165" y="154" font-size="13" font-weight="700" fill="#1a1a1a">0.51</text><text x="165" y="268" font-size="12" fill="#4b5563">python spin</text>
+<rect x="255" y="81" width="90" height="169" fill="#2d6cdf"/><text x="300" y="73" font-size="13" font-weight="700" fill="#1a1a1a">0.98</text><text x="300" y="268" font-size="12" fill="#4b5563">AX reads</text>
+<rect x="390" y="76" width="90" height="174" fill="#2e7d32"/><text x="435" y="68" font-size="13" font-weight="700" fill="#1a1a1a">1.01</text><text x="435" y="268" font-size="12" fill="#4b5563">time.sleep</text>
+</g>
+</svg></div>
+<figcaption>Floor 0.51 (GIL held), ceiling 1.01 (GIL free). Accessibility reads land at 0.98, right at the ceiling.</figcaption>
+</figure>
+<p>The accessibility reads came in at <strong>0.98</strong>, essentially at the GIL-free ceiling. While one thread hammered accessibility reads, the pure-Python counter thread ran at 98% of its solo speed. That can only happen if the reading thread spends almost all of its time <em>not holding the GIL</em>, blocked in the Mach call with the lock released.</p>
+<p>So the GIL was not the problem. Our leading hypothesis, the one we had half-written into the code comments, was measurably false. And that single number reframed everything: if the GIL is released but eight threads still don't overlap (the parallelism probe), then the serialization has to be somewhere the threads all share. Somewhere outside our process.</p>
+<h2>The positive control: reading many apps at once</h2>
+<p>By elimination the suspect was the target app's single-threaded accessibility responder. But elimination is not proof. We wanted a positive control: a setup where, if the theory is right, concurrency <em>should</em> scale, next to one where it should not.</p>
+<p>The design: hold the total read volume constant, and distribute it two ways.</p>
+<ul>
+<li><strong>Across apps:</strong> gather elements from five different applications and read each app's elements on its own thread. Five different processes, five different main threads. If the bottleneck is per-app, this should scale.</li>
+<li><strong>Within one app (the control):</strong> take one app's elements and split them across the same number of threads. One process, one main thread. This should not scale.</li>
+</ul>
+<figure>
+<div class="chartfig"><svg viewBox="0 0 560 300" role="img" aria-label="Bar chart: same reads distributed two ways. Within one app across 5 threads 1.05x; across 5 different apps 4.94x, near the ideal of 5x." font-family="system-ui,-apple-system,sans-serif">
+<rect x="0" y="0" width="560" height="300" fill="#ffffff"/>
+<text x="280" y="30" text-anchor="middle" font-size="15" font-weight="700" fill="#1a1a1a">Same reads, distributed two ways (speedup)</text>
+<line x1="80" y1="55" x2="80" y2="250" stroke="#d5d9de" stroke-width="1"/>
+<line x1="80" y1="250" x2="540" y2="250" stroke="#333" stroke-width="1"/>
+<line x1="80" y1="63" x2="540" y2="63" stroke="#2e7d32" stroke-width="1.1" stroke-dasharray="5 4"/>
+<text x="72" y="67" text-anchor="end" font-size="11" fill="#2e7d32">5×</text>
+<g text-anchor="middle">
+<rect x="150" y="211" width="130" height="39" fill="#9aa5b1"/><text x="215" y="203" font-size="14" font-weight="700" fill="#1a1a1a">1.05×</text><text x="215" y="268" font-size="12.5" fill="#4b5563">within 1 app (5 threads)</text>
+<rect x="360" y="65" width="130" height="185" fill="#2e7d32"/><text x="425" y="57" font-size="14" font-weight="700" fill="#1a1a1a">4.94×</text><text x="425" y="268" font-size="12.5" fill="#4b5563">across 5 apps</text>
+</g>
+</svg></div>
+<figcaption>685 reads total. Split across five processes: 0.354s to 0.072s (4.94x). Split across five threads on one process: 0.277s to 0.264s (1.05x).</figcaption>
+</figure>
+<p>The identical read volume scaled <strong>4.94x</strong> across five processes and <strong>1.05x</strong> within one. Two facts drop out of it at once: Python threads absolutely <em>can</em> overlap accessibility reads (or the across-apps case could not hit ~5x), and the serialization is strictly per-process. When the reads target one app, its single main thread answers them one at a time and the threads just queue at its door.</p>
+<h2>The root cause, and why no client-side fix helps</h2>
+<p>The reason the responder is single-threaded is not laziness, it is correctness. AppKit UI state is owned by the main thread. Servicing an accessibility query means reading live UI state, so it happens on the main run loop, because answering on a background thread would race the app mutating its own interface. The single-threaded accessibility responder is load-bearing for consistency.</p>
+<p>This is why the distinction between the two hypotheses mattered so much. If it had been the GIL, we would have had options: a free-threaded Python build, a native reader in Rust or Swift, a leaner binding. Because it is the <em>server</em>, none of those help. Free-threaded Python removes <em>your</em> interpreter lock, but the bottleneck is in Finder's process, not yours. You cannot make another app answer two accessibility queries at the same time by changing your own runtime. Concurrency can only ever help by reading <em>different</em> apps at once, which is not what walking one window's tree does.</p>
+<h2>Why batching is the right lever and threading is the wrong one</h2>
+<p>Step back and the whole result has a clean shape. Batching and concurrency attack the same cost, round-trip latency, in opposite ways:</p>
+<ul>
+<li><strong>Concurrency tries to overlap the serialized operations.</strong> It gets blocked, because the operations are serialized twice: at the interpreter (weakly) and at the target app's main thread (completely).</li>
+<li><strong>Batching reduces the number of serialized operations.</strong> Eight attribute-messages become one. It never fights the serialization, it just sends fewer messages to the single-threaded server.</li>
+</ul>
+<p>The right move against a serialized bottleneck is to do less of it, not to try to parallelize it. That is a general lesson worth carrying past this specific API: when a resource is fundamentally serial, throughput comes from shrinking the work, not from adding workers.</p>
+<h2>The unglamorous part: the fixtures fought back</h2>
+<p>The measurements above look clean. Getting them clean was most of the actual work, and if you go to reproduce this, these are the traps.</p>
+<ul>
+<li><strong>A virtualization red herring.</strong> Our first Finder fixture reported the same node count (~281) regardless of folder size, which looked like Finder was capping the tree. It was not; a bug in our harness was resolving the wrong window. The lesson was to print and assert the fixture's actual size before trusting a single measurement.</li>
+<li><strong>Window stacking and focus theft.</strong> The first harness opened a new Finder window per fixture size without closing the previous one, so windows layered up and stole focus, and the "focused window" we resolved was ambiguous. A benchmark for a focus-free system should not itself be raising windows.</li>
+<li><strong>Background accessibility teardown.</strong> When we switched to opening windows in the background to avoid the focus theft, the numbers went haywire, with element handles flickering between full and empty across trials. macOS tears down a backgrounded window's accessibility subtree (the same thing Electron and Chromium apps do), so the tree kept vanishing mid-measurement. The fix was to keep the fixture window frontmost and stable, and to discard any trial whose node count collapsed.</li>
+</ul>
+<p>None of that changed the conclusion, because the decisive experiment (the parallelism probe) held a fixed list of element handles and never depended on window state. But it is a good reminder that with UI automation, the system under test moves while you measure it, and a lot of "surprising" performance data is really the fixture misbehaving.</p>
+<h2>What we did, and what it left behind</h2>
+<p>We deleted the concurrent prefetch. The whole thread-pool machinery, the cache, the worker knob, and the fetch plumbing threaded through the walk came out, about 128 lines net, and the tree walk is serial-only now. The output is byte-identical, snapshots are ~20-26% faster in the default configuration than what we had been shipping, and the traversal code is easier to read because every attribute read is just a direct batched call with no indirection.</p>
+<p>The thing that started all of it was a single question: is this actually tested? It was a plausible optimization, written with care, shipped as the default, and it was a regression the whole time. The only reason we know is that we stopped trusting the design and measured it, then kept measuring until we understood not just <em>that</em> it was slow but <em>why</em>, precisely enough to know that no clever fix would rescue it.</p>
+<p>If you are optimizing against an OS API you did not write, that is the pattern worth stealing. Isolate the primitive so you are measuring one thing. Calibrate against known extremes so a single number can falsify a hypothesis (the bracket test is the move here). And build a positive control, a setup where the effect <em>should</em> appear, so that its presence in one case and absence in another localizes the cause. We went in assuming a client-side GIL problem and came out with a server-side architectural ceiling, and the only thing that turned the assumption into knowledge was refusing to stop at the first slow number.</p>
+<a class="art-back" style="margin:44px 0 0" href="/blogs">← Blogs</a>
+</div></article></div>
+</main>
+<footer><div class="wrap"><div class="foot-inner">
+  <span class="foot-brand"><img class="foot-logo" src="/assets/logo-mark.png" alt="">Hunch · focus-free computer use for macOS.</span>
+  <span><a href="https://github.com/PrithviSeran/hunch-mcp" target="_blank" rel="noopener">GitHub</a> · <a href="/blogs">Blogs</a></span>
+</div></div></footer>
+<script src="/theme.js"></script>
+</body>
+</html>
