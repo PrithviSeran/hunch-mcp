@@ -1,4 +1,4 @@
-<!-- mcp-name: io.github.prithviseran/hunch -->
+<!-- mcp-name: io.github.PrithviSeran/hunch -->
 <p align="center">
   <img src="https://raw.githubusercontent.com/PrithviSeran/hunch-mcp/main/src/hunch/assets/hunch.png" alt="Hunch" width="128">
 </p>
