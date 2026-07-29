@@ -140,6 +140,7 @@
   .post-list{padding:24px 0 60px;display:flex;flex-direction:column}
   .post{padding:34px 0;border-bottom:1px solid var(--border);cursor:pointer;text-align:left;background:none;border-left:0;border-right:0;border-top:0;width:100%;font-family:inherit;color:inherit}
   .post:first-child{border-top:0}
+  .post:last-child{border-bottom:0}
   .post h3{font-size:22px;font-weight:700;margin:0 0 6px;transition:color .2s}
   .post:hover h3{color:var(--accent-ink)}
   .post .date{font-size:14px;color:var(--muted-2);margin:0 0 12px}
