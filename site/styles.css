@@ -226,3 +226,7 @@
   /* markdown tables: right-align numeric columns */
   .art-body th:not(:first-child),.art-body td:not(:first-child){text-align:right}
   .art-body td{font-variant-numeric:tabular-nums}
+
+  /* sticky footer: on short pages, pin the footer to the bottom of the viewport */
+  body{min-height:100vh;display:flex;flex-direction:column}
+  main{flex:1 0 auto}
