@@ -74,6 +74,17 @@ KEY WORKFLOWS:
   `screenshot` tool to see a web page — it captures the physical frontmost screen, so on a background
   CDP window you get the USER's own window, not the page. If you truly need the page as pixels
   (chart/canvas/image), use `web_screenshot` (focus-free, captures the CDP page itself).
+- Drive a code editor's TERMINAL (Cursor / VS Code): the AX tree can READ an integrated terminal
+  but CANNOT type into it — it's xterm.js, which reads real KEYSTROKES, so an AX `type` lands in a
+  screen-reader mirror and silently does nothing (snapshot's set 'succeeds' but the shell never runs
+  it). Use CDP: `web_open(app="Cursor", url="/abs/path/to/folder")` opens a DEDICATED, background
+  Hunch editor window on that folder — SEPARATE from the user's own editor, so it's non-destructive
+  and focus-free. If no terminal is open yet, `web_act` [{"action":"key","key":"`","modifiers":
+  ["ctrl"]}] to open one (it's a toggle — only if the snapshot shows no Terminal). Then `web_snapshot`,
+  find the `[eN] tab "Terminal"` element, and `web_act` "type" ref=eN text="claude agents\n": a
+  TRAILING NEWLINE runs the command in the shell; omit it to stage without running. The dedicated
+  editor profile is fresh on first use — if it shows a sign-in/onboarding wall, treat it like
+  `web_login` (have the user sign into that window once; it persists).
 - You need the human (sign-in, 2FA, a decision, review-before-submit): call `notify_user(msg)`
   so they get a desktop alert — never stall silently.
 - APP RESISTS EVERY LAYER: `snapshot` already auto-relaunches an embedded-Chromium app with the

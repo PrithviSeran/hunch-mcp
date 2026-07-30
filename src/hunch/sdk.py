@@ -350,7 +350,15 @@ class Web:
         """Open a Chromium browser (or Electron app) for focus-free control. Uses the
         persistent, dedicated Hunch profile (isolated=True: throwaway sandbox profile).
         If the profile isn't signed into the site, the returned string says so — call
-        login() once, then reopen."""
+        login() once, then reopen.
+
+        For a code editor (app="Cursor"/"Visual Studio Code"/…), `url` is the FOLDER or FILE
+        to open, and Hunch drives a DEDICATED editor window (its own profile+port, separate
+        from your own editor). Its integrated terminal is then typeable focus-free via act()
+        — the AX tree can't write xterm.js, but CDP injects real keystrokes into the PTY."""
+        from .cdp import _is_editor
+        if _is_editor(app):
+            return self._open_editor(folder=url, app=app)
         import os as _os
         force = (self.force_sandbox if self.force_sandbox is not None
                  else _os.environ.get("HUNCH_FORCE_SANDBOX") == "1")
@@ -375,6 +383,34 @@ class Web:
                     "in a clearly-marked window; afterwards the profile stays logged in.")
         snap = self._computer.snapshot()
         return f"opened {app} over CDP ({snap.count('[e')} elements visible), focus-free"
+
+    def _open_editor(self, folder="", app="Cursor"):
+        """Open a code editor (Cursor/VS Code/…) on `folder` in a DEDICATED, background Hunch
+        window and drive it over CDP. Non-destructive: it's a separate instance on its own
+        profile+port, so the user's own editor is untouched. The integrated terminal becomes
+        focus-free-typeable (act 'type' on the terminal element, or key ctrl+` to open one)."""
+        import os as _os
+        from .cdp import CDPComputer, editor_target
+        port, profile, real = editor_target(app)
+        _os.makedirs(profile, exist_ok=True)
+        self.close()
+        try:
+            self._computer = CDPComputer(real, port=port, url=folder or None,
+                                         isolated=False, background=True, profile=profile,
+                                         editor=True)
+        except Exception as e:
+            raise HunchError(f"couldn't open {real} over CDP: {e} — "
+                             "web.restart() recovers a stale instance") from e
+        s = self._computer.session
+        s.wait_ready()
+        snap = self._computer.snapshot()
+        where = f" on {folder}" if folder else ""
+        has_term = ".xterm" in snap or "xterm-helper" in snap
+        tip = ("Its terminal is open — act a 'type' on the terminal element to run commands "
+               "focus-free." if has_term else
+               "No terminal open yet — act key ctrl+` to open one, web_snapshot, then 'type' into it.")
+        return (f"opened {real}{where} over CDP ({snap.count('[e')} elements), focus-free — a "
+                f"dedicated Hunch editor window, separate from your own. {tip}")
 
     def login(self, url="", app="Google Chrome"):
         """Open a background, banner-tagged window for the HUMAN to sign in once (Hunch

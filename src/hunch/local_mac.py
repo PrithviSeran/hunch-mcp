@@ -55,6 +55,28 @@ def _embedded_chromium(pid):
     return None
 
 
+def _is_editor_terminal(el, pid):
+    """True if `el` is an integrated TERMINAL inside an embedded-Chromium editor (Cursor,
+    VS Code, …). Such terminals are xterm.js: they read real KEYSTROKES off a hidden helper
+    textarea, so an AX value-set lands in xterm's screen-reader MIRROR and never reaches the
+    PTY — the set 'succeeds' (returns 0) while nothing runs. We detect it so set_text refuses
+    honestly and steers to the CDP path instead of reporting a phantom success. Narrow by
+    design: only fires inside Electron/CEF apps, only on text elements, only when the AX name
+    is xterm's 'Terminal N, …' label — so a normal Electron input (Slack, etc.) is untouched."""
+    if not _embedded_chromium(pid):
+        return False
+    try:
+        a = ax.get_attrs(el, (ax.kAXRoleAttribute, ax.kAXTitleAttribute, ax.kAXDescriptionAttribute))
+        role = str(a.get(ax.kAXRoleAttribute) or "")
+        if role not in ("AXTextArea", "AXTextField"):
+            return False
+        label = f"{a.get(ax.kAXTitleAttribute) or ''} {a.get(ax.kAXDescriptionAttribute) or ''}".lower()
+    except Exception:
+        return False
+    # xterm labels the terminal "Terminal <n>, <shell/title>" (verified: "Terminal 1, zsh").
+    return bool(re.search(r"\bterminal\b", label))
+
+
 # ── forcing an embedded-Chromium app's tree to persist in the BACKGROUND ──────────────────
 # Verified 2026-07-18 on Discord (hardened Electron — strips --remote-debugging-port so CDP can't
 # attach): Chromium builds its web-content AX tree only while the app is active and TEARS IT DOWN on
@@ -818,6 +840,16 @@ class MacSession:
         keystrokes only if the field isn't AX-settable AND allow_keystrokes (typing
         uses the shared keyboard)."""
         el = self._el(ref)
+        # An integrated terminal (Cursor/VS Code) is xterm.js: an AX value-set writes into its
+        # screen-reader mirror and NEVER reaches the shell, yet returns 0 (success). Refuse that
+        # phantom success and steer to the CDP path, which types real keystrokes into the PTY.
+        if _is_editor_terminal(el, getattr(self, "_pid", None)):
+            app = self._app_name or "the editor"
+            return (f"{ref} is a terminal inside {app} — AX cannot write to it. xterm.js reads "
+                    f"keystrokes, not AX values, so an AX set would silently do nothing (it lands "
+                    f"in the screen-reader mirror, not the shell). Type into it FOCUS-FREE over "
+                    f"CDP instead: web_open(app=\"{app}\") then web_act a 'type' action on the "
+                    f"terminal — that injects real keystrokes into the PTY.")
         if AXUIElementSetAttributeValue(el, kAXValueAttribute, text) == 0:
             return f"set text on {ref}"
         if not allow_keystrokes:

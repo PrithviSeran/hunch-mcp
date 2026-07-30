@@ -122,7 +122,11 @@ AGENT_TOOLS = [
      "description": ("Open a Chromium browser or Electron app for FOCUS-FREE control over CDP — "
                      "the way to drive web/Electron apps in the background. `app` is the browser "
                      "(default 'Google Chrome'); put a website in `url`. Uses the persistent Hunch "
-                     "profile; call web_login once if it isn't signed in."),
+                     "profile; call web_login once if it isn't signed in. CODE EDITORS: app="
+                     "'Cursor'/'Visual Studio Code'/'VSCodium'/'Windsurf' with the FOLDER/FILE in "
+                     "`url` opens a dedicated background editor window whose integrated TERMINAL you "
+                     "can type into (AX can't write it) — snapshot, then web_act 'type' on the "
+                     "'Terminal' tab (trailing newline runs the command); key ctrl+` opens one."),
      "input_schema": _obj({"app": {"type": "string"}, "url": {"type": "string"},
                            "isolated": {"type": "boolean"}})},
     {"name": "web_login",

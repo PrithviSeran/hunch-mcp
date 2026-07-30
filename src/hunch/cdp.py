@@ -12,7 +12,9 @@ the same agent loop.
 """
 
 import os
+import re
 import json
+import zlib
 import time
 import socket
 import subprocess
@@ -68,6 +70,57 @@ def _resolve_app(app_name):
     return _BROWSER_ALIASES.get((app_name or "").strip().lower(), app_name)
 
 
+# ── Electron code editors — drivable over CDP exactly like a browser ──────────────────────
+# Their integrated terminal is xterm.js, which AX can READ but never WRITE (the AX value-set
+# lands in a screen-reader mirror, not the PTY). Over CDP we inject REAL keystrokes into the
+# renderer, so the terminal — and its running claude/shell — becomes focus-free-typeable.
+_EDITOR_ALIASES = {
+    "cursor": "Cursor",
+    "code": "Visual Studio Code", "vscode": "Visual Studio Code",
+    "vs code": "Visual Studio Code", "visual studio code": "Visual Studio Code",
+    "vscodium": "VSCodium", "codium": "VSCodium",
+    "windsurf": "Windsurf",
+}
+
+
+def _resolve_editor(app):
+    """Map a loose editor name to the exact installed app name (unchanged if not an editor)."""
+    return _EDITOR_ALIASES.get((app or "").strip().lower(), app)
+
+
+def _is_editor(app):
+    """True if `app` names an Electron code editor we drive over CDP (Cursor/VS Code/…)."""
+    a = (app or "").strip().lower()
+    return a in _EDITOR_ALIASES or _resolve_editor(app) in _EDITOR_ALIASES.values()
+
+
+def editor_target(app):
+    """(port, profile, real_app_name) for an editor. Each editor gets its OWN dedicated Hunch
+    profile + a deterministic port, so driving it never collides with the Chrome CDP profile
+    and never touches the user's OWN editor window — a separate, focus-free Hunch instance,
+    the same non-destructive pattern Hunch uses for Chrome."""
+    real = _resolve_editor(app)
+    slug = re.sub(r"[^a-z0-9]+", "-", real.lower()).strip("-") or "editor"
+    profile = os.path.expanduser(f"~/.hunch/{slug}-cdp")
+    port = 9360 + (zlib.crc32(real.encode()) % 40)   # 9360-9399, off the browser port (9337)
+    return port, profile, real
+
+
+# Side-panel windows an editor exposes as extra page targets — bind the real editor, not these.
+# Precise titles (not bare 'agents') so a workspace folder literally named "agents" isn't excluded.
+_EDITOR_SIDE_PANELS = ("cursor agents",)
+
+
+def _pick_workbench(pages):
+    """From an editor's page targets, choose the real editor window: a workbench.html target whose
+    title is NOT a side panel (Cursor's 'Cursor Agents', etc.). Returns None if none qualify yet —
+    the workbench target can lag the side panel at startup, so callers poll on this (and fall back
+    to pages[0] only after the timeout)."""
+    wb = [p for p in (pages or []) if "workbench.html" in (p.get("url", "") or "")]
+    main = [p for p in wb if not any(s in (p.get("title", "") or "").lower() for s in _EDITOR_SIDE_PANELS)]
+    return (main or [None])[0]
+
+
 def _wait_for_port(port, timeout=15):
     """Poll the CDP HTTP endpoint until the debug port binds."""
     end = time.time() + timeout
@@ -91,7 +144,8 @@ def _clear_singleton(data_dir):
             pass
 
 
-def launch_chromium(app_name, port, url=None, background=True, isolated=False, profile=None):
+def launch_chromium(app_name, port, url=None, background=True, isolated=False, profile=None,
+                    editor=False):
     """Launch a Chromium/Electron app with CDP enabled.
       isolated=True  -> a throwaway sandbox profile (no logins).
       otherwise      -> a persistent, DEDICATED Hunch profile (HUNCH_PROFILE, or `profile`)
@@ -127,6 +181,10 @@ def launch_chromium(app_name, port, url=None, background=True, isolated=False, p
         # `open` prints "Unable to find application named 'X'" and returns non-zero when the
         # app name is wrong — surface THAT clearly instead of a misleading debug-port timeout.
         if proc.returncode != 0 or "unable to find application" in (proc.stderr or "").lower():
+            if editor:
+                raise RuntimeError(
+                    f"no editor named {app_name!r} on this Mac ({(proc.stderr or '').strip() or 'not found'}). "
+                    f"Supported editors: Cursor, Visual Studio Code, VSCodium, Windsurf.")
             raise RuntimeError(
                 f"no browser named {app_name!r} on this Mac ({(proc.stderr or '').strip() or 'not found'}). "
                 f"web_open drives a Chromium BROWSER (or Electron app) — pass a browser like "
@@ -206,16 +264,20 @@ class CDPSession:
             except Exception:
                 pass
 
-    def connect(self, timeout=10):
+    def connect(self, timeout=10, editor=False):
         end = time.time() + timeout
         pages = []
-        while time.time() < end and not pages:
+        while time.time() < end and not (pages if not editor else _pick_workbench(pages)):
             pages = self._list_page_targets()
-            if not pages:
+            if not pages or (editor and not _pick_workbench(pages)):
                 time.sleep(0.5)
         if not pages:
             raise RuntimeError(f"no CDP page target on :{self.port} — is the app launched with --remote-debugging-port?")
-        self._open_ws(pages[0])
+        # An editor exposes SEVERAL page targets that share the same workbench.html url — the real
+        # editor window AND side panels like Cursor's "Agents" (title 'Cursor Agents'). They differ
+        # only by title, so bind the editor window (has the tree + terminal), not a side panel.
+        target = _pick_workbench(pages) or pages[0] if editor else pages[0]
+        self._open_ws(target)
         self._known_targets = {p.get("id") for p in pages}
         return self
 
@@ -405,18 +467,70 @@ class CDPSession:
       return 'FALLBACK';
     }"""
 
+    # Detect (and focus) an xterm.js terminal, returning 'TERMINAL' or 'NOT_TERMINAL'. A terminal
+    # must NOT be typed via .value-setting (_SET_FN) — xterm reads keystrokes, not the textarea's
+    # value — so a match reroutes to the keystroke path. Three cases, because xterm's real input
+    # textarea is aria-hidden and does NOT appear in the a11y snapshot: the ref may be (a) that
+    # helper textarea, (b) the .xterm container / a node inside it, or (c) the only terminal handle
+    # the tree DOES expose — the "Terminal" tab/region. In case (c) we focus the ACTIVE terminal's
+    # textarea (VS Code keeps only the visible terminal's xterm in the DOM), so typing on the tab
+    # the agent can actually see still lands in the shell.
+    _XTERM_FOCUS_FN = r"""function(){
+      var el=this;
+      var term=(el.closest&&el.closest('.xterm'))
+            || ((el.classList&&el.classList.contains('xterm-helper-textarea'))?el:null)
+            || (el.querySelector&&el.querySelector('.xterm'));
+      var ta=null;
+      if(term){
+        ta=(el.classList&&el.classList.contains('xterm-helper-textarea'))?el
+          :(term.querySelector&&term.querySelector('.xterm-helper-textarea'));
+      } else {
+        var label=(((el.getAttribute&&el.getAttribute('aria-label'))||'')+' '+((el.textContent)||'')).toLowerCase();
+        if(/terminal/.test(label)) ta=document.querySelector('.xterm-helper-textarea');
+      }
+      if(!ta) return 'NOT_TERMINAL';
+      ta.focus();
+      return 'TERMINAL';
+    }"""
+
+    def _press_enter(self):
+        for t in ("keyDown", "keyUp"):
+            self._cmd("Input.dispatchKeyEvent", {"type": t, "key": "Enter", "code": "Enter",
+                      "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13, "text": "\r"})
+
+    def _insert_stream(self, text):
+        """Type `text` into whatever is focused, sending a real Enter for every newline. This is
+        how a terminal (and any submit-on-Enter field) receives multi-line input: printable runs
+        go in via Input.insertText, line breaks become Enter keystrokes. A trailing '\\n' SUBMITS
+        (runs the command) — so type 'claude agents\\n' to start it, or omit the '\\n' to stage it."""
+        segs = text.split("\n")
+        for idx, seg in enumerate(segs):
+            if seg:
+                self._cmd("Input.insertText", {"text": seg})
+            if idx < len(segs) - 1:
+                self._press_enter()
+
     def type_text(self, ref, text):
         """Fill a field, REPLACING its content. Works for text inputs, textareas, and native
-        <select> dropdowns (matches an option by visible text/value). Falls back to focus +
+        <select> dropdowns (matches an option by visible text/value). An xterm.js TERMINAL
+        (Cursor/VS Code integrated terminal) is detected and typed via real keystrokes into the
+        PTY (newlines become Enter — a trailing newline runs the command). Falls back to focus +
         select-all + insertText for contenteditable / rich editors."""
         if not ref:
-            self._cmd("Input.insertText", {"text": text})
+            self._insert_stream(text)
             return f"typed {len(text)} chars at focus"
         backend = self.registry.get(ref)
         if backend is None:
             raise KeyError(f"stale ref {ref}")
         obj = self._cmd("DOM.resolveNode", {"backendNodeId": backend}).get("object", {}).get("objectId")
         if obj:
+            kind = (self._cmd("Runtime.callFunctionOn",
+                              {"objectId": obj, "functionDeclaration": self._XTERM_FOCUS_FN,
+                               "returnByValue": True}).get("result", {}).get("value", ""))
+            if kind == "TERMINAL":
+                self._insert_stream(text)
+                ran = " (ran it)" if text.endswith("\n") else " (staged — no trailing newline)"
+                return f"{ref}: typed into the terminal as real keystrokes{ran}"
             res = (self._cmd("Runtime.callFunctionOn",
                              {"objectId": obj, "functionDeclaration": self._SET_FN,
                               "arguments": [{"value": text}], "returnByValue": True})
@@ -466,7 +580,12 @@ class CDPSession:
     _KEYS = {"return": ("Enter", 13), "enter": ("Enter", 13), "tab": ("Tab", 9),
              "escape": ("Escape", 27), "backspace": ("Backspace", 8), "delete": ("Delete", 46),
              "up": ("ArrowUp", 38), "down": ("ArrowDown", 40),
-             "left": ("ArrowLeft", 37), "right": ("ArrowRight", 39), "space": (" ", 32)}
+             "left": ("ArrowLeft", 37), "right": ("ArrowRight", 39), "space": (" ", 32),
+             # backtick: needed for ctrl+` — the toggle that opens an editor's integrated terminal
+             "`": ("`", 192), "backtick": ("`", 192), "backquote": ("`", 192)}
+    # DOM `code` for keys whose code != the derived Key*/Digit* (punctuation shortcuts). Without
+    # the right code, VS Code/Cursor keybindings (which match on code) won't fire.
+    _CODES = {"`": "Backquote"}
     # CDP modifier bitmask (Input.dispatchKeyEvent): Alt=1, Ctrl=2, Meta/Cmd=4, Shift=8
     _MODBITS = {"alt": 1, "option": 1, "ctrl": 2, "control": 2,
                 "meta": 4, "cmd": 4, "command": 4, "super": 4, "win": 4, "shift": 8}
@@ -479,6 +598,7 @@ class CDPSession:
         if code == 0 and len(k) == 1 and k.isalnum():
             code = ord(k.upper())
             codefield = ("Key" + k.upper()) if k.isalpha() else ("Digit" + k)
+        codefield = self._CODES.get(k, codefield)
         mods = 0
         for m in (modifiers or []):
             mods |= self._MODBITS.get(str(m).lower(), 0)
@@ -597,15 +717,17 @@ class CDPComputer:
     but for the whole Chromium/Electron category, in the background."""
 
     def __init__(self, app, port=9333, url=None, isolated=False, background=True,
-                 connect=True, profile=None):
+                 connect=True, profile=None, editor=False):
         self.app = app
         self.port = port
+        self.editor = editor
         self.tools = CDP_TOOLS
         self.session = None
         if connect:
             launch_chromium(app, port, url=url, background=background, isolated=isolated,
-                            profile=profile)
-            self.session = CDPSession(port).connect()
+                            profile=profile, editor=editor)
+            # editors expose several page targets — bind the workbench (holds the tree + terminal)
+            self.session = CDPSession(port).connect(editor=editor)
 
     def snapshot(self):
         return self.session.snapshot()[0]
