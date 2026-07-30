@@ -415,10 +415,11 @@ class _SubscriptionRunner:
     run_coroutine_threadsafe, so Agent.run() stays synchronous. The connected client
     is kept across run() calls (continuation) while the options are unchanged."""
 
-    def __init__(self, hunch, auth=None, app_id=None):
+    def __init__(self, hunch, auth=None, app_id=None, can_use_tool=None):
         self._h = hunch
         self._auth = auth              # OAuthToken (injected) or None (ambient)
         self._app_id = app_id
+        self._permit = can_use_tool    # host-owned permission callback (see Agent.__init__)
         self._loop = None
         self._thread = None
         self._client = None
@@ -460,11 +461,9 @@ class _SubscriptionRunner:
         system = HUNCH_PLAYBOOK + "\n" + AGENT_ADDENDUM
         if system_suffix:
             system += "\n" + system_suffix
-        return sdk.ClaudeAgentOptions(
+        opts = dict(
             system_prompt=system,
             mcp_servers={"hunch": sdk.create_sdk_mcp_server("hunch", tools=_sdk_tools(self._h))},
-            allowed_tools=[f"mcp__hunch__{t['name']}" for t in AGENT_TOOLS],
-            can_use_tool=_allow_hunch_only,
             permission_mode="default",         # unmatched tools -> can_use_tool (our policy point)
             setting_sources=[],                # ignore the user's .claude / .mcp.json entirely
             model=model,                       # None -> the subscription's default model
@@ -473,6 +472,16 @@ class _SubscriptionRunner:
             env=env,                           # {} or the injected/namespaced OAuth token
             max_buffer_size=16 * 1024 * 1024,  # snapshots/screenshots exceed the 1MB default
         )
+        if self._permit is not None:
+            # A host (e.g. the Hunch app) owns approval: its callback governs EVERY tool, so we
+            # don't restrict allowed_tools — built-in Read/Grep/etc. reach it too, exactly like a
+            # raw claude-agent-sdk can_use_tool. The callback must match that (tool_name, input,
+            # context) -> PermissionResultAllow/Deny protocol.
+            opts["can_use_tool"] = self._permit
+        else:
+            opts["can_use_tool"] = _allow_hunch_only
+            opts["allowed_tools"] = [f"mcp__hunch__{t['name']}" for t in AGENT_TOOLS]
+        return sdk.ClaudeAgentOptions(**opts)
 
     # — the loop —
     async def _run_async(self, client, task, emit):
@@ -523,6 +532,18 @@ class _SubscriptionRunner:
         emit = on_event or (lambda kind, data: None)
         return self._call(self._run_async(self._client, task, emit))
 
+    def interrupt(self):
+        """Interrupt the in-flight turn (the SDK's own interrupt) WITHOUT tearing down the
+        conversation — the next run() continues the same context. Called from another thread
+        (e.g. a Stop button) while run() blocks on the loop; a no-op if nothing is connected."""
+        if self._client is None or self._loop is None:
+            return
+        import asyncio
+        try:
+            asyncio.run_coroutine_threadsafe(self._client.interrupt(), self._loop).result(timeout=5)
+        except Exception:
+            pass
+
     def reset(self):
         if self._client is not None:
             client, self._client, self._opts_key = self._client, None, None
@@ -553,13 +574,19 @@ class Agent:
     """The agent loop. Created lazily as `Hunch.agent`. Holds conversation state across
     run() calls (continuation); call reset() to start a fresh task."""
 
-    def __init__(self, hunch, client=None, backend="auto", auth=None):
+    def __init__(self, hunch, client=None, backend="auto", auth=None, can_use_tool=None):
         from .auth import ApiKey, OAuthToken
         self._h = hunch
         self._client = client          # test seam; None -> lazily anthropic.Anthropic()
         self.backend = backend         # "auto" | "api" | "subscription" (per-run override too)
         self.auth = auth               # None (ambient) | ApiKey | OAuthToken | "none"
+        # Optional host-owned permission callback. When set, the subscription backend hands EVERY
+        # tool to it — a raw claude-agent-sdk can_use_tool(tool_name, input, context) ->
+        # PermissionResultAllow/Deny — instead of auto-allowing Hunch tools. This is how the Hunch
+        # app routes each tool through its own Approve/Deny UI. (Subscription backend only.)
+        self._can_use_tool = can_use_tool
         self.messages = []
+        self._abort = False            # api backend: between-turns cancel flag (see interrupt())
         self._sub = None               # _SubscriptionRunner, built on first subscription run
         if not (auth is None or auth == "none" or isinstance(auth, (ApiKey, OAuthToken))):
             raise HunchError(f"unknown auth {auth!r} — pass hunch.ApiKey(...), "
@@ -628,6 +655,14 @@ class Agent:
             self._sub.close()
             self._sub = None
 
+    def interrupt(self):
+        """Stop an in-flight run() while KEEPING the conversation (the next run() continues it).
+        Call from another thread (e.g. a Stop button). Subscription backend: interrupts the current
+        turn immediately; api backend: cancels before the next turn. No-op if nothing is running."""
+        self._abort = True                        # api backend: checked between turns
+        if self._sub is not None:
+            self._sub.interrupt()                 # subscription backend: immediate
+
     def _ensure_client(self):
         if self._client is None:
             from .auth import ApiKey
@@ -680,7 +715,7 @@ class Agent:
                 from .auth import OAuthToken
                 self._sub = _SubscriptionRunner(
                     self._h, auth=self.auth if isinstance(self.auth, OAuthToken) else None,
-                    app_id=self._app_id)
+                    app_id=self._app_id, can_use_tool=self._can_use_tool)
             return self._sub.run(task, model=model, max_turns=max_turns, on_event=on_event,
                                  system_suffix=system_suffix, effort=effort)
 
@@ -695,8 +730,13 @@ class Agent:
         self.messages.append({"role": "user", "content": task})
         usage = {}
         stop_reason, final_text, aborted, turn = "max_turns", "", True, 0
+        self._abort = False
 
         for turn in range(1, max_turns + 1):
+            if self._abort:                       # interrupt() between turns (api backend)
+                stop_reason, aborted = "interrupted", True
+                emit("error", "interrupted")
+                break
             _mark_cache(self.messages)
             try:
                 resp = self._request(client, model, max_tokens, self._system(system_suffix), effort)
