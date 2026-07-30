@@ -232,7 +232,14 @@ def web_open(app: str = "Google Chrome", url: str = "", isolated: bool = False) 
     isolated=True gives a throwaway sandbox profile (no logins). Default uses a persistent,
     DEDICATED Hunch profile — NOT the user's real/default profile (modern Chrome refuses the
     debug port there). If that Hunch profile isn't logged into the site yet, this returns a
-    prompt to call web_login once; after that the session persists and stays focus-free."""
+    prompt to call web_login once; after that the session persists and stays focus-free.
+
+    CODE EDITORS: pass app="Cursor" / "Visual Studio Code" / "VSCodium" / "Windsurf" and put the
+    FOLDER or FILE to open in `url`. This drives a DEDICATED, background Hunch editor window
+    (separate from the user's own editor), letting you type into its integrated TERMINAL — which
+    the AX tree can read but never write. After opening: web_snapshot, then web_act a 'type' on the
+    `[eN] tab "Terminal"` element (a trailing "\\n" runs the command); key ctrl+` opens a terminal
+    if none is shown."""
     return _run("web_open", app=app, url=url, isolated=isolated)
 
 
