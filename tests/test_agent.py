@@ -394,6 +394,62 @@ def test_subscription_run_error_result():
     assert events == [("error", "stopped: error_max_turns")]
 
 
+class _FakeSdk:
+    """Enough of claude_agent_sdk for _options() to build an inspectable options dict."""
+    def create_sdk_mcp_server(self, name, tools):
+        return ("srv", name, tools)
+
+    class ClaudeAgentOptions:
+        def __init__(self, **kw):
+            self.kw = kw
+
+    class PermissionResultAllow:
+        pass
+
+    class PermissionResultDeny:
+        def __init__(self, message=""):
+            self.message = message
+
+
+def test_subscription_custom_permit_governs_all_tools():
+    """A host-injected can_use_tool becomes the options callback AND relaxes allowed_tools,
+    so built-in (non-Hunch) tools reach the host's approver too."""
+    async def permit(tool_name, input_data, context):
+        return "ALLOWED"
+    r = agent_mod._SubscriptionRunner(_FakeHunch(), can_use_tool=permit)
+    opts = r._options(_FakeSdk(), None, 40, "", None, {}).kw
+    assert opts["can_use_tool"] is permit
+    assert "allowed_tools" not in opts        # host owns permission for EVERY tool
+
+
+def test_subscription_default_permit_is_hunch_only():
+    import asyncio
+    r = agent_mod._SubscriptionRunner(_FakeHunch())      # no custom callback
+    opts = r._options(_FakeSdk(), None, 40, "", None, {}).kw
+    assert opts["allowed_tools"] == [f"mcp__hunch__{t['name']}" for t in AGENT_TOOLS]
+    deny = asyncio.run(opts["can_use_tool"]("Bash", {}, None))
+    assert type(deny).__name__ == "PermissionResultDeny"          # non-Hunch tool denied
+    allow = asyncio.run(opts["can_use_tool"]("mcp__hunch__snapshot", {}, None))
+    assert type(allow).__name__ == "PermissionResultAllow"
+
+
+def test_agent_forwards_can_use_tool_to_subscription():
+    async def permit(tool_name, input_data, context):
+        return "ALLOWED"
+    a = Agent(_FakeHunch(), can_use_tool=permit)
+    assert a._can_use_tool is permit
+
+
+def test_agent_interrupt_sets_abort_and_delegates():
+    a = Agent(_FakeHunch())
+    a.interrupt()                     # no subscription runner yet -> just arms the api abort flag
+    assert a._abort is True
+    calls = []
+    a._sub = types.SimpleNamespace(interrupt=lambda: calls.append("i"))
+    a.interrupt()
+    assert calls == ["i"]             # delegates to the subscription runner when present
+
+
 # ── auth resolution (the hunch.login() surface) ─────────────────────────────────
 
 def test_auth_resolution_order(monkeypatch):
