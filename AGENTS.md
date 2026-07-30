@@ -45,7 +45,7 @@ The SDK is the product; everything else is an app built on it.
 - **`gate.py` / `policy.py`** — consent. `Gate.front_gate` / `confirm_dialog`; `confirm="off"`
   or `HUNCH_NO_INTERNAL_GATE=1` env = auto-approve (host owns permissions, e.g. the desktop app).
 - `os_ops.py` (files/clipboard/AppleScript), `creds.py`/`auth.py` (Keychain), `notify.py`,
-  `errors.py`, `playbook.py` (the MCP instruction string), `cli.py`.
+  `errors.py`, `playbook.py` (`HUNCH_PLAYBOOK`; `server.py` serves it as `FastMCP(instructions=…)` so every connected client receives it. Change the model-facing contract here, not the tool docstrings.), `cli.py`.
 
 ### Adding or changing a tool
 
@@ -129,18 +129,20 @@ believed every raise failed and `act()` then refused actions that had actually w
 Use **`_frontmost()`** (`local_mac.py`) — a fresh `lsappinfo` query per call. This applies to
 **all** pyobjc frontmost/observer polling from non-run-loop threads, not just this one call site.
 
-## Vision path (`screenshot` + `click_xy`)
+## Vision path (`screenshot` + `click_xy` + `drag`)
 
 - Requires **Screen Recording permission** for the *host* process (TCC attributes it to the
   terminal/app, not the child). Without it `screencapture` fails; the error string tells the user
   how to fix it and to prefer `snapshot`. In headless/CI, vision is simply unavailable.
-- `screencapture` grabs the **full screen at native resolution**. On a Retina display that's **2×
-  pixels**, but `click_xy` posts CGEvents in **1× points**, and nothing conveys `backingScale` to
-  the model → systematic 2× misclicks on Retina (fine on a 1× external display — so the bug is
-  intermittent). If you improve vision, this is the first thing to fix (window-scoped capture
-  downscaled to points).
-- There is **no drag primitive** — `act` has `click_xy` but no press-move-release. Drag-canvas
-  UIs (Shortcuts editor) are unwinnable by vision until one is added.
+- **Retina scaling is handled (do not undo it).** `screencapture` grabs the full screen at native
+  resolution (2x on a Retina panel), but `click_xy` posts CGEvents in 1x points. `screenshot`
+  DOWNSCALES the PNG to point space (via `sips -z`, using `backingScaleFactor`) so image coords
+  equal `click_xy` coords. Remove that downscale and Retina misclicks return; they are intermittent
+  because a 1x external display hides them.
+- **There is a drag primitive.** `act`'s `drag` action (`_mouse_drag`: press, move with intermediate
+  dragged events, release) covers canvas drag-and-drop, sliders, and reorder lists that ignore a
+  bare down/up. Endpoints resolve from `{side}_ref` element centers or explicit points. It is a
+  shared-input path like `click_xy`/`key`: gated, and it bumps `disturbances["drags"]`.
 
 ## Conventions
 
@@ -154,3 +156,32 @@ Use **`_frontmost()`** (`local_mac.py`) — a fresh `lsappinfo` query per call. 
   (`HUNCH_NOTIFY_FOCUS`, `HUNCH_NO_INTERNAL_GATE`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`).
 - `as_str` (AppleScript string-quoting) lives once in `notify.py` (stdlib-only); `gate` re-exports
   it. The Chrome CDP profile path lives once in `cli.py` (`CHROME_PROFILE`), imported by `cdp.py`.
+
+## Packaging, release & distribution (learned the hard way this cycle)
+
+- **PyPI package is `hunch-sdk`; the command is `hunch`.** `[project.scripts]` maps
+  `hunch = "hunch.cli:main"`. The MCP server ships in the BASE package (`hunch serve`), not behind
+  an extra, and `import hunch` gives the SDK object. One package, both faces.
+- **The sdist is allowlisted on purpose; do not remove it.** `[tool.hatch.build.targets.sdist]
+  include = ["src/hunch", "README.md", "LICENSE"]`. Hatchling's default sdist sweeps the whole
+  project dir, and `bench/` (benchmark transcripts, hundreds of MB) is ignored only via
+  `.git/info/exclude`, which Hatchling does NOT read. Without the allowlist the sdist ballooned to
+  368 MB (now ~184 KB). `bench/` also will not appear in `git status`, for the same reason.
+- **The `mcp-name` marker must stay in `README.md`.** The MCP registry verifies ownership by finding
+  `mcp-name: io.github.PrithviSeran/hunch` in the PyPI DESCRIPTION, which is the shipped `README.md`
+  (kept as an HTML comment at the top). The namespace must match the GitHub account casing exactly
+  (capital P), or publishing 403s.
+- **`server.json`** (repo root) is the MCP-registry manifest; **`mcp.json`** (repo root) is the Open
+  Plugins / Cursor-directory manifest. Bump `server.json`'s `version` alongside `pyproject.toml`.
+- **Publishing order:** release to PyPI first (`uv build` then `uv publish`), then
+  `mcp-publisher login github && mcp-publisher publish`. Footguns: `mcp-publisher publish --dry-run`
+  actually PUBLISHES in the current CLI, and re-publishing the same version 400s ("duplicate
+  version"), so a registry update needs a real version bump.
+- **Homebrew is a separate repo** (`PrithviSeran/homebrew-hunch`, `Formula/hunch.rb`). It just
+  `pip install`s the sdist into a venv (no `resource` blocks), so a release bump is only `url` +
+  `sha256`. It does NOT auto-follow PyPI; bump it every release or `brew` users get a stale build.
+- **The website is `site/`** (self-contained static site; deploy on Vercel with root directory
+  `site`). Blog pages are generated: `site/build.py` renders `site/content/*.md` (front matter +
+  Markdown, charts embedded as raw HTML). Edit the `.md`, run `python3 site/build.py`, commit. The
+  raw benchmark harness/data live in the git-excluded `bench/`, so the reproducible benchmark is the
+  separate `mac-agent-bench` repo, not this one.
