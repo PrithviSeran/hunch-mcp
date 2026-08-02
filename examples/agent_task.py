@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Run one natural-language task on this Mac with the Hunch agent loop.
 
-    pip install 'hunch-sdk[agent]'
-    python -c 'import hunch; hunch.login()'    # Claude subscription (no API key), or:
-    export ANTHROPIC_API_KEY=sk-ant-...        # metered API
+    pip install 'hunch-sdk[subscription]'                        # Claude
+    python -c 'import hunch; hunch.provider("claude").login()'   # sign in (no API key)
     python examples/agent_task.py "open Music and play my Focus playlist"
 
 Signed into Claude Code on this Mac already? Skip the login line — it's picked up.
+For OpenAI Codex: pip install --pre 'hunch-sdk[codex]', run `codex login`, then pass
+`--provider codex`.
 
-Your terminal/IDE needs the Accessibility permission (System Settings → Privacy &
-Security → Accessibility). By default Claude asks before any focus-stealing or
+Your terminal/IDE needs the Accessibility permission (System Settings -> Privacy &
+Security -> Accessibility). By default the model asks before any focus-stealing or
 irreversible step (a real dialog); pass --unattended to auto-approve for scripts.
 """
 import argparse
@@ -20,10 +21,10 @@ from hunch import Hunch
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("task")
-    p.add_argument("--backend", default="auto", choices=["auto", "api", "subscription"],
-                   help="auto picks by credentials — see hunch.auth.status()")
+    p.add_argument("--provider", default="claude", choices=["claude", "codex"],
+                   help="which LLM vendor drives the loop")
     p.add_argument("--model", default=None,
-                   help="default: claude-opus-4-8 (api) / your subscription's model")
+                   help="default: the provider's own model")
     p.add_argument("--max-turns", type=int, default=40)
     p.add_argument("--effort", default=None, help="low | medium | high | xhigh | max")
     p.add_argument("--unattended", action="store_true",
@@ -32,7 +33,7 @@ def main():
 
     def on_event(kind, data):
         if kind == "text":
-            print(f"\nclaude: {data}")
+            print(f"\n{args.provider}: {data}")
         elif kind == "tool":
             print(f"  → {data['name']}({data['input']})")
         elif kind == "tool_result":
@@ -42,13 +43,11 @@ def main():
         elif kind == "error":
             print(f"\n✗ {data}")
 
-    mac = Hunch(confirm="off" if args.unattended else "dialog")
+    mac = Hunch(provider=args.provider, confirm="off" if args.unattended else "dialog")
     try:
         result = mac.agent.run(args.task, model=args.model, max_turns=args.max_turns,
-                               effort=args.effort, on_event=on_event, backend=args.backend)
-        print(f"\n— {result.turns} turns, stop_reason={result.stop_reason}, "
-              f"tokens in/out={result.usage.get('input_tokens')}/{result.usage.get('output_tokens')} "
-              f"(cached read {result.usage.get('cache_read_input_tokens')})")
+                               effort=args.effort, on_event=on_event)
+        print(f"\n— {result.turns} turns, stop_reason={result.stop_reason}, usage={result.usage}")
     finally:
         mac.close()
 

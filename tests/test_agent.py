@@ -8,7 +8,7 @@ import sys
 import types
 
 import hunch.agent as agent_mod
-from hunch.agent import Agent, AgentResult, AGENT_TOOLS, _run_tool, _mark_cache
+from hunch.agent import Agent, AgentResult, AGENT_TOOLS, ApiBackend, _run_tool, _mark_cache
 from hunch.gate import ApprovalDenied
 
 
@@ -100,7 +100,8 @@ class _FakeHunch:
 
 
 def _agent(script, hunch=None):
-    return Agent(hunch or _FakeHunch(), client=_FakeClient(script))
+    # The api backend is dormant (not provider-exposed) but kept; its loop is tested directly.
+    return ApiBackend(hunch or _FakeHunch(), client=_FakeClient(script))
 
 
 # ── tests ─────────────────────────────────────────────────────────────────────
@@ -250,9 +251,9 @@ def test_thinking_and_effort_passthrough():
 
 def test_missing_anthropic_error(monkeypatch):
     monkeypatch.setitem(sys.modules, "anthropic", None)   # import anthropic -> ImportError
-    a = Agent(_FakeHunch(), client=None)                  # no injected client -> must import
+    a = ApiBackend(_FakeHunch(), client=None)             # no injected client -> must import
     try:
-        a.run("x", backend="api")                         # pin: auto may pick subscription here
+        a.run("x")
         assert False, "expected HunchError"
     except agent_mod.HunchError as e:
         assert "hunch-sdk[agent]" in str(e)
@@ -283,24 +284,32 @@ def test_mcp_image_shape():
     assert out["content"][0] == {"type": "text", "text": "boom"} and out["is_error"] is True
 
 
-def test_backend_resolution(monkeypatch):
-    import hunch.auth as auth
-    a = Agent(_FakeHunch())
-    assert a._resolve_backend("api") == "api"                    # explicit wins
-    assert a._resolve_backend("subscription") == "subscription"
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-    assert a._resolve_backend("auto") == "api"                   # API key -> api
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.setitem(sys.modules, "claude_agent_sdk", types.ModuleType("claude_agent_sdk"))
-    monkeypatch.setattr(auth, "subscription_available", lambda app_id=None: True)
-    assert a._resolve_backend("auto") == "subscription"          # signed in -> subscription
-    monkeypatch.setattr(auth, "subscription_available", lambda app_id=None: False)
+def test_agent_delegates_to_provider_backend():
+    """Agent builds its backend from the configured provider and delegates run to it."""
+    calls = {}
+
+    class _FakeBackend:
+        def run(self, task, **kw): calls["ran"] = task; return AgentResult("ok", 1, "end_turn")
+
+    class _FakeProvider:
+        name = "codex"
+        def make_backend(self, hunch, *, auth=None, app_id=None, can_use_tool=None):
+            calls["made"] = True
+            return _FakeBackend()
+
+    a = Agent(_FakeHunch(), provider=_FakeProvider())
+    assert a.provider == "codex"
+    r = a.run("do it")
+    assert calls == {"made": True, "ran": "do it"} and r.text == "ok"
+
+
+def test_agent_without_provider_raises():
+    a = Agent(_FakeHunch(), provider=None)
     try:
-        a._resolve_backend("auto")
+        a.run("x")
         assert False, "expected HunchError"
-    except agent_mod.HunchError as e:                            # nothing -> both fixes named
-        assert "hunch.login()" in str(e) and "ANTHROPIC_API_KEY" in str(e)
-    assert Agent(_FakeHunch(), client=_FakeClient([]))._resolve_backend("auto") == "api"
+    except agent_mod.HunchError as e:
+        assert "no provider" in str(e)
 
 
 def test_subscription_missing_sdk(monkeypatch):
@@ -433,21 +442,28 @@ def test_subscription_default_permit_is_hunch_only():
     assert type(allow).__name__ == "PermissionResultAllow"
 
 
-def test_agent_forwards_can_use_tool_to_subscription():
+def test_agent_forwards_can_use_tool():
     async def permit(tool_name, input_data, context):
         return "ALLOWED"
     a = Agent(_FakeHunch(), can_use_tool=permit)
-    assert a._can_use_tool is permit
+    assert a._can_use_tool is permit    # handed to the provider's backend at build time
 
 
-def test_agent_interrupt_sets_abort_and_delegates():
+def test_agent_interrupt_delegates_to_active_backend():
     a = Agent(_FakeHunch())
-    a.interrupt()                     # no subscription runner yet -> just arms the api abort flag
-    assert a._abort is True
+    a.interrupt()                     # no active backend yet -> no-op, must not raise
     calls = []
-    a._sub = types.SimpleNamespace(interrupt=lambda: calls.append("i"))
+    a._backend = types.SimpleNamespace(interrupt=lambda: calls.append("i"))
     a.interrupt()
-    assert calls == ["i"]             # delegates to the subscription runner when present
+    assert calls == ["i"]             # delegates to whatever backend is currently active
+
+
+def test_api_backend_interrupt_arms_abort():
+    from hunch.agent import ApiBackend
+    b = ApiBackend(_FakeHunch())
+    assert b._abort is False
+    b.interrupt()
+    assert b._abort is True           # the api loop checks this between turns
 
 
 # ── auth resolution (the hunch.login() surface) ─────────────────────────────────
@@ -508,11 +524,11 @@ def test_auth_login_token_and_failure(monkeypatch):
         assert "browser flow failed" in str(e)
 
 
-def test_top_level_auth_exports_stay_light():
-    """hunch.login/logout/AuthStatus and the exceptions must not pull pyobjc."""
+def test_top_level_exports_stay_light():
+    """hunch.provider/AuthStatus/OAuthToken and the exceptions must not pull pyobjc."""
     import subprocess
     code = ("import sys, hunch; "
-            "hunch.AuthStatus, hunch.login, hunch.logout, hunch.HunchError; "
+            "hunch.provider, hunch.AuthStatus, hunch.OAuthToken, hunch.HunchError; "
             "sys.exit(1 if any(m in sys.modules for m in ('AppKit', 'Quartz')) else 0)")
     assert subprocess.run([sys.executable, "-c", code]).returncode == 0
 
@@ -554,43 +570,12 @@ def test_token_service_namespacing(monkeypatch):
 
 
 def test_injected_credential_reprs_redact():
-    from hunch.auth import ApiKey, OAuthToken
+    from hunch.auth import ApiKey, OAuthToken   # ApiKey stays for the dormant api backend
     assert "sk-ant-supersecret" not in repr(ApiKey("sk-ant-supersecret"))
     assert "sk-ant-oat-supersecret" not in repr(OAuthToken("sk-ant-oat-supersecret"))
 
 
-def test_auth_injection_backend_rules(monkeypatch):
-    from hunch.auth import ApiKey, OAuthToken
-    # injected credential implies its backend, beating ambient state entirely
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    assert Agent(_FakeHunch(), auth=ApiKey("k"))._resolve_backend(None) == "api"
-    assert Agent(_FakeHunch(), auth=OAuthToken("t"))._resolve_backend(None) == "subscription"
-    # contradictions fail fast — at construction and per-run
-    try:
-        Agent(_FakeHunch(), auth=ApiKey("k"), backend="subscription")
-        assert False, "expected HunchError"
-    except agent_mod.HunchError as e:
-        assert "implies" in str(e)
-    try:
-        Agent(_FakeHunch(), auth=OAuthToken("t"))._resolve_backend("api")
-        assert False, "expected HunchError"
-    except agent_mod.HunchError as e:
-        assert "implies" in str(e)
-    # auth="none": ambient disabled, no injected credential -> explicit error
-    try:
-        Agent(_FakeHunch(), auth="none")._resolve_backend(None)
-        assert False, "expected HunchError"
-    except agent_mod.HunchError as e:
-        assert "ambient" in str(e)
-    # bad auth value fails at construction
-    try:
-        Agent(_FakeHunch(), auth="gpt-key")
-        assert False, "expected HunchError"
-    except agent_mod.HunchError as e:
-        assert "auth" in str(e)
-
-
-def test_ensure_client_uses_injected_api_key(monkeypatch):
+def test_api_backend_ensure_client_uses_injected_api_key(monkeypatch):
     from hunch.auth import ApiKey
     captured = {}
 
@@ -601,7 +586,7 @@ def test_ensure_client_uses_injected_api_key(monkeypatch):
     fake = types.ModuleType("anthropic")
     fake.Anthropic = _FakeAnthropicClient
     monkeypatch.setitem(sys.modules, "anthropic", fake)
-    a = Agent(_FakeHunch(), auth=ApiKey("sk-test-inject"))
+    a = ApiBackend(_FakeHunch(), auth=ApiKey("sk-test-inject"))
     a._ensure_client()
     assert captured == {"api_key": "sk-test-inject"}
 
@@ -623,24 +608,23 @@ def test_cli_env_injected_and_ambient(monkeypatch):
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in os.environ
 
 
-def test_hunch_constructor_auth_validation():
+def test_hunch_provider_and_auth_validation():
     from hunch.sdk import Hunch
-    from hunch.auth import ApiKey, OAuthToken
-    h = Hunch(check_permissions=False, confirm="off", auth=ApiKey("k"))
-    assert h.agent._resolve_backend(None) == "api"       # implied by the injected key
-    try:
-        Hunch(check_permissions=False, confirm="off",
-              auth=ApiKey("k"), agent_backend="subscription")
+    from hunch.auth import OAuthToken
+    assert Hunch(check_permissions=False, confirm="off").provider.name == "claude"  # default
+    Hunch(check_permissions=False, confirm="off", provider="claude", auth=OAuthToken("t"))
+    for bad in ("gpt", "openai", "api"):
+        try:
+            Hunch(check_permissions=False, confirm="off", provider=bad)
+            assert False, "expected HunchError"
+        except agent_mod.HunchError as e:
+            assert "unknown provider" in str(e)
+    try:                                 # OAuthToken is a Claude credential
+        Hunch(check_permissions=False, confirm="off", provider="codex", auth=OAuthToken("t"))
         assert False, "expected HunchError"
     except agent_mod.HunchError as e:
-        assert "implies" in str(e)
-    try:
-        Hunch(check_permissions=False, confirm="off",
-              auth=OAuthToken("t"), agent_backend="api")
-        assert False, "expected HunchError"
-    except agent_mod.HunchError as e:
-        assert "implies" in str(e)
-    try:
+        assert "Claude credential" in str(e)
+    try:                                 # unknown auth value fails fast
         Hunch(check_permissions=False, confirm="off", auth=12345)
         assert False, "expected HunchError"
     except agent_mod.HunchError as e:
@@ -649,28 +633,12 @@ def test_hunch_constructor_auth_validation():
 
 def test_lazy_agent_property():
     from hunch.sdk import Hunch
-    h = Hunch(check_permissions=False, confirm="off")
+    h = Hunch(check_permissions=False, confirm="off", provider="codex")
     assert h._agent is None                    # not created eagerly
     a1 = h.agent
     a2 = h.agent
     assert a1 is a2 and isinstance(a1, Agent)   # same instance, lazily created
-    assert a1.backend == "auto"                 # the default
-
-
-def test_agent_backend_constructor_option():
-    """Developers choose the backend when constructing the instance; run(backend=)
-    still overrides per call, and a bad value fails fast at construction."""
-    from hunch.sdk import Hunch
-    h = Hunch(check_permissions=False, confirm="off", agent_backend="subscription")
-    assert h.agent.backend == "subscription"
-    assert h.agent._resolve_backend(None) == "subscription"    # constructor default used
-    assert h.agent._resolve_backend("api") == "api"            # per-run override wins
-    assert Agent(_FakeHunch(), backend="api").backend == "api" # direct construction too
-    try:
-        Hunch(check_permissions=False, confirm="off", agent_backend="gpt")
-        assert False, "expected HunchError"
-    except agent_mod.HunchError as e:
-        assert "agent_backend" in str(e)
+    assert a1.provider == "codex"               # bound to the constructed provider
 
 
 if __name__ == "__main__":

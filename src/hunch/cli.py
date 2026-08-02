@@ -313,32 +313,25 @@ def cmd_doctor(args):
     except OSError:
         _ok(f"CDP port {CDP_PORT} free")
 
-    print("\nAgent auth (only needed for the agent loop — mac.agent.run)")
+    print("\nAgent providers (only needed for the agent loop — mac.agent.run)")
     try:
-        from . import auth
-        source, desc = auth.resolve()
-        if source:
-            _ok(f"credentials found: {desc}")
+        from . import providers as _pv, auth
+        if _pv.PROVIDERS["claude"].deps_installed():
+            st = auth.status()
+            if st.subscription_ready:
+                _ok(f"claude: installed, signed in{f' ({st.email})' if st.email else ''}")
+            else:
+                _warn("claude: installed, not signed in — "
+                      "mac.login() / hunch.provider('claude').login()")
         else:
-            _warn("no agent credentials — from Python, hunch.login() (Claude subscription) or "
-                  "set ANTHROPIC_API_KEY (metered API). The MCP server and instance SDK don't need this")
-        have_api = True
-        have_sub = True
-        try:
-            import anthropic  # noqa: F401
-        except ImportError:
-            have_api = False
-        try:
-            import claude_agent_sdk  # noqa: F401
-        except ImportError:
-            have_sub = False
-        if have_api or have_sub:
-            backends = [b for b, ok_ in (("api", have_api), ("subscription", have_sub)) if ok_]
-            _ok(f"agent backends installed: {', '.join(backends)}")
+            _warn("claude: agent backend not installed — pip install 'hunch-sdk[subscription]'")
+        if _pv.PROVIDERS["codex"].deps_installed():
+            _ok("codex: installed — sign in with mac.login() / "
+                "hunch.provider('codex').login() (or `codex login`)")
         else:
-            _warn("no agent backend installed — pip install 'hunch-sdk[agent]' to use mac.agent.run")
+            _warn("codex: agent backend not installed — pip install 'hunch-sdk[codex]'")
     except Exception as e:
-        failed |= _fail(f"auth check errored: {e}")
+        failed |= _fail(f"provider check errored: {e}")
 
     print("\nPolicy & credentials")
     cfg = policy.load()

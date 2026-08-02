@@ -252,3 +252,78 @@ def logout(app_id=None):
     elif source in ("api_key", "env_token"):
         msgs.append(f"note: {desc} is still set in this shell.")
     return msgs
+
+
+# ── OpenAI Codex auth (the 'codex' backend) ─────────────────────────────────────
+# MANUAL authentication only — no ambient credential detection (the same stance the app
+# took for Claude, which stopped scavenging a detected login because it expired mid-task).
+# Authorize explicitly through the SDK with codex_login(); the codex backend then relies on
+# the SDK's stored session, or on an injected hunch.OpenAIKey(...).
+
+def _codex_client():
+    """A Codex SDK client for auth operations, or a HunchError if openai-codex is missing."""
+    try:
+        import openai_codex
+    except ImportError as e:
+        raise HunchError("Codex auth needs the optional 'openai-codex' package (beta) — "
+                         "install it with: pip install --pre openai-codex "
+                         "(or: pip install 'hunch-sdk[codex]')") from e
+    return openai_codex.Codex()
+
+
+@dataclass
+class CodexAuthStatus:
+    """The 'codex' backend's sign-in state, as data (parallels AuthStatus for Claude).
+    method is 'chatgpt' | 'api_key' | None."""
+    logged_in: bool
+    method: str | None = None
+    email: str | None = None
+    plan: str | None = None
+
+
+def codex_login():
+    """Authorize the 'codex' backend from Python — an interactive ChatGPT/Codex browser
+    sign-in that BLOCKS until you finish (needs a local browser). For a remote/headless
+    machine use codex_device_login(). Returns the resulting CodexAuthStatus; raises
+    HunchError if openai-codex is missing. (Subscription/login only — no API-key path.)"""
+    handle = _codex_client().login_chatgpt()   # its auth_url opens a browser
+    handle.wait()                              # block until the browser flow completes
+    return codex_status()
+
+
+def codex_device_login():
+    """Headless/remote ChatGPT sign-in for the 'codex' backend. Returns the SDK's
+    device-code handle exposing .verification_url, .user_code, and .wait(): show the code
+    and URL to the user, then call handle.wait() to block until they finish."""
+    return _codex_client().login_chatgpt_device_code()
+
+
+def codex_logout():
+    """Sign the 'codex' backend out (clears the SDK's stored Codex session)."""
+    _codex_client().logout()
+    return True
+
+
+def codex_status():
+    """Who, if anyone, is signed in for the 'codex' backend — an EXPLICIT check (asks the
+    SDK's account()), never ambient scavenging. Returns a CodexAuthStatus; logged_in is
+    False when openai-codex is missing or no session exists."""
+    try:
+        codex = _codex_client()
+    except HunchError:
+        return CodexAuthStatus(False)
+    try:
+        resp = codex.account()
+    except Exception:
+        return CodexAuthStatus(False)
+    # NB: `requires_openai_auth` is NOT a logged-out signal (it's True even for a signed-in
+    # ChatGPT account). Being logged in = a populated account.root (ChatgptAccount/ApiKeyAccount).
+    acct = getattr(getattr(resp, "account", None), "root", None)
+    kind = type(acct).__name__ if acct is not None else ""
+    if kind == "ChatgptAccount":
+        plan = getattr(acct, "plan_type", None)
+        plan = getattr(plan, "value", plan)          # PlanType enum -> its str value
+        return CodexAuthStatus(True, "chatgpt", getattr(acct, "email", None), plan)
+    if kind == "ApiKeyAccount":
+        return CodexAuthStatus(True, "api_key")
+    return CodexAuthStatus(False)

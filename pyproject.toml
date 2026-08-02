@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hunch-sdk"
-version = "0.5.5"
+version = "0.6.0"
 description = "Drive your Mac focus-free over MCP: OS APIs, AppleScript, CDP, and Accessibility."
 readme = "README.md"
 license = "Apache-2.0"
@@ -31,9 +31,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-api = ["anthropic>=0.80"]                    # agent loop on a metered ANTHROPIC_API_KEY
-subscription = ["claude-agent-sdk>=0.2"]     # agent loop on your Claude subscription (hunch login)
-agent = ["anthropic>=0.80", "claude-agent-sdk>=0.2"]   # both backends
+subscription = ["claude-agent-sdk>=0.2"]     # the 'claude' provider (Claude sign-in)
+codex = ["openai-codex>=0.144"]              # the 'codex' provider (OpenAI Codex; SDK is beta)
+agent = ["claude-agent-sdk>=0.2", "openai-codex>=0.144"]   # both providers
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hunch"]

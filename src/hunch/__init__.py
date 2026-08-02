@@ -5,11 +5,11 @@ doctor) must work even when pyobjc or the MCP SDK are missing, so nothing here
 may import them. The server loads lazily via `hunch serve`.
 """
 
-__version__ = "0.5.5"
+__version__ = "0.6.0"
 
 # Public SDK surface, loaded lazily (PEP 562) so bare `import hunch` stays dependency-free.
-# Names mapped to .sdk/.agent/.local_mac pull in pyobjc; .errors and .auth stay stdlib-only,
-# so hunch.login()/logout()/auth_status and the exceptions work even without the heavy deps.
+# Names mapped to .sdk/.agent/.local_mac pull in pyobjc; .errors/.auth/.providers stay
+# stdlib-only, so hunch.provider(...)/AuthStatus and the exceptions work without the heavy deps.
 _LAZY = {
     "Hunch": ".sdk",
     "Agent": ".agent",
@@ -19,11 +19,10 @@ _LAZY = {
     "AccessibilityNotGranted": ".errors",
     "WebNotOpen": ".errors",
     "StaleRef": ".local_mac",
-    "login": ".auth",         # sign in for the agent loop's subscription backend
-    "logout": ".auth",
-    "AuthStatus": ".auth",
-    "ApiKey": ".auth",        # injected agent-loop credentials (developer-first)
-    "OAuthToken": ".auth",
+    "provider": ".providers",   # hunch.provider("claude"|"codex") — auth + agent loop, standalone
+    "Provider": ".providers",
+    "AuthStatus": ".providers",  # the uniform sign-in status returned by provider.status()
+    "OAuthToken": ".auth",      # the Claude subscription token, for Hunch(provider="claude", auth=...)
     "ConsentRequest": ".errors",   # what a custom confirm callback receives
 }
 

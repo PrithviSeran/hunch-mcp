@@ -59,16 +59,22 @@ class Hunch:
     def __init__(self, app="Finder", confirm="dialog", check_permissions=True,
                  simultaneous=False, cdp_port=None,
                  snapshot_max_depth=None, snapshot_max_nodes=None,
-                 agent_backend="auto", auth=None, app_name=None, policy=None,
+                 provider="claude", auth=None, can_use_tool=None, app_name=None, policy=None,
                  app_id=None, cdp_profile=None, notify=None):
-        """agent_backend: which LLM transport `mac.agent` uses — 'api' (anthropic SDK on a
-        metered ANTHROPIC_API_KEY), 'subscription' (claude-agent-sdk on the hunch.login()
-        Claude sign-in), or 'auto' (pick by credentials). Overridable per call via
-        mac.agent.run(..., backend=...).
+        """provider: which LLM vendor drives the agent loop — 'claude' (Anthropic, on your
+        Claude sign-in; the default) or 'codex' (OpenAI Codex, on a `codex login` session).
+        Set once here; then mac.login() / mac.status() / mac.logout() and mac.agent all act
+        on it — no provider prefix. Both drive Hunch on a subscription/login (API keys are
+        intentionally not exposed).
 
-        auth: the agent loop's credential — None (ambient resolution, hunch.auth order),
-        hunch.ApiKey(...) / hunch.OAuthToken(...) (use exactly this credential, nothing
-        ambient), or 'none' (never scavenge; the loop raises until a credential is given).
+        auth: an explicit injected credential for the provider, or None to use its own stored
+        sign-in. For 'claude' this is hunch.OAuthToken(...) (the subscription token the app
+        mints); 'codex' takes no injected credential (authenticate with mac.login() /
+        `codex login`).
+
+        can_use_tool: optional host-owned permission callback (tool_name, input, context) ->
+        Allow/Deny, handed to the provider's backend so a host app can route every tool
+        through its own Approve/Deny UI.
 
         confirm: 'dialog' (osascript click-to-approve), 'off' (auto-approve everything),
         or a callable(ConsentRequest) -> bool to render consent in YOUR app's UI.
@@ -111,20 +117,21 @@ class Hunch:
             self._gate = gate.Gate(confirm=confirm, app_name=self.app_name, policy=policy)
         except ValueError as e:
             raise HunchError(str(e)) from None
-        if agent_backend not in ("auto", "api", "subscription"):
-            raise HunchError(f"unknown agent_backend {agent_backend!r} — "
-                             "use 'api', 'subscription', or 'auto'")
-        from .auth import ApiKey, OAuthToken
-        if not (auth is None or auth == "none" or isinstance(auth, (ApiKey, OAuthToken))):
-            raise HunchError(f"unknown auth {auth!r} — pass hunch.ApiKey(...), "
-                             "hunch.OAuthToken(...), 'none', or None (ambient)")
-        if isinstance(auth, ApiKey) and agent_backend == "subscription":
-            raise HunchError("auth=ApiKey(...) implies the 'api' backend, "
-                             "but agent_backend='subscription' was requested")
-        if isinstance(auth, OAuthToken) and agent_backend == "api":
-            raise HunchError("auth=OAuthToken(...) implies the 'subscription' backend, "
-                             "but agent_backend='api' was requested")
+        from . import providers as _provider_mod
+        if provider not in _provider_mod.PROVIDERS:
+            raise HunchError(f"unknown provider {provider!r} — use "
+                             + ", ".join(repr(n) for n in _provider_mod.PROVIDERS))
+        from .auth import OAuthToken
+        if not (auth is None or isinstance(auth, OAuthToken)):
+            raise HunchError(f"unknown auth {auth!r} — pass hunch.OAuthToken(...) (the Claude "
+                             "subscription token) or None; authenticate codex with mac.login()")
+        if isinstance(auth, OAuthToken) and provider != "claude":
+            raise HunchError("auth=OAuthToken(...) is a Claude credential, but "
+                             f"provider={provider!r} was requested")
+        self._provider_name = provider
+        self._provider = _provider_mod.provider(provider)
         self._agent_auth = auth
+        self._can_use_tool = can_use_tool
         if check_permissions:
             self._check_accessibility()
         # ONE persistent computer per instance, so element [refs] survive snapshot -> act.
@@ -142,7 +149,6 @@ class Hunch:
         self.files = Files(self)
         self.clipboard = Clipboard(self)
         self._agent = None   # the agent loop, created lazily so the LLM SDKs stay optional
-        self._agent_backend = agent_backend
 
     @staticmethod
     def _check_accessibility():
@@ -296,18 +302,39 @@ class Hunch:
             parts.append("API keys/secrets (web.fill_secret): " + ", ".join(secrets))
         return "Saved credentials — " + "; ".join(parts)
 
-    # ── agent loop ────────────────────────────────────────────────────
+    # ── provider (auth + agent loop) ──────────────────────────────────────────
+
+    @property
+    def provider(self):
+        """The configured LLM provider ('claude' | 'codex'), as a Provider object.
+        Usually you go through mac.login()/status()/logout()/agent instead."""
+        return self._provider
+
+    def login(self, **kwargs):
+        """Sign in to the configured provider (interactive) — claude: your Claude sign-in;
+        codex: a ChatGPT/Codex browser sign-in. Returns an AuthStatus."""
+        return self._provider.login(app_id=self._app_id, **kwargs) \
+            if self._provider_name == "claude" else self._provider.login(**kwargs)
+
+    def logout(self, **kwargs):
+        """Sign the configured provider out."""
+        return self._provider.logout(app_id=self._app_id, **kwargs) \
+            if self._provider_name == "claude" else self._provider.logout(**kwargs)
+
+    def status(self, **kwargs):
+        """Who, if anyone, is signed in for the configured provider (an AuthStatus)."""
+        return self._provider.status(app_id=self._app_id, **kwargs) \
+            if self._provider_name == "claude" else self._provider.status(**kwargs)
 
     @property
     def agent(self):
         """The agent loop: `mac.agent.run(task=...)` runs an LLM loop that drives this Mac
-        through these primitives. Two backends (pip install 'hunch-sdk[agent]' brings both):
-        your Claude subscription after hunch.login(), or a metered ANTHROPIC_API_KEY.
-        Chosen at construction via Hunch(agent_backend=...), by credentials on 'auto', or
-        per call via run(backend=...). Created lazily so plain use imports neither SDK."""
+        through these primitives, on the provider chosen at construction (Hunch(provider=...)).
+        Created lazily so plain use imports none of the LLM SDKs."""
         if self._agent is None:
             from .agent import Agent
-            self._agent = Agent(self, backend=self._agent_backend, auth=self._agent_auth)
+            self._agent = Agent(self, provider=self._provider, auth=self._agent_auth,
+                                can_use_tool=self._can_use_tool)
         return self._agent
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
