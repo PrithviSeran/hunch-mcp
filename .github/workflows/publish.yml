@@ -1,0 +1,69 @@
+name: Publish to PyPI
+
+# Fires on merges to main that touch the package or its version.
+# It only publishes when pyproject's version is one PyPI does NOT already have,
+# so a merge that didn't bump the version is a safe no-op (PyPI rejects re-uploads).
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/hunch/**"
+      - "pyproject.toml"
+      - "README.md"
+  workflow_dispatch: {}   # allow manual runs from the Actions tab
+
+jobs:
+  check:
+    name: Should we publish?
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.decide.outputs.publish }}
+      version: ${{ steps.decide.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: decide
+        run: |
+          set -euo pipefail
+          VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          # 200 => this version already exists on PyPI; anything else => new.
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/hunch-sdk/$VERSION/json")
+          if [ "$CODE" = "200" ]; then
+            echo "hunch-sdk $VERSION already on PyPI — skipping."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "hunch-sdk $VERSION is new — will publish."
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  publish:
+    name: Build & publish
+    needs: check
+    if: needs.check.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/hunch-sdk
+    permissions:
+      id-token: write      # OIDC token for PyPI Trusted Publishing
+      contents: write      # create the git tag / release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+      - name: Tag the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          V="v${{ needs.check.outputs.version }}"
+          git tag "$V"
+          git push origin "$V"
+          gh release create "$V" dist/* --title "$V" --generate-notes
