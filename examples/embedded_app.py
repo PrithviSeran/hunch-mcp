@@ -26,6 +26,7 @@ def toast(message: str, title: str) -> None:
 
 
 mac = Hunch(
+    provider="claude",                  # which LLM vendor drives mac.agent ("claude" | "codex")
     app_id="com.example.demoapp",       # pure namespacing: own Keychain slots, own
                                         #   browser profile, own derived CDP port
     app_name="Demo App",                # what consent prompts + notifications say
@@ -33,16 +34,15 @@ mac = Hunch(
     notify=toast,                       # notifications go through YOUR surface
     policy={"gates": {"shell": True}},  # instance-owned safety; the user's personal
                                         #   ~/.hunch/config.json is never consulted
-    auth="none",                        # never scavenge ambient credentials; swap in
-                                        #   auth=OAuthToken("sk-ant-oat-...") or
-                                        #   hunch.ApiKey("sk-ant-...") that YOUR app manages
+    auth=OAuthToken("sk-ant-oat-...replace-me..."),  # the exact Claude subscription token YOUR
+                                                     #   app manages (redacted repr) — not the user's
 )
 
 print(mac.snapshot("Finder").splitlines()[0])   # deterministic primitives work as usual
 print(mac.list_credentials())                    # this app's OWN (empty) credential store
 mac.notify("Demo App is wired up.")
 
-# The agent loop would need an injected credential because auth="none":
-#   mac = Hunch(..., auth=OAuthToken(token_your_app_stores))
+# With the injected token above, the agent loop runs on YOUR credential:
 #   mac.agent.run("file the invoices in ~/Downloads")
+# (Codex apps authenticate via `codex login`; no token to inject.)
 mac.close()

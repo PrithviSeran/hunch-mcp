@@ -27,8 +27,9 @@ from dataclasses import dataclass, field
 
 from .playbook import HUNCH_PLAYBOOK
 from .gate import HunchError, ApprovalDenied, AccessibilityNotGranted, WebNotOpen
+from .backends.base import Backend   # dependency-free ABC; no import cycle (see backends/__init__)
 
-__all__ = ["Agent", "AgentResult"]
+__all__ = ["Agent", "AgentResult", "ApiBackend", "SubscriptionBackend"]
 
 DEFAULT_MODEL = "claude-opus-4-8"
 
@@ -411,13 +412,18 @@ def _sdk_tools(mac):
             for t in AGENT_TOOLS]
 
 
-class _SubscriptionRunner:
+class SubscriptionBackend(Backend):
     """The subscription backend: claude-agent-sdk on the user's Claude sign-in
     (hunch.login() / Claude Code / CLAUDE_CODE_OAUTH_TOKEN — see hunch.auth).
 
     Sync facade over the SDK's asyncio client: a daemon event-loop thread plus
     run_coroutine_threadsafe, so Agent.run() stays synchronous. The connected client
     is kept across run() calls (continuation) while the options are unchanged."""
+
+    name = "subscription"
+    provider = "anthropic"
+    extra = "subscription"
+    default_model = None   # let the subscription CLI pick its own default model
 
     def __init__(self, hunch, auth=None, app_id=None, can_use_tool=None):
         self._h = hunch
@@ -428,6 +434,19 @@ class _SubscriptionRunner:
         self._thread = None
         self._client = None
         self._opts_key = None
+
+    @classmethod
+    def deps_installed(cls):
+        try:
+            import claude_agent_sdk  # noqa: F401
+            return True
+        except ImportError:
+            return False
+
+    @classmethod
+    def available(cls, app_id=None):
+        from . import auth as auth_mod
+        return cls.deps_installed() and auth_mod.subscription_available(app_id)
 
     # — event-loop plumbing —
     def _call(self, coro):
@@ -517,7 +536,8 @@ class _SubscriptionRunner:
         return AgentResult(text=final_text, turns=turns, stop_reason=stop_reason,
                            usage=usage, aborted=aborted)
 
-    def run(self, task, model=None, max_turns=40, on_event=None, system_suffix="", effort=None):
+    def run(self, task, model=None, max_turns=40, on_event=None, system_suffix="",
+            effort=None, max_tokens=None):   # max_tokens ignored: the CLI manages output limits
         try:
             import claude_agent_sdk as sdk
         except ImportError as e:
@@ -574,98 +594,42 @@ class AgentResult:
     aborted: bool = False
 
 
-class Agent:
-    """The agent loop. Created lazily as `Hunch.agent`. Holds conversation state across
-    run() calls (continuation); call reset() to start a fresh task."""
+# Back-compat + registry alias: the subscription backend used to be named _SubscriptionRunner.
+# Tests and older callers import hunch.agent._SubscriptionRunner; keep it pointing at the class.
+_SubscriptionRunner = SubscriptionBackend
 
-    def __init__(self, hunch, client=None, backend="auto", auth=None, can_use_tool=None):
-        from .auth import ApiKey, OAuthToken
+
+class ApiBackend(Backend):
+    """The 'api' backend: our own tool loop on the `anthropic` SDK, metered on an
+    ANTHROPIC_API_KEY (env, or an injected hunch.ApiKey). Tools run IN-PROCESS against
+    the caller's live Hunch instance via _dispatch_core, so refs, gates, and simultaneous
+    mode are exactly the caller's. Conversation state (messages) lives here so run() can
+    continue a task across calls; reset() clears it."""
+
+    name = "api"
+    provider = "anthropic"
+    extra = "api"
+    default_model = DEFAULT_MODEL
+
+    def __init__(self, hunch, *, client=None, auth=None, app_id=None):
         self._h = hunch
         self._client = client          # test seam; None -> lazily anthropic.Anthropic()
-        self.backend = backend         # "auto" | "api" | "subscription" (per-run override too)
-        self.auth = auth               # None (ambient) | ApiKey | OAuthToken | "none"
-        # Optional host-owned permission callback. When set, the subscription backend hands EVERY
-        # tool to it — a raw claude-agent-sdk can_use_tool(tool_name, input, context) ->
-        # PermissionResultAllow/Deny — instead of auto-allowing Hunch tools. This is how the Hunch
-        # app routes each tool through its own Approve/Deny UI. (Subscription backend only.)
-        self._can_use_tool = can_use_tool
+        self._auth = auth              # ApiKey (injected) or None (ambient)
+        self._app_id = app_id
         self.messages = []
-        self._abort = False            # api backend: between-turns cancel flag (see interrupt())
-        self._sub = None               # _SubscriptionRunner, built on first subscription run
-        if not (auth is None or auth == "none" or isinstance(auth, (ApiKey, OAuthToken))):
-            raise HunchError(f"unknown auth {auth!r} — pass hunch.ApiKey(...), "
-                             "hunch.OAuthToken(...), 'none', or None (ambient)")
-        implied = self._implied_backend()
-        if implied and backend not in ("auto", implied):
-            raise HunchError(f"auth={type(auth).__name__}(...) implies the {implied!r} backend, "
-                             f"but backend={backend!r} was requested")
+        self._abort = False            # between-turns cancel flag (see interrupt())
 
-    @property
-    def _app_id(self):
-        return getattr(self._h, "_app_id", None)   # set by Hunch when namespaced
-
-    def _implied_backend(self):
-        from .auth import ApiKey, OAuthToken
-        if isinstance(self.auth, ApiKey):
-            return "api"
-        if isinstance(self.auth, OAuthToken):
-            return "subscription"
-        return None
-
-    def _resolve_backend(self, backend):
-        """Injected credentials imply their backend; an explicit choice wins otherwise;
-        "auto" picks by ambient credentials — the SAME order hunch.auth.status() reports.
-        auth="none" means never scavenge: with no injected credential, raise."""
-        implied = self._implied_backend()
-        b = backend or implied or self.backend or "auto"
-        if implied and b != implied:
-            raise HunchError(f"auth={type(self.auth).__name__}(...) implies the {implied!r} "
-                             f"backend, but backend={b!r} was requested")
-        if self.auth == "none" and implied is None:
-            raise HunchError("auth='none' — ambient credentials are disabled for this instance; "
-                             "pass hunch.ApiKey(...) or hunch.OAuthToken(...) (or auth=None "
-                             "to allow ambient resolution)")
-        if b in ("api", "subscription"):
-            return b
-        if b != "auto":
-            raise HunchError(f"unknown backend {b!r} — use 'api', 'subscription', or 'auto'")
-        if self._client is not None:       # injected client (test seam) is an api client
-            return "api"
-        if os.environ.get("ANTHROPIC_API_KEY"):
-            return "api"
-        from . import auth
+    @classmethod
+    def deps_installed(cls):
         try:
-            import claude_agent_sdk  # noqa: F401
-            have_sdk = True
+            import anthropic  # noqa: F401
+            return True
         except ImportError:
-            have_sdk = False
-        if have_sdk and auth.subscription_available(self._app_id):
-            return "subscription"
-        raise HunchError(
-            "no credentials for the agent loop — call hunch.login() to use your Claude "
-            "subscription, or set ANTHROPIC_API_KEY for the metered API"
-            + ("" if have_sdk else " (subscription backend also needs: "
-                                   "pip install 'hunch-sdk[agent]')"))
+            return False
 
-    def reset(self):
-        """Clear the conversation for an unrelated task (same Hunch instance and gates)."""
-        self.messages = []
-        if self._sub is not None:
-            self._sub.reset()
-
-    def close(self):
-        """Stop the subscription backend's event-loop thread (no-op otherwise)."""
-        if self._sub is not None:
-            self._sub.close()
-            self._sub = None
-
-    def interrupt(self):
-        """Stop an in-flight run() while KEEPING the conversation (the next run() continues it).
-        Call from another thread (e.g. a Stop button). Subscription backend: interrupts the current
-        turn immediately; api backend: cancels before the next turn. No-op if nothing is running."""
-        self._abort = True                        # api backend: checked between turns
-        if self._sub is not None:
-            self._sub.interrupt()                 # subscription backend: immediate
+    @classmethod
+    def available(cls, app_id=None):
+        return cls.deps_installed() and bool(os.environ.get("ANTHROPIC_API_KEY"))
 
     def _ensure_client(self):
         if self._client is None:
@@ -675,8 +639,8 @@ class Agent:
             except ImportError as e:
                 raise HunchError("the agent loop needs the optional 'anthropic' package — "
                                  "install it with: pip install 'hunch-sdk[agent]'") from e
-            if isinstance(self.auth, ApiKey):      # injected key, nothing ambient
-                self._client = anthropic.Anthropic(api_key=self.auth.value)
+            if isinstance(self._auth, ApiKey):     # injected key, nothing ambient
+                self._client = anthropic.Anthropic(api_key=self._auth.value)
             else:
                 self._client = anthropic.Anthropic()   # env key / auth token / ant profile
         return self._client
@@ -704,25 +668,14 @@ class Agent:
                   "cache_creation_input_tokens", "cache_read_input_tokens"):
             usage[k] = usage.get(k, 0) + (getattr(resp_usage, k, 0) or 0)
 
+    def interrupt(self):
+        self._abort = True             # checked between turns
+
+    def reset(self):
+        self.messages = []
+
     def run(self, task, model=None, max_turns=40, on_event=None,
-            system_suffix="", effort=None, max_tokens=16000, backend=None):
-        """Run the agent loop until Claude finishes the task (end_turn), is blocked, or hits
-        max_turns. Returns an AgentResult. on_event(kind, data) receives 'text' | 'tool' |
-        'tool_result' | 'done' | 'error' as work streams.
-
-        backend: 'api' | 'subscription' | None (-> the Agent's default, normally 'auto').
-        model=None -> claude-opus-4-8 on the api backend, the subscription's own default
-        on the subscription backend. max_tokens applies to the api backend only (the
-        subscription CLI manages its own output limits)."""
-        if self._resolve_backend(backend) == "subscription":
-            if self._sub is None:
-                from .auth import OAuthToken
-                self._sub = _SubscriptionRunner(
-                    self._h, auth=self.auth if isinstance(self.auth, OAuthToken) else None,
-                    app_id=self._app_id, can_use_tool=self._can_use_tool)
-            return self._sub.run(task, model=model, max_turns=max_turns, on_event=on_event,
-                                 system_suffix=system_suffix, effort=effort)
-
+            system_suffix="", effort=None, max_tokens=16000):
         model = model or DEFAULT_MODEL
         client = self._ensure_client()   # friendly HunchError if 'anthropic' isn't installed
         try:
@@ -737,7 +690,7 @@ class Agent:
         self._abort = False
 
         for turn in range(1, max_turns + 1):
-            if self._abort:                       # interrupt() between turns (api backend)
+            if self._abort:                       # interrupt() between turns
                 stop_reason, aborted = "interrupted", True
                 emit("error", "interrupted")
                 break
@@ -779,4 +732,71 @@ class Agent:
             emit("error", f"aborted after max_turns={max_turns}")
 
         return AgentResult(text=final_text, turns=turn, stop_reason=stop_reason,
-                         usage=usage, aborted=aborted)
+                           usage=usage, aborted=aborted)
+
+
+class Agent:
+    """The agent loop, created lazily as `Hunch.agent`. Runs the loop on the Hunch instance's
+    configured PROVIDER (hunch.provider.Provider): it builds that provider's Backend on first
+    use and delegates run/interrupt/reset/close to it, holding it across run() calls so a task
+    continues; reset() starts fresh. The provider — not the Agent — decides the transport, so
+    there is no backend selection here."""
+
+    def __init__(self, hunch, provider=None, auth=None, can_use_tool=None):
+        self._h = hunch
+        self._provider = provider      # a hunch.provider.Provider (claude / codex)
+        self.auth = auth               # provider-appropriate injected credential, or None
+        # Optional host-owned permission callback handed to backends that support it (the
+        # Hunch app routes each tool through its own Approve/Deny UI via this).
+        self._can_use_tool = can_use_tool
+        self._backend = None           # the provider's Backend, built on first run
+
+    @property
+    def _app_id(self):
+        return getattr(self._h, "_app_id", None)   # set by Hunch when namespaced
+
+    @property
+    def provider(self):
+        """The configured provider's name ('claude' | 'codex'), or None."""
+        return getattr(self._provider, "name", None)
+
+    @property
+    def messages(self):
+        """The backend's conversation, when it keeps one here (empty for delegated backends
+        that hold their transcript inside their own SDK session)."""
+        return getattr(self._backend, "messages", [])
+
+    def _backend_(self):
+        if self._backend is None:
+            if self._provider is None:
+                raise HunchError("no provider set for the agent loop — construct "
+                                 "Hunch(provider='claude') or Hunch(provider='codex')")
+            self._backend = self._provider.make_backend(
+                self._h, auth=self.auth, app_id=self._app_id, can_use_tool=self._can_use_tool)
+        return self._backend
+
+    def reset(self):
+        """Clear the conversation for an unrelated task (same Hunch instance and gates)."""
+        if self._backend is not None:
+            self._backend.reset()
+
+    def close(self):
+        """Release the backend's resources (event-loop threads, sessions)."""
+        if self._backend is not None:
+            self._backend.close()
+            self._backend = None
+
+    def interrupt(self):
+        """Stop an in-flight run() while KEEPING the conversation (the next run() continues it).
+        Call from another thread (e.g. a Stop button). No-op if nothing is running."""
+        if self._backend is not None:
+            self._backend.interrupt()
+
+    def run(self, task, model=None, max_turns=40, on_event=None,
+            system_suffix="", effort=None, max_tokens=16000):
+        """Run the agent loop until the model finishes the task (end_turn), is blocked, or hits
+        max_turns. Returns an AgentResult. on_event(kind, data) receives 'text' | 'tool' |
+        'tool_result' | 'done' | 'error' as work streams. model=None uses the provider's own
+        default model."""
+        return self._backend_().run(task, model=model, max_turns=max_turns, on_event=on_event,
+                                    system_suffix=system_suffix, effort=effort, max_tokens=max_tokens)

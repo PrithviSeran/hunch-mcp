@@ -69,8 +69,8 @@ macOS 13+. From PyPI (the distribution is `hunch-sdk`; the import and CLI are `h
 
 ```
 pipx install hunch-sdk          # or: pip install hunch-sdk
-pip install 'hunch-sdk[agent]'  # + the optional LLM agent loop (both backends;
-                                #   [api] or [subscription] picks just one)
+pip install 'hunch-sdk[subscription]'    # + the agent loop on Claude   (provider="claude")
+pip install --pre 'hunch-sdk[codex]'     # + the agent loop on OpenAI Codex (provider="codex")
 ```
 
 Or via Homebrew — best if you don't manage Python environments; it bundles an isolated
@@ -148,82 +148,83 @@ Runnable scripts live in [`examples/`](examples/).
 ## Agent loop (`mac.agent`)
 
 The instance SDK gives you deterministic primitives. The **agent loop** puts an LLM in the driver's seat:
-you hand it a task in plain English and Claude drives the Mac through those same primitives —
-Scrapybara's `act()`, but on *your* machine with *your* logged-in apps. It's an optional extra
-(keeps the base install free of the model SDKs):
+you hand it a task in plain English and it drives the Mac through those same primitives — on *your*
+machine with *your* logged-in apps. Pick your **provider** — Anthropic **Claude** or OpenAI **Codex** —
+once at construction; everything after is provider-agnostic. It's an optional extra (keeps the base
+install free of the model SDKs):
 
 ```bash
-pip install 'hunch-sdk[agent]'
-python -c 'import hunch; hunch.login()'   # Claude subscription sign-in (browser OAuth) — no
-                                          # API key. Already signed into Claude Code? Skip it.
+pip install 'hunch-sdk[subscription]'                    # Claude
+# or, for Codex (the SDK is beta):  pip install --pre 'hunch-sdk[codex]'
+python -c 'import hunch; hunch.provider("claude").login()'   # sign-in (browser OAuth) — no API key
 ```
 
 ```python
 from hunch import Hunch
 
-mac = Hunch()
+mac = Hunch(provider="claude")          # or Hunch(provider="codex")
 result = mac.agent.run("reply to Sarah's latest email, but don't send it")
-print(result.text)          # Claude's final summary
+print(result.text)          # the model's final summary
 print(result.turns, result.usage)
 ```
 
 ### Signing in
 
-Auth is an explicit, visible surface — nothing is scavenged silently. Two ways to run the loop:
-
-| Backend | Sign in with | Cost |
-|---|---|---|
-| `subscription` | `hunch.login()` — the same browser OAuth Claude Code uses. Already signed into Claude Code on this Mac? You're done; Hunch reuses that. | your Claude plan (no per-token cost) |
-| `api` | `export ANTHROPIC_API_KEY=sk-ant-...` | metered API tokens |
-
-You choose the backend where it suits your code — at construction, or per call:
+Auth is an explicit, provider-scoped surface — nothing is scavenged silently. You choose the vendor
+once, then the same prefix-free methods act on it:
 
 ```python
-mac = Hunch(agent_backend="subscription")            # this instance's agent = subscription
-mac.agent.run(task)                                  # ...no per-call ceremony
-mac.agent.run(other_task, backend="api")             # per-call override still wins
+mac = Hunch(provider="codex")       # or "claude" (the default)
+mac.login()                         # codex: ChatGPT browser sign-in · claude: Claude sign-in
+mac.status()                        # -> AuthStatus(provider, logged_in, method, email, plan)
+mac.logout()
+mac.agent.run(task)                 # runs on the configured provider
 ```
 
-The default `backend="auto"` picks by credentials, in a fixed documented order (API key →
-`CLAUDE_CODE_OAUTH_TOKEN` env → Claude Code sign-in → `hunch.login(token=...)` token) — inspect
-it any time with `hunch.auth.status()` or `hunch doctor`. With no credentials at all, `run()`
-raises a `HunchError` naming both fixes — it never guesses.
-
-Auth is **public Python API** (there is no login CLI — the MCP server never needs one, and your
-app owns its own onboarding):
+Or drive auth standalone, without a Mac instance (e.g. an onboarding script):
 
 ```python
 import hunch
 
-st = hunch.auth.status()           # AuthStatus: .source / .email / .plan / .subscription_ready
-if not st.subscription_ready:
-    hunch.login()                  # browser OAuth; or hunch.login(token="sk-ant-oat-...") headless
-hunch.logout()                     # removes what login() stored, and only that
+st = hunch.provider("codex").status()
+if not st.logged_in:
+    hunch.provider("codex").login()               # browser OAuth (blocks until done)
+    # headless/remote box instead:
+    #   h = hunch.provider("codex").device_login()
+    #   print(h.verification_url, h.user_code); h.wait()
 ```
 
-- **Watch it work** with an `on_event(kind, data)` callback — `kind` is one of `text` (Claude's
-  reasoning), `tool` (`{name, input}`), `tool_result` (preview), `done` (final text), `error`.
-- **Continuation**: follow-up `run()` calls keep the conversation (Claude still knows which email
+| Provider | Sign in with | Cost |
+|---|---|---|
+| `claude` | `mac.login()` / `hunch.provider("claude").login()` — the same browser OAuth Claude Code uses. Already signed into Claude Code on this Mac? You're done; Hunch reuses that. | your Claude plan (no per-token cost) |
+| `codex` | `mac.login()` / `codex login` — a ChatGPT/Codex browser sign-in. | your ChatGPT/Codex plan |
+
+Both run on a subscription/login — metered API keys are intentionally not exposed. With no valid
+sign-in, `run()` surfaces an error that points you back to `login()` — it never guesses.
+
+- **Watch it work** with an `on_event(kind, data)` callback — `kind` is one of `text` (reasoning),
+  `tool` (`{name, input}`), `tool_result` (preview), `done` (final text), `error`.
+- **Continuation**: follow-up `run()` calls keep the conversation (the model still knows which email
   is Sarah's); `mac.agent.reset()` starts a fresh task.
 - **Mix layers freely**: call `mac.snapshot(...)` / `mac.clipboard.get()` deterministically around
   `mac.agent.run(...)` — the thing a cloud sandbox can't do on your real machine.
-- **Knobs**: `run(task, model=None, max_turns=40, effort=None, on_event=None,
-  system_suffix="", backend=None)` — `model=None` means `claude-opus-4-8` on the api backend and
-  your subscription's default model otherwise. `AgentResult` has `text`, `turns`, `stop_reason`,
-  `usage`, `aborted`.
+- **Knobs**: `run(task, model=None, max_turns=40, effort=None, on_event=None, system_suffix="")` —
+  `model=None` uses the provider's own default model. `AgentResult` has `text`, `turns`,
+  `stop_reason`, `usage`, `aborted`.
 - **Safety**: the instance's gate config governs the loop. The default `confirm="dialog"` pops a
   real "Go ahead?" dialog before any focus-stealing or risky step — good when you're at the
   machine, but a gated action can stall an unattended run for the dialog's timeout. For cron jobs
-  use `Hunch(confirm="off")` and accept the risk; Claude still asks *you* (via `notify_user`)
-  before irreversible or outward actions like sending a message. A declined gate comes back to the
-  model as a `REFUSED` result, so the loop adapts instead of crashing.
-- **Cost**: on the subscription backend, runs draw on your Claude plan's usage limits — no
-  per-token bill. On the api backend each turn resends the tree-heavy history; prompt caching is
-  on by default, so cached input is ~10× cheaper — but long autonomous runs still add up.
-  `max_turns` caps it either way.
+  use `Hunch(confirm="off")` and accept the risk; the model still asks *you* (via `notify_user`)
+  before irreversible or outward actions. A declined gate comes back as a `REFUSED` result, so the
+  loop adapts instead of crashing.
+- **Cost**: runs draw on your provider plan's usage limits — no per-token bill. `max_turns` caps it.
 
-Other models: the agent loop is Claude-only, but the instance-SDK primitives are provider-agnostic —
-wire `mac.snapshot()` / `mac.act()` into your own OpenAI/Gemini/etc. agent loop as tools.
+> **Codex note:** the `codex` provider drives an OpenAI Codex agent that reaches Hunch's tools over
+> MCP (a separate `hunch serve` process), so its dangerous-verb approvals use Hunch's own
+> click-to-approve dialogs rather than a host `can_use_tool` callback.
+
+Other models: the instance-SDK primitives are provider-agnostic — wire `mac.snapshot()` /
+`mac.act()` into your own OpenAI/Gemini/etc. agent loop as tools.
 
 ## Building an app on Hunch
 
@@ -236,6 +237,7 @@ profile) is nothing but constructor arguments.
 from hunch import Hunch, ConsentRequest, OAuthToken
 
 mac = Hunch(
+    provider="claude",                  # which LLM vendor drives mac.agent ("claude" | "codex")
     app_id="com.acme.mailbot",          # pure namespacing — own Keychain slots, browser
                                         #   profile, and CDP port; never a behavior switch
     app_name="Acme Mailbot",            # what consent dialogs + notifications say
@@ -243,8 +245,8 @@ mac = Hunch(
     notify=my_toast_handler,            # (message, title) -> your surface, not macOS banners
     policy={"gates": {"shell": True}},  # instance-owned safety; the user's personal
                                         #   config can never disarm your app
-    auth=OAuthToken(token),             # exactly the credential YOUR app manages —
-                                        #   or "none" to forbid ambient pickup entirely
+    auth=OAuthToken(token),             # the exact Claude subscription token YOUR app manages
+    can_use_tool=my_approver,           # optional: route every tool through your Approve/Deny UI
 )
 ```
 
@@ -258,9 +260,9 @@ What this buys you:
   dialogs and macOS banners. A broken consent callback fails **closed**.
 - **Isolated safety posture** — the machine's `hunch config` (and `HUNCH_NO_INTERNAL_GATE`)
   govern only the personal MCP server, never your instance.
-- **Explicit auth** — `hunch.ApiKey(...)` / `hunch.OAuthToken(...)` use exactly that credential
-  (reprs are redacted); `auth="none"` guarantees your app never silently rides on the end
-  user's own Claude sign-in.
+- **Explicit auth** — `provider="claude"` with `auth=hunch.OAuthToken(...)` uses exactly that
+  subscription token (reprs are redacted), so your app never silently rides on the end user's own
+  Claude sign-in. (The `codex` provider authenticates via `mac.login()` / `codex login`.)
 
 Programmatic credential management uses the same namespacing: `hunch.creds.set_credential(name,
 user, pw, namespace=your_app_id)` etc. A runnable walkthrough lives in
