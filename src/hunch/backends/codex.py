@@ -22,8 +22,13 @@ Auth is a `codex login` (ChatGPT/Codex subscription) session — set it up with
 hunch.provider("codex").login() or `codex login`. No API-key path is exposed.
 
 The Codex Python SDK (`openai-codex`, beta) is an optional dependency, imported
-lazily. The SDK touch-points are `_open_thread()` and `_run_turn()`; everything else
-(config, playbook, result translation) is plain Python and unit-tested with fakes.
+lazily. The SDK touch-points are `_open_thread()` and `_start_turn()`; everything else
+(config, playbook, notification routing) is plain Python and unit-tested with fakes.
+
+Streaming: we drive the turn with the SDK's `thread.turn(input)` (a streaming handle)
+rather than the blocking `thread.run(input)`, and route each notification to on_event
+the moment it arrives — so tool calls and messages surface live, mid-turn, instead of
+all at once when the turn ends. `_consume()` is the pure router (fakeable in tests).
 """
 import json
 import os
@@ -56,6 +61,7 @@ class CodexBackend(Backend):
         super().__init__(hunch, auth=auth, app_id=app_id, can_use_tool=can_use_tool)
         self._thread = None            # the live Codex thread (continuation across run())
         self._codex = None             # the Codex client
+        self._handle = None            # the in-flight TurnHandle, for interrupt()
 
     # ── availability ────────────────────────────────────────────────────────────
     @classmethod
@@ -115,7 +121,11 @@ class CodexBackend(Backend):
         os.makedirs(d, exist_ok=True)
         return d
 
-    # ── result translation: TurnResult.items -> Hunch's on_event contract ────────
+    # ── item translation: a ThreadItem's lifecycle -> Hunch's on_event contract ──
+    # A ThreadItem surfaces twice — on `item/started` (the call is now underway) and on
+    # `item/completed` (it finished, results attached). We emit the CALL at started so a
+    # tool/command shows the instant it begins, and the RESULT/text at completed. Emitting
+    # only on completion would make a slow tool look hung until it returned.
     @staticmethod
     def _result_text(result):
         """Pull readable text out of a Codex McpToolCallResult (its .content is a list of
@@ -129,21 +139,32 @@ class CodexBackend(Backend):
                 return joined
         return str(result)
 
-    @classmethod
-    def _emit_item(cls, item, emit):
-        """Map one ThreadItem (a pydantic RootModel; real variant at .root) onto
-        emit(kind, data). Returns the item's agent text if it is a message, else ''."""
+    @staticmethod
+    def _emit_call(item, emit):
+        """On item/started: surface a tool or shell call the moment it begins (name + input).
+        Agent messages carry no text yet, so they're emitted on completion, not here."""
         root = getattr(item, "root", item)
         itype = getattr(root, "type", "") or ""
         if itype == "mcpToolCall":
             emit("tool", {"name": getattr(root, "tool", ""),
                           "input": getattr(root, "arguments", None)})
+        elif itype == "commandExecution":             # Codex ran its own shell (not a hunch tool)
+            emit("tool", {"name": "shell", "input": getattr(root, "command", "")})
+
+    @staticmethod
+    def _item_id(item):
+        return getattr(getattr(item, "root", item), "id", None)
+
+    @classmethod
+    def _emit_result(cls, item, emit):
+        """On item/completed: emit a tool's result or an agent message's text. Returns the
+        message text (so the caller can track the turn's final response), else ''."""
+        root = getattr(item, "root", item)
+        itype = getattr(root, "type", "") or ""
+        if itype == "mcpToolCall":
             result = getattr(root, "result", None)
             if result is not None:
                 emit("tool_result", cls._result_text(result)[:200])
-            return ""
-        if itype == "commandExecution":               # Codex ran its own shell (not a hunch tool)
-            emit("tool", {"name": "shell", "input": getattr(root, "command", "")})
             return ""
         if itype == "agentMessage":
             text = (getattr(root, "text", "") or "").strip()
@@ -153,13 +174,13 @@ class CodexBackend(Backend):
         return ""
 
     @staticmethod
-    def _usage_dict(result):
-        u = getattr(result, "usage", None)
-        if u is None:
+    def _usage_dict(usage):
+        """model_dump a Codex ThreadTokenUsage (or pass through a dict) to a plain dict."""
+        if usage is None:
             return {}
-        dump = getattr(u, "model_dump", None)
+        dump = getattr(usage, "model_dump", None)
         try:
-            return dump() if dump else (u if isinstance(u, dict) else {})
+            return dump() if dump else (usage if isinstance(usage, dict) else {})
         except Exception:
             return {}
 
@@ -180,10 +201,54 @@ class CodexBackend(Backend):
             self._thread = self._codex.thread_start(**kwargs)
         return self._thread
 
-    def _run_turn(self, thread, task):
-        """Run one turn to completion and return the SDK's TurnResult. Isolated so tests
-        fake it; the beta SDK's blocking run(input) returns items + final_response."""
-        return thread.run(task)
+    def _start_turn(self, thread, task):
+        """Start a STREAMING turn and return its notification iterator — the one live SDK
+        touch-point (override in tests). `thread.turn(input)` returns a TurnHandle whose
+        `.stream()` yields Notification(method, payload) objects until 'turn/completed';
+        `.interrupt()` cancels it. We stash the handle so interrupt() can reach it, and hand
+        back the raw stream for `_consume` to route. (The blocking `thread.run()` we replaced
+        buffered every item and only returned once the whole turn was done — that was the
+        no-streaming bug.)"""
+        handle = thread.turn(task)
+        self._handle = handle
+        return handle.stream()
+
+    def _consume(self, notifications, emit):
+        """Route a Codex turn's notification stream to emit(...) LIVE and return
+        (final_text, error, usage_dict, item_count). Pure over the notification objects
+        (each has `.method` and `.payload`), so tests drive it with fakes — no SDK needed.
+
+          item/started   -> emit the tool/command call (see _emit_call)
+          item/completed -> emit the tool result / message text (see _emit_result)
+          tokenUsage      -> capture usage
+          turn/completed -> capture the turn's terminal error (None on success)
+        """
+        final, error, usage, items = "", None, {}, 0
+        called = set()                                  # item ids whose call we've emitted
+        for note in notifications:
+            method = getattr(note, "method", "") or ""
+            payload = getattr(note, "payload", None)
+            item = getattr(payload, "item", None)
+            if method == "item/started":
+                if item is not None:
+                    called.add(self._item_id(item))
+                    self._emit_call(item, emit)
+            elif method == "item/completed":
+                if item is not None:
+                    items += 1
+                    # Defensive: if we never saw this item's 'started' (the stream should
+                    # always deliver it first), emit the call now so a tool is never shown
+                    # LESS than the old buffered path did — worst case it lands at completion.
+                    if self._item_id(item) not in called:
+                        self._emit_call(item, emit)
+                    text = self._emit_result(item, emit)
+                    if text:
+                        final = text
+            elif getattr(payload, "token_usage", None) is not None:
+                usage = self._usage_dict(payload.token_usage)
+            elif getattr(payload, "turn", None) is not None:   # turn/completed
+                error = getattr(payload.turn, "error", None)
+        return final, error, usage, items
 
     # ── run ──────────────────────────────────────────────────────────────────────
     def run(self, task, model=None, max_turns=40, on_event=None,
@@ -202,35 +267,40 @@ class CodexBackend(Backend):
 
         try:
             thread = self._open_thread(model, cwd)
-            result = self._run_turn(thread, task)
+            # Route the live notification stream to on_event as it arrives (no buffering).
+            final, err, usage, items = self._consume(self._start_turn(thread, task), emit)
         except Exception as e:  # noqa: BLE001 — surface transport/SDK failures as an error result
             msg = f"codex run failed: {e}"
             if any(w in str(e).lower() for w in ("login", "auth", "unauthor", "credential", "401")):
                 msg += " — authenticate first: hunch.provider('codex').login() (or `codex login`)"
             emit("error", msg)
             return _result("", "error", True, {}, 0)
+        finally:
+            self._handle = None
 
-        final = ""
-        items = getattr(result, "items", None) or []
-        for item in items:
-            text = self._emit_item(item, emit)
-            if text:
-                final = text
-        final = final or (getattr(result, "final_response", "") or "")
-        err = getattr(result, "error", None)
         aborted = err is not None
-        usage = self._usage_dict(result)
         if aborted:
             emit("error", str(err))
         else:
             emit("done", final)
-        return _result(final, "error" if aborted else "end_turn", aborted, usage, len(items))
+        return _result(final, "error" if aborted else "end_turn", aborted, usage, items)
+
+    def interrupt(self):
+        """Cancel the in-flight turn (called from another thread, e.g. a Stop button). The
+        stream in run() then ends and we return whatever completed so far."""
+        handle = self._handle
+        if handle is not None:
+            try:
+                handle.interrupt()
+            except Exception:
+                pass
 
     def reset(self):
         self._thread = None            # drop the conversation; next run() starts a fresh thread
 
     def close(self):
         self._thread = None
+        self._handle = None
         codex, self._codex = self._codex, None
         if codex is not None:
             closer = getattr(codex, "close", None)

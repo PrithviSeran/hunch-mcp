@@ -105,29 +105,45 @@ def test_codex_working_dir_is_private(monkeypatch, tmp_path):
     assert os.path.isdir(d) and str(tmp_path) in d
 
 
-# ── codex result translation (TurnResult.items -> on_event) ───────────────────────
+# ── codex item translation (ThreadItem lifecycle -> on_event) ─────────────────────
 def _item(**kw):
     return types.SimpleNamespace(root=types.SimpleNamespace(**kw))
 
 
-def test_codex_emit_item():
+def _note(method, **payload):
+    """A fake Codex Notification: `.method` + `.payload` (a namespace of payload fields)."""
+    return types.SimpleNamespace(method=method, payload=types.SimpleNamespace(**payload))
+
+
+def _usage(**kw):
+    return types.SimpleNamespace(model_dump=lambda: dict(kw))
+
+
+def test_codex_emit_call_surfaces_call_at_start():
+    # item/started: the tool/command call is shown immediately; no result yet.
     events = []
     emit = lambda k, d: events.append((k, d))
-    assert CodexBackend._emit_item(_item(type="mcpToolCall", tool="snapshot",
-                                         arguments={"app": "Mail"}, result="ok"), emit) == ""
-    assert ("tool", {"name": "snapshot", "input": {"app": "Mail"}}) in events
-    assert ("tool_result", "ok") in events
+    CodexBackend._emit_call(_item(type="mcpToolCall", tool="snapshot",
+                                  arguments={"app": "Mail"}, result=None), emit)
+    assert events == [("tool", {"name": "snapshot", "input": {"app": "Mail"}})]
     events.clear()
-    assert CodexBackend._emit_item(_item(type="agentMessage", text="done"), emit) == "done"
+    CodexBackend._emit_call(_item(type="commandExecution", command="ls -la"), emit)
+    assert events == [("tool", {"name": "shell", "input": "ls -la"})]
+    events.clear()
+    CodexBackend._emit_call(_item(type="agentMessage", text=""), emit)   # messages: nothing at start
+    assert events == []
+
+
+def test_codex_emit_result_surfaces_result_and_text():
+    # item/completed: a tool's result, or a message's text (returned so run() tracks final).
+    events = []
+    emit = lambda k, d: events.append((k, d))
+    assert CodexBackend._emit_result(_item(type="mcpToolCall", tool="snapshot",
+                                           arguments={}, result="ok"), emit) == ""
+    assert events == [("tool_result", "ok")]
+    events.clear()
+    assert CodexBackend._emit_result(_item(type="agentMessage", text="done"), emit) == "done"
     assert events == [("text", "done")]
-
-
-class _FakeTurn:
-    def __init__(self, items, final_response="", error=None, usage=None):
-        self.items = items
-        self.final_response = final_response
-        self.error = error
-        self.usage = usage
 
 
 def _prep_codex(monkeypatch, tmp_path):
@@ -135,29 +151,91 @@ def _prep_codex(monkeypatch, tmp_path):
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
 
 
-def test_codex_run_streams_and_returns_result(monkeypatch, tmp_path):
+def test_codex_run_streams_live_mid_turn(monkeypatch, tmp_path):
+    """The turn's events must reach on_event AS the stream is consumed — not buffered until
+    the end. We assert the tool call is already emitted the instant its 'started' notification
+    is yielded, before the turn completes."""
     _prep_codex(monkeypatch, tmp_path)
     b = CodexBackend(_FakeHunch())
     monkeypatch.setattr(b, "_open_thread", lambda model, cwd: "THREAD")
-    turn = _FakeTurn(items=[_item(type="mcpToolCall", tool="act", arguments={}, result=None),
-                            _item(type="agentMessage", text="sent it")],
-                     final_response="sent it")
-    monkeypatch.setattr(b, "_run_turn", lambda thread, task: turn)
     events = []
-    r = b.run("send it", on_event=lambda k, d: events.append(k))
+    emit = lambda k, d: events.append((k, d))
+
+    def fake_stream(thread, task):
+        yield _note("item/started", item=_item(type="mcpToolCall", tool="act", arguments={"x": 1}))
+        # Proof of LIVE delivery: the call is on the wire before we yield anything further.
+        assert ("tool", {"name": "act", "input": {"x": 1}}) in events
+        yield _note("item/completed",
+                    item=_item(type="mcpToolCall", tool="act", arguments={"x": 1}, result="ok"))
+        yield _note("item/started", item=_item(type="agentMessage", text=""))
+        yield _note("item/completed", item=_item(type="agentMessage", text="sent it"))
+        yield _note("thread/tokenUsage/updated", token_usage=_usage(total=5))
+        yield _note("turn/completed", turn=types.SimpleNamespace(error=None))
+
+    monkeypatch.setattr(b, "_start_turn", fake_stream)
+    r = b.run("send it", on_event=emit)
+    assert [k for k, _ in events] == ["tool", "tool_result", "text", "done"]
     assert r.text == "sent it" and r.aborted is False and r.stop_reason == "end_turn"
-    assert events == ["tool", "text", "done"]
+    assert r.usage == {"total": 5} and r.turns == 2   # two completed items
 
 
-def test_codex_run_error_field(monkeypatch, tmp_path):
+def test_codex_consume_falls_back_to_call_at_completion(monkeypatch, tmp_path):
+    """If 'started' is ever missing for a tool, its call is still emitted at completion — the
+    tool is never shown less than the old buffered path did (Swift renders 'tool', not result)."""
     _prep_codex(monkeypatch, tmp_path)
     b = CodexBackend(_FakeHunch())
     monkeypatch.setattr(b, "_open_thread", lambda model, cwd: "THREAD")
-    monkeypatch.setattr(b, "_run_turn", lambda t, task: _FakeTurn(items=[], error="rate limited"))
+    monkeypatch.setattr(b, "_start_turn", lambda thread, task: iter([
+        # note: NO item/started for this tool
+        _note("item/completed", item=_item(type="mcpToolCall", id="i9", tool="act",
+                                           arguments={"x": 1}, result="ok")),
+        _note("turn/completed", turn=types.SimpleNamespace(error=None)),
+    ]))
+    events = []
+    b.run("go", on_event=lambda k, d: events.append((k, d)))
+    assert events == [("tool", {"name": "act", "input": {"x": 1}}),
+                      ("tool_result", "ok"), ("done", "")]
+
+
+def test_codex_consume_no_double_call_when_started_present(monkeypatch, tmp_path):
+    """When 'started' IS delivered, the call is emitted exactly once (not again at completion)."""
+    _prep_codex(monkeypatch, tmp_path)
+    b = CodexBackend(_FakeHunch())
+    monkeypatch.setattr(b, "_open_thread", lambda model, cwd: "THREAD")
+    monkeypatch.setattr(b, "_start_turn", lambda thread, task: iter([
+        _note("item/started", item=_item(type="mcpToolCall", id="i9", tool="act", arguments={"x": 1})),
+        _note("item/completed", item=_item(type="mcpToolCall", id="i9", tool="act",
+                                           arguments={"x": 1}, result="ok")),
+        _note("turn/completed", turn=types.SimpleNamespace(error=None)),
+    ]))
+    events = []
+    b.run("go", on_event=lambda k, d: events.append(k))
+    assert events == ["tool", "tool_result", "done"]   # exactly one 'tool'
+
+
+def test_codex_run_error_from_turn_completed(monkeypatch, tmp_path):
+    _prep_codex(monkeypatch, tmp_path)
+    b = CodexBackend(_FakeHunch())
+    monkeypatch.setattr(b, "_open_thread", lambda model, cwd: "THREAD")
+    monkeypatch.setattr(b, "_start_turn",
+                        lambda thread, task: iter([_note("turn/completed",
+                                                         turn=types.SimpleNamespace(error="rate limited"))]))
     events = []
     r = b.run("x", on_event=lambda k, d: events.append((k, d)))
     assert r.aborted is True and r.stop_reason == "error"
     assert ("error", "rate limited") in events
+
+
+def test_codex_interrupt_cancels_the_handle(monkeypatch, tmp_path):
+    _prep_codex(monkeypatch, tmp_path)
+    b = CodexBackend(_FakeHunch())
+    calls = {"n": 0}
+    b._handle = types.SimpleNamespace(interrupt=lambda: calls.__setitem__("n", calls["n"] + 1))
+    b.interrupt()
+    assert calls["n"] == 1
+    b._handle = None
+    b.interrupt()   # no live turn -> no-op, no crash
+    assert calls["n"] == 1
 
 
 # ── codex auth surface (via the provider), faking the openai_codex SDK ─────────────
@@ -257,17 +335,28 @@ def test_hunch_login_dispatches_to_provider(monkeypatch):
 def test_sdk_shape_matches_backend_assumptions():
     oc = pytest.importorskip("openai_codex")
     import inspect
-    import dataclasses
     params = inspect.signature(oc.Codex.thread_start).parameters
     for p in ("cwd", "developer_instructions", "config", "model", "sandbox"):
         assert p in params, f"thread_start lost {p!r}"
     assert hasattr(oc.Sandbox, "workspace_write")
-    turn_fields = {f.name for f in dataclasses.fields(oc.TurnResult)}
-    for f in ("items", "final_response", "error", "usage"):
-        assert f in turn_fields
+    # streaming turn surface we now drive (thread.turn -> TurnHandle.stream/.interrupt)
+    assert hasattr(oc.Thread, "turn")
+    for m in ("stream", "interrupt"):
+        assert hasattr(oc.TurnHandle, m), f"TurnHandle lost {m!r}"
     # auth methods the provider relies on
     for m in ("login_chatgpt", "login_chatgpt_device_code", "logout", "account"):
         assert hasattr(oc.Codex, m)
+
+
+def test_sdk_streaming_notification_payloads_match():
+    """The notification payload fields _consume reads: item on started/completed,
+    token_usage on the usage notification, turn (with .error) on turn/completed."""
+    pytest.importorskip("openai_codex")
+    from openai_codex import models as m
+    assert "item" in m.ItemStartedNotification.model_fields
+    assert "item" in m.ItemCompletedNotification.model_fields
+    assert "token_usage" in m.ThreadTokenUsageUpdatedNotification.model_fields
+    assert "turn" in m.TurnCompletedNotification.model_fields
 
 
 def test_sdk_accepts_our_config_overrides():
@@ -283,3 +372,58 @@ def test_sdk_item_variant_fields_match():
     assert "tool" in mcp and "arguments" in mcp and "result" in mcp
     assert typing.get_args(mcp["type"].annotation) == ("mcpToolCall",)
     assert typing.get_args(v.AgentMessageThreadItem.model_fields["type"].annotation) == ("agentMessage",)
+
+
+def test_consume_routes_real_sdk_notifications():
+    """End-to-end over REAL openai-codex objects (not fakes): build the actual Notification /
+    ThreadItem / Turn pydantic models a live turn emits and run them through the real _consume,
+    proving every attribute read (.method/.payload/.item.root.type/.tool/.result/.turn.error)
+    matches the installed SDK. Complements the SimpleNamespace unit tests, which only encode
+    our assumptions about those shapes."""
+    pytest.importorskip("openai_codex")
+    from openai_codex.models import (
+        Notification, ItemStartedNotification, ItemCompletedNotification,
+        TurnCompletedNotification, ThreadTokenUsageUpdatedNotification)
+    from openai_codex.generated import v2_all as v
+
+    def mcp(status, result=None):
+        return v.McpToolCallThreadItem(id="i1", type="mcpToolCall", server="hunch", tool="act",
+                                       arguments={"x": 1}, status=status, result=result)
+
+    def bd(n):
+        return v.TokenUsageBreakdown(cached_input_tokens=0, input_tokens=n, output_tokens=n,
+                                     reasoning_output_tokens=0, total_tokens=2 * n)
+
+    ok = v.McpToolCallResult(content=[{"type": "text", "text": "ok"}])
+    stream = [
+        Notification(method="item/started", payload=ItemStartedNotification(
+            item=mcp(v.McpToolCallStatus.in_progress), startedAtMs=1, threadId="th", turnId="t1")),
+        Notification(method="item/completed", payload=ItemCompletedNotification(
+            item=mcp(v.McpToolCallStatus.completed, result=ok), completedAtMs=2,
+            threadId="th", turnId="t1")),
+        Notification(method="item/completed", payload=ItemCompletedNotification(
+            item=v.AgentMessageThreadItem(id="m1", type="agentMessage", text="sent it"),
+            completedAtMs=3, threadId="th", turnId="t1")),
+        Notification(method="thread/tokenUsage/updated", payload=ThreadTokenUsageUpdatedNotification(
+            threadId="th", turnId="t1", tokenUsage=v.ThreadTokenUsage(last=bd(5), total=bd(21)))),
+        Notification(method="turn/completed", payload=TurnCompletedNotification(
+            threadId="th", turn=v.Turn(id="t1", items=[], status=v.TurnStatus.completed))),
+    ]
+    b = CodexBackend(_FakeHunch())
+    events = []
+    final, error, usage, items = b._consume(iter(stream), lambda k, d: events.append((k, d)))
+    assert events == [
+        ("tool", {"name": "act", "input": {"x": 1}}),   # surfaced at item/started
+        ("tool_result", "ok"),                            # surfaced at item/completed
+        ("text", "sent it"),
+    ]
+    assert final == "sent it" and error is None and items == 2
+    assert usage["total"]["total_tokens"] == 42
+
+    # a failed turn surfaces its TurnError
+    _, err2, _, _ = b._consume(iter([
+        Notification(method="turn/completed", payload=TurnCompletedNotification(
+            threadId="th", turn=v.Turn(id="t1", items=[], status=v.TurnStatus.failed,
+                                       error=v.TurnError(message="boom"))))]),
+        lambda k, d: None)
+    assert getattr(err2, "message", None) == "boom"
