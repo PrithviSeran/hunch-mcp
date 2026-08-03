@@ -173,7 +173,14 @@ Use **`_frontmost()`** (`local_mac.py`) — a fresh `lsappinfo` query per call. 
   (capital P), or publishing 403s.
 - **`server.json`** (repo root) is the MCP-registry manifest; **`mcp.json`** (repo root) is the Open
   Plugins / Cursor-directory manifest. Bump `server.json`'s `version` alongside `pyproject.toml`.
-- **Publishing order:** release to PyPI first (`uv build` then `uv publish`), then
+- **PyPI publishing is automated.** `.github/workflows/publish.yml` fires on merge to `main` when
+  `src/hunch/**` or `pyproject.toml` changed, and publishes **only if** the `pyproject.toml` version
+  isn't already on PyPI (a merge without a version bump is a safe no-op). It builds (`python -m
+  build`), uploads via `pypa/gh-action-pypi-publish` over OIDC **Trusted Publishing** (no API token),
+  and tags `vX.Y.Z` + cuts a GitHub release. So a release is just: bump `pyproject.toml` version,
+  merge to `main`. Requires the one-time PyPI trusted-publisher config (project `hunch-sdk`, owner
+  `PrithviSeran`, repo `hunch-mcp`, workflow `publish.yml`, environment `pypi`).
+- **Publishing order:** merge the version bump so the workflow ships PyPI, then
   `mcp-publisher login github && mcp-publisher publish`. Footguns: `mcp-publisher publish --dry-run`
   actually PUBLISHES in the current CLI, and re-publishing the same version 400s ("duplicate
   version"), so a registry update needs a real version bump.
