@@ -74,6 +74,22 @@ KEY WORKFLOWS:
   `screenshot` tool to see a web page — it captures the physical frontmost screen, so on a background
   CDP window you get the USER's own window, not the page. If you truly need the page as pixels
   (chart/canvas/image), use `web_screenshot` (focus-free, captures the CDP page itself).
+- OPEN A FILE OR FOLDER IN AN APP: `open_file(path, app="Cursor")` — one call, focus-free. NEVER
+  drive a native Open/Save panel (File ▸ Open…). Those panels don't select by AX (the row accepts
+  the write and stays unselected, so the Open button never enables) and their Go-to-Folder sheet
+  needs real keystrokes — it is a guaranteed multi-call dead end. If one is already open on screen,
+  Escape it and use `open_file`.
+- EDITORS ARE MULTI-WINDOW, and every window has the SAME url — only the TITLE names the workspace.
+  `web_open(app="Cursor", url="/abs/folder")` now VERIFIES it reached that folder and says so
+  plainly if it didn't (it will not report a workspace it never reached). Trust that string over
+  the tree: a wrong-workspace window still returns a perfectly valid-looking tree. `web_tabs` lists
+  the windows by workspace; `web_switch_tab(i)` binds another. To move a BOUND window to a
+  different folder, drive it from inside: `web_act` key cmd+shift+p, type ">File: Open Recent",
+  click the row — that keeps the window CDP is attached to.
+- Hunch's CDP-driven Cursor/Chrome is a SEPARATE PROCESS from the user's own copy of that app, on
+  its own profile. `snapshot`/`act` (AX) may read the user's copy while `web_*` drives Hunch's —
+  same name, different windows. A snapshot says so with a `[!]` line when both are running; don't
+  cross the two layers on one app without checking which is which.
 - Drive a code editor's TERMINAL (Cursor / VS Code): the AX tree can READ an integrated terminal
   but CANNOT type into it — it's xterm.js, which reads real KEYSTROKES, so an AX `type` lands in a
   screen-reader mirror and silently does nothing (snapshot's set 'succeeds' but the shell never runs

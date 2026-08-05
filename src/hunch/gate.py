@@ -184,6 +184,27 @@ def applescript_hint(out):
     return ""
 
 
+def applescript_empty_hint(script):
+    """Why a script that SUCCEEDED returned nothing — or "" if there's no known reason.
+
+    An empty result is the worst kind of answer: the script ran, nothing failed, and the agent
+    can't tell 'no windows' from 'this question can't be answered this way'. The common case is
+    asking System Events for a Chromium/Electron app's windows: those apps vend their UI to the
+    AX API, not to System Events' scripting bridge, so `count of windows` is a truthful-looking 0
+    no matter how many windows are on screen. Retrying the same script (the natural next move,
+    and the one that wastes turns) can never return anything else."""
+    s = (script or "").lower()
+    if "system events" not in s:
+        return ""
+    if "window" in s and "process" in s:
+        return ("\n[!] This returned EMPTY, and re-running it will too. System Events only sees "
+                "windows of apps that expose them to its scripting bridge — a Chromium/Electron "
+                "app (Cursor, VS Code, Slack, Discord, Chrome) reports 0 windows here even with "
+                "many open. Read its windows through the AX layer instead: snapshot(app=...) for "
+                "the focused window, or web_tabs after web_open for the CDP-driven copy.")
+    return ""
+
+
 HUNCH_DIR = os.path.realpath(os.path.expanduser("~/.hunch"))
 
 

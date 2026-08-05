@@ -99,6 +99,57 @@ def _proc_has_force_ax(pid):
         return False
 
 
+def _proc_cmdline(pid):
+    try:
+        return subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
+                              capture_output=True, text=True, timeout=3).stdout
+    except Exception:
+        return ""
+
+
+def _twin_process_warning(app_name, pid):
+    """A one-line warning when SEVERAL processes share this app's name — one of them Hunch's own
+    CDP-driven copy (a browser/editor launched on a dedicated ~/.hunch profile).
+
+    `_resolve_app` has to pick one, and its pick is not the CDP session's: the AX tools then read
+    one 'Cursor' while web_snapshot/web_act drive another. Both look right in isolation, and every
+    read comes back with a real tree — of the wrong instance. That silent split is unrecoverable
+    from the tree alone, so it is called out on the snapshot itself.
+
+    Cached briefly: this runs on every snapshot, and the process set barely moves."""
+    hit = _twin_cache.get((app_name, pid))
+    if hit and time.time() - hit[0] < 30:
+        return hit[1]
+    try:
+        pids = [p for p in _pids_named(app_name) if p != pid]
+    except Exception:
+        return ""
+    msg = _twin_warning(app_name, pid, pids)
+    _twin_cache[(app_name, pid)] = (time.time(), msg)
+    return msg
+
+
+_twin_cache = {}
+
+
+def _twin_warning(app_name, pid, pids):
+    if not pids:
+        return ""
+    hunch_owned = [p for p in pids if "/.hunch/" in _proc_cmdline(p)]
+    mine = "/.hunch/" in _proc_cmdline(pid) if pid else False
+    if hunch_owned and not mine:
+        return (f"[!] {len(pids) + 1} processes named {app_name!r} are running. This tree is the "
+                f"USER's copy (pid {pid}). Hunch's own CDP-driven copy is pid "
+                f"{hunch_owned[0]} — the one web_snapshot/web_act drive. Acting here does NOT "
+                f"affect that window, and vice versa. Use web_snapshot for the Hunch copy.")
+    if mine:
+        return (f"[!] {len(pids) + 1} processes named {app_name!r} are running. This tree is "
+                f"HUNCH's CDP-driven copy (pid {pid}), not the user's own window.")
+    return (f"[!] {len(pids) + 1} processes named {app_name!r} are running (pids "
+            f"{', '.join(str(p) for p in [pid] + pids if p)}); this tree is pid {pid}. If it shows "
+            f"the wrong window, the other process is the one you want.")
+
+
 def _norm_app_name(s):
     """Fold an app name for matching. Some apps prepend invisible bidi/zero-width marks to their
     display name (WhatsApp's localizedName is really '\\u200eWhatsApp'), so an exact == against what
@@ -465,6 +516,9 @@ class MacSession:
         if err is not None:
             return err
         lines = [f"=== {app_name} — focused window (snapshot #{self.snapshot_count}) ==="]
+        warn = _twin_process_warning(app_name, getattr(self, "_pid", None))
+        if warn:
+            lines.append(warn)
         budget = {"left": max_nodes, "hit": False}
         self._walk(win, 0, "", lines, compact, max_depth, budget, max_children=max_children)
         if budget["hit"]:
@@ -713,6 +767,10 @@ class MacSession:
 
     # press-like actions worth trying when AXPress isn't offered, in order
     _PRESS_ALTERNATIVES = ("AXOpen", "AXConfirm", "AXPick", "AXShowDefaultUI")
+    # AXShowDefaultUI is the weakest of those: on a LIST ROW it only expands/collapses the
+    # disclosure — it never opens or selects the row, yet it reports success, so a file row in an
+    # Open panel "clicks" forever without anything happening. Never offer it for row-ish roles.
+    _NO_SHOW_DEFAULT_UI = ("AXRow", "AXCell", "AXOutline", "AXColumn", "AXTable")
     # AXPress on these returns success WITHOUT doing anything — a lie that makes
     # the agent believe it toggled something (observed on System Settings labels)
     _INERT_ROLES = ("AXStaticText", "AXImage")
@@ -733,7 +791,12 @@ class MacSession:
             return "pressed"
         actions = ax.get_actions(el)
         for name in self._PRESS_ALTERNATIVES:
+            if name == "AXShowDefaultUI" and role in self._NO_SHOW_DEFAULT_UI:
+                continue
             if name in actions and AXUIElementPerformAction(el, name) == 0:
+                if name == "AXShowDefaultUI":
+                    return ("performed AXShowDefaultUI — this only REVEALS an element's default "
+                            "UI, it is NOT a press, so nothing was opened or chosen — on")
                 return f"performed {name}"
         if role in ("AXCheckBox", "AXRadioButton") or sub in ("AXSwitch", "AXToggle"):
             try:
@@ -810,11 +873,31 @@ class MacSession:
     def select(self, ref):
         """Select the element via AX (list rows, table cells, selectable items) —
         occlusion-proof. A general primitive; the agent decides when selection vs
-        a press is the right move for the surface it sees."""
+        a press is the right move for the surface it sees.
+
+        The write is VERIFIED by reading AXSelected back: several containers (notably the
+        file browser in a native Open/Save panel) accept the write, return success, and stay
+        unselected — the panel tracks selection on the PARENT's AXSelectedRows/AXSelectedChildren,
+        not the row. An unverified 'selected' there reads as done while the panel's Open button
+        stays disabled, with nothing to explain the contradiction."""
         el = self._el(ref)
-        if AXUIElementSetAttributeValue(el, "AXSelected", True) == 0:
+        if AXUIElementSetAttributeValue(el, "AXSelected", True) != 0:
+            return f"{ref} is not selectable"
+        time.sleep(0.1)
+        if ax.get_attr(el, "AXSelected"):
             return f"selected {ref}"
-        return f"{ref} is not selectable"
+        # Accepted-then-dropped: try the container, which is what actually owns the selection.
+        parent = ax.get_attr(el, "AXParent")
+        if parent is not None:
+            for attr in ("AXSelectedRows", "AXSelectedChildren"):
+                if AXUIElementSetAttributeValue(parent, attr, [el]) == 0:
+                    time.sleep(0.1)
+                    if ax.get_attr(el, "AXSelected"):
+                        return f"selected {ref} (via its container's {attr})"
+        return (f"{ref}: the AX select was ACCEPTED BUT DROPPED — it is still not selected, so "
+                f"anything gated on the selection (an Open/Choose button) will stay disabled. "
+                f"This is typical of a native Open/Save panel. Don't drive that panel: cancel it "
+                f"(Escape) and open the path directly with open_file(path, app=...).")
 
     def right_click(self, ref, allow_pixel=True):
         """Open an element's context menu — AXShowMenu if it exposes one (occlusion-

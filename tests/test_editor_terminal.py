@@ -104,6 +104,180 @@ def test_pick_workbench_skips_agents_side_panel():
     assert cdp._pick_workbench([]) is None
 
 
+WB = "vscode-file://vscode-app/.../electron-sandbox/workbench/workbench.html"
+
+
+def _win(i, title):
+    return {"id": str(i), "title": title, "url": WB}
+
+
+def test_pick_workbench_prefers_the_requested_folder():
+    """The regression that cost a whole session: an editor instance holds several windows (it
+    restores the last session's on launch), so 'the first workbench' is a coin flip. Asked for a
+    folder, _pick_workbench must return the window actually holding it — not window order."""
+    pages = [_win(1, "a3_q1_solution.html — C63"), _win(2, "hunch"), _win(3, "notes — hunch-mcp")]
+    assert cdp._pick_workbench(pages, "/Users/me/hunch")["id"] == "2"
+    # a similar-but-different folder name must NOT match ('hunch-mcp' is not 'hunch')
+    assert cdp._pick_workbench(pages, "/Users/me/hunch-mcp")["id"] == "3"
+    # trailing slash, and a folder whose window is open with a file focused
+    assert cdp._pick_workbench(pages, "/Users/me/hunch/")["id"] == "2"
+    assert cdp._pick_workbench(pages, "/Users/me/C63")["id"] == "1"
+    # no window has it -> falls back to a real workbench, and the CALLER must not claim success
+    assert cdp._pick_workbench(pages, "/Users/me/absent")["id"] == "1"
+    # no folder asked for -> unchanged first-workbench behaviour
+    assert cdp._pick_workbench(pages)["id"] == "1"
+
+
+def test_title_matching_is_dash_delimited_not_substring():
+    assert cdp._title_matches("a3.html — C63", "/x/C63") is True
+    assert cdp._title_matches("hunch", "/x/hunch") is True
+    # a hyphenated folder name must not be split into pieces
+    assert cdp._title_matches("my-project — Cursor", "/x/my-project") is True
+    assert cdp._title_matches("my-project — Cursor", "/x/my") is False
+    # substring of a longer workspace name is not a match
+    assert cdp._title_matches("hunch-mcp", "/x/hunch") is False
+    assert cdp._title_matches("", "/x/hunch") is False
+    assert cdp._title_matches("hunch", "") is False
+
+
+def test_title_workspace():
+    assert cdp._title_workspace("a3_q1_solution.html — C63") == "C63"
+    assert cdp._title_workspace("hunch") == "hunch"
+    assert cdp._title_workspace("") == ""
+
+
+class _FakeTargets(cdp.CDPSession):
+    """A session whose target list and websocket binding are stubbed."""
+
+    def __init__(self, pages):
+        super().__init__(port=0)
+        self._pages = pages
+        self.bound = []
+
+    def _list_page_targets(self):
+        return self._pages
+
+    def _open_ws(self, page):
+        self.target_id = page.get("id")
+        self.bound.append(page.get("id"))
+
+
+def test_bind_workspace_binds_the_matching_window_and_pins_it():
+    s = _FakeTargets([_win(1, "a3.html — C63"), _win(2, "README.md — hunch")])
+    s.target_id = "1"
+    assert s.bind_workspace("/Users/me/hunch", timeout=0) is True
+    assert s.target_id == "2"
+    assert s.pinned == "/Users/me/hunch"
+
+
+def test_bind_workspace_reports_failure_instead_of_binding_something_else():
+    """The window isn't there. Returning True on the nearest window is what produced a
+    confident 'opened Cursor on ~/hunch' while the session drove an unrelated project."""
+    s = _FakeTargets([_win(1, "a3.html — C63")])
+    s.target_id = "1"
+    assert s.bind_workspace("/Users/me/hunch", timeout=0) is False
+    assert s.pinned is None
+    assert s.bound == []
+
+
+def test_editor_session_does_not_auto_follow_new_windows():
+    """Browsers should follow a newly opened tab; an editor must NOT — a new target there is
+    another window or a side panel, and following it silently moves the agent off its workspace."""
+    s = _FakeTargets([_win(1, "README.md — hunch")])
+    s.editor = True
+    s.target_id = "1"
+    s._known_targets = {"1"}
+    s._pages = [_win(1, "README.md — hunch"), _win(2, "Cursor Agents")]
+    assert s._follow_new_tab() is False
+    assert s.target_id == "1"
+
+
+def test_editor_session_rebinds_when_its_own_window_closes():
+    s = _FakeTargets([_win(1, "README.md — hunch")])
+    s.editor = True
+    s.pinned = "/Users/me/hunch"
+    s.target_id = "9"          # our window is gone
+    s._known_targets = {"9"}
+    assert s._follow_new_tab() is True
+    assert s.target_id == "1"
+
+
+# ── web.open(editor) must verify the workspace, never assert it ────────────────
+class _StubEditorSession:
+    def __init__(self, workspace, opens_on_request=None):
+        self._ws = workspace
+        self._opens_on_request = opens_on_request   # workspace it switches to when asked
+        self.pinned = None
+        self.editor = True
+        self.binds = 0
+
+    def wait_ready(self):
+        return True
+
+    def workspace(self):
+        return self._ws
+
+    def windows(self):
+        return [{"index": 0, "title": self._ws, "workspace": self._ws, "current": True}]
+
+    def bind_workspace(self, folder, timeout=12):
+        self.binds += 1
+        if cdp._title_matches(self._ws, folder):
+            self.pinned = folder
+            return True
+        return False
+
+
+class _StubEditorComputer:
+    def __init__(self, session):
+        self.session = session
+
+    def snapshot(self):
+        return "[e1] window\n[e2] .xterm terminal"
+
+
+def _web_with(session, monkeypatch):
+    """A real Web object running the real _open_editor, with only the CDP launch stubbed."""
+    from hunch import sdk
+    web = object.__new__(sdk.Web)
+    web.close = lambda: None
+    monkeypatch.setattr(cdp, "CDPComputer", lambda *a, **k: _StubEditorComputer(session))
+    return web
+
+
+def test_open_editor_refuses_to_claim_a_workspace_it_never_reached(monkeypatch, tmp_path):
+    """The exact regression: the instance is live on someone else's project, the requested folder
+    is dropped, and the old code answered 'opened Cursor on /Users/me/hunch'."""
+    folder = tmp_path / "hunch"
+    folder.mkdir()
+    session = _StubEditorSession("C63")               # never switches
+    web = _web_with(session, monkeypatch)
+    monkeypatch.setattr(cdp, "open_folder_in_editor", lambda *a, **k: True)
+    out = web._open_editor(folder=str(folder), app="Cursor")
+    assert "could NOT open" in out and "C63" in out
+    assert "opened Cursor" not in out
+    assert session.binds == 2                          # tried, handed the folder over, retried
+
+
+def test_open_editor_reports_success_only_once_bound(monkeypatch, tmp_path):
+    folder = tmp_path / "hunch"
+    folder.mkdir()
+    session = _StubEditorSession("hunch")
+    web = _web_with(session, monkeypatch)
+    out = web._open_editor(folder=str(folder), app="Cursor")
+    assert out.startswith("opened Cursor on ")
+    assert session.pinned == str(folder)
+    assert session.binds == 1                          # matched first try, no extra window
+
+
+def test_open_editor_rejects_a_missing_path_before_launching(monkeypatch, tmp_path):
+    session = _StubEditorSession("C63")
+    web = _web_with(session, monkeypatch)
+    out = web._open_editor(folder=str(tmp_path / "nope"), app="Cursor")
+    assert "no such path" in out
+    assert session.binds == 0                          # nothing launched, nothing polled
+
+
 class _RecordingSession(cdp.CDPSession):
     """A CDPSession that records CDP commands instead of hitting a socket, and answers the
     xterm-detection probe as configured."""

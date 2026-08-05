@@ -120,6 +120,41 @@ def test_domain_mismatch_guard():
             server._mac.web._computer = old_comp
 
 
+# ── wrong-target guards ────────────────────────────────────────────────────────
+def test_applescript_empty_result_explains_electron_zero_windows():
+    """`count of windows` via System Events returns 0 for any Electron app, however many are
+    open. Without a reason the natural move is to retry the same script, which can never work."""
+    from hunch import gate
+    hint = gate.applescript_empty_hint(
+        'tell application "System Events" to tell process "Cursor" to count of windows')
+    assert "Electron" in hint and "snapshot(app=" in hint
+    # unrelated scripts get no noise
+    assert gate.applescript_empty_hint('tell application "Music" to play') == ""
+    assert gate.applescript_empty_hint('tell application "System Events" to keystroke "a"') == ""
+
+
+def test_twin_process_warning_names_which_copy_the_tree_is(monkeypatch):
+    """Hunch's CDP-driven Cursor and the user's own are two processes with one name: the AX
+    tools can read one while web_* drives the other, both looking perfectly valid."""
+    from hunch import local_mac as lm
+    lm._twin_cache.clear()
+    monkeypatch.setattr(lm, "_pids_named", lambda n: [111, 222])
+    monkeypatch.setattr(lm, "_proc_cmdline",
+                        lambda pid: "Cursor --user-data-dir=/Users/x/.hunch/cursor-cdp"
+                        if pid == 222 else "Cursor")
+    warn = lm._twin_process_warning("Cursor", 111)
+    assert "USER's copy" in warn and "222" in warn and "web_snapshot" in warn
+
+    lm._twin_cache.clear()
+    warn_hunch = lm._twin_process_warning("Cursor", 222)
+    assert "HUNCH's CDP-driven copy" in warn_hunch
+
+    # single process -> silent
+    lm._twin_cache.clear()
+    monkeypatch.setattr(lm, "_pids_named", lambda n: [111])
+    assert lm._twin_process_warning("Cursor", 111) == ""
+
+
 if __name__ == "__main__":
     mod = sys.modules[__name__]
     for name in sorted(n for n in dir(mod) if n.startswith("test_")):
