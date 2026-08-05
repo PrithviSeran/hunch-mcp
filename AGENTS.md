@@ -119,6 +119,40 @@ resort. Concretely:
   in-process SwiftUI view graph would need code injection, which SIP/hardened-runtime blocks for
   system apps.
 
+## Wrong-target traps (multi-window / multi-process) — read before touching `cdp.py`
+
+An agent can only ever see *a* tree. It cannot tell a tree of the **wrong window** from the right
+one, so every layer that picks a target must verify the pick and say so when it fails. A whole
+session was lost to these, all of them reported as success:
+
+- **An editor is multi-window, and every window has the same url** (`workbench.html`). Only the
+  **title** names the workspace (`"a3.html — C63"` → `C63`). `_pick_workbench(pages, folder)` takes
+  the folder and prefers the window that actually holds it; `_title_matches` splits on the em/en
+  dash **only** — never a hyphen, or `my-project` matches `my`.
+- **A folder passed to `launch_chromium` is seen only by a COLD start.** A live instance is reused
+  (`"reusing CDP instance already on :port"`) and the `url` argument is dropped on the floor. The
+  browser path hides this by calling `navigate()` after; the editor path had no equivalent, so
+  `web_open(app="Cursor", url=X)` kept whatever workspace was already up **and reported X**.
+  `Web._open_editor` now calls `bind_workspace(folder)`, hands the folder to the live instance via
+  `open_folder_in_editor` (a second `open -na` with the same `--user-data-dir`; Electron's per-
+  profile singleton forwards the argv instead of starting a rival), retries, and **refuses to name
+  a workspace it never reached**.
+- **Never auto-follow a new target on an editor session.** `_follow_new_tab` exists for a browser
+  popping a tab. On an editor, a new target is another window or a side panel — following it moves
+  the agent off its workspace silently. Editor sessions only re-bind when their own window dies.
+- **Hunch's CDP copy of an app and the user's own copy are two processes with one name.**
+  `_resolve_app` picks one for the AX tools; the CDP session is on the other. Both return valid
+  trees of different windows. `snapshot` prepends a `[!]` line naming which copy it read
+  (`_twin_process_warning`, 30 s cached — it shells out to `pgrep`/`ps`).
+- **System Events reports 0 windows for any Electron app**, however many are open — its scripting
+  bridge isn't the AX API. An empty AppleScript result now carries that explanation
+  (`gate.applescript_empty_hint`) because the natural next move is to retry the same script.
+- **Never drive a native Open/Save panel.** Rows there accept `AXSelected` and stay unselected (the
+  panel tracks selection on the parent's `AXSelectedRows`), so the Open button never enables, and
+  `AXShowDefaultUI` on a row only toggles its disclosure while reporting success. `select()` reads
+  the write back and tries the container; `_ax_fire` skips `AXShowDefaultUI` for row-ish roles. The
+  playbook routes this to `open_file(path, app=...)` — one call, no panel.
+
 ## Frontmost detection — a real trap
 
 **Never use `NSWorkspace.frontmostApplication()` to read the current front app in this codebase.**

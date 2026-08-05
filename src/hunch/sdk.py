@@ -274,7 +274,8 @@ class Hunch:
                 raise ApprovalDenied("user did not approve the AppleScript")
         ok, out = os_ops.run_applescript(script)
         if ok:
-            return out
+            hint = "" if out else gate.applescript_empty_hint(script)
+            return f"(no output){hint}" if hint else out
         return f"AppleScript error: {out[:600]}{gate.applescript_hint(out)}"
 
     def notify(self, message, title=None):
@@ -417,8 +418,14 @@ class Web:
         profile+port, so the user's own editor is untouched. The integrated terminal becomes
         focus-free-typeable (act 'type' on the terminal element, or key ctrl+` to open one)."""
         import os as _os
-        from .cdp import CDPComputer, editor_target
+        from .cdp import CDPComputer, editor_target, open_folder_in_editor
         port, profile, real = editor_target(app)
+        # Check the path BEFORE launching anything: a typo'd folder otherwise costs a launch plus
+        # ~40s of polling for a window that can never appear, and ends in a vague failure.
+        if folder and not _os.path.exists(_os.path.expanduser(folder)):
+            return (f"no such path: {folder!r} — nothing was opened. Check it exists (and is the "
+                    f"folder you meant) before opening it in {real}.")
+        folder = _os.path.abspath(_os.path.expanduser(folder)) if folder else folder
         _os.makedirs(profile, exist_ok=True)
         self.close()
         try:
@@ -430,6 +437,20 @@ class Web:
                              "web.restart() recovers a stale instance") from e
         s = self._computer.session
         s.wait_ready()
+        if folder:
+            # VERIFY, never assume. A live editor instance is REUSED as-is, so the folder passed at
+            # launch is silently dropped and the session lands on whatever window that instance
+            # already had (commonly a workspace restored from a previous session). Reporting the
+            # requested folder here — without checking — is what sent the agent driving a stranger's
+            # project for a dozen turns while every message said it was on the right one.
+            # Generous first wait: a cold editor renders its workbench (and so gets its title)
+            # seconds after the debug port binds, and opening a duplicate window is the cost of
+            # giving up early.
+            if not s.bind_workspace(folder, timeout=12):
+                open_folder_in_editor(real, profile, folder)   # hand the folder to the live instance
+                s.bind_workspace(folder, timeout=30)
+            if not s.pinned:
+                return self._editor_mismatch(real, folder, s)
         snap = self._computer.snapshot()
         where = f" on {folder}" if folder else ""
         has_term = ".xterm" in snap or "xterm-helper" in snap
@@ -438,6 +459,22 @@ class Web:
                "No terminal open yet — act key ctrl+` to open one, web_snapshot, then 'type' into it.")
         return (f"opened {real}{where} over CDP ({snap.count('[e')} elements), focus-free — a "
                 f"dedicated Hunch editor window, separate from your own. {tip}")
+
+    @staticmethod
+    def _editor_mismatch(real, folder, s):
+        """The requested folder never came up. Say so plainly, name what IS open, and hand over the
+        one recovery that works — driving the bound window's own Open Recent. Never dress a
+        wrong-workspace session up as a success: the agent cannot tell from the tree alone."""
+        wins = s.windows()
+        have = ", ".join("[{}] {!r}".format(w["index"], w["workspace"] or w["title"])
+                         for w in wins) or "none"
+        return (f"could NOT open {folder!r} in {real} — this session is on workspace "
+                f"{s.workspace()!r}, NOT the folder you asked for. Do not act on this window "
+                f"expecting {folder!r}. Its open windows: {have}. "
+                f"Recovery, in order: web_switch_tab(i) if one of those windows IS the folder; "
+                f"otherwise switch THIS window's workspace from inside it — web_act key "
+                f"cmd+shift+p, type '>File: Open Recent', click the folder's row (that keeps the "
+                f"window CDP is bound to, which opening a new window does not).")
 
     def login(self, url="", app="Google Chrome"):
         """Open a background, banner-tagged window for the HUMAN to sign in once (Hunch
@@ -500,8 +537,19 @@ class Web:
         return base64.b64decode(data)
 
     def tabs(self):
-        """Open tabs as '[index]* title — url' lines (* = current)."""
-        tabs = self._session().tabs()
+        """Open tabs as '[index]* title — url' lines (* = current). For an EDITOR these are
+        WINDOWS, listed by WORKSPACE: they all share one workbench.html url, so the url column
+        (what this used to print) could not tell two projects apart."""
+        s = self._session()
+        if getattr(s, "editor", False):
+            wins = s.windows()
+            if not wins:
+                return "no editor windows"
+            return ("editor WINDOWS — each is its own workspace; web_switch_tab(i) binds one:\n"
+                    + "\n".join(f"[{w['index']}]{'*' if w['current'] else ' '} {w['title']}"
+                                + (f"   [workspace: {w['workspace']}]" if w['workspace'] else "")
+                                for w in wins))
+        tabs = s.tabs()
         if not tabs:
             return "no open tabs"
         return "\n".join(f"[{t['index']}]{'*' if t['current'] else ' '} {t['title']} — {t['url']}"

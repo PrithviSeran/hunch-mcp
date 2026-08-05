@@ -110,15 +110,63 @@ def editor_target(app):
 # Precise titles (not bare 'agents') so a workspace folder literally named "agents" isn't excluded.
 _EDITOR_SIDE_PANELS = ("cursor agents",)
 
+# VS Code-family window titles are em/en-dash separated: "<file> — <workspace>" (or bare
+# "<workspace>" for an empty editor). Split on the dash ONLY, never a hyphen — plenty of real
+# folders are named "my-project".
+_TITLE_SEP = re.compile(r"\s+[—–]\s+")
 
-def _pick_workbench(pages):
+
+def _title_segments(title):
+    return [s.strip() for s in _TITLE_SEP.split((title or "").strip()) if s.strip()]
+
+
+def _title_workspace(title):
+    """The workspace segment of an editor window title ('a3.html — C63' -> 'C63'). The window's
+    workspace is what identifies it — an editor instance can hold several windows on different
+    folders, and they are indistinguishable by url (all workbench.html)."""
+    segs = _title_segments(title)
+    return segs[-1] if segs else ""
+
+
+def _title_matches(title, path):
+    """True if an editor window title names `path` — as its workspace (a folder) or as its open
+    file. Basename comparison: the title never carries the full path."""
+    base = os.path.basename(os.path.normpath(path or ""))
+    if not base or base in (".", "/"):
+        return False
+    return base.casefold() in [s.casefold() for s in _title_segments(title)]
+
+
+def _pick_workbench(pages, folder=None):
     """From an editor's page targets, choose the real editor window: a workbench.html target whose
     title is NOT a side panel (Cursor's 'Cursor Agents', etc.). Returns None if none qualify yet —
     the workbench target can lag the side panel at startup, so callers poll on this (and fall back
-    to pages[0] only after the timeout)."""
+    to pages[0] only after the timeout).
+
+    With `folder`, a window whose title names that folder WINS. One editor instance commonly has
+    several windows open (and restores the previous session's on launch), so 'the first workbench'
+    is a coin flip — that is how web_open ended up driving a stale, unrelated workspace while
+    reporting the requested one."""
     wb = [p for p in (pages or []) if "workbench.html" in (p.get("url", "") or "")]
     main = [p for p in wb if not any(s in (p.get("title", "") or "").lower() for s in _EDITOR_SIDE_PANELS)]
+    if folder:
+        hit = [p for p in main if _title_matches(p.get("title"), folder)]
+        if hit:
+            return hit[0]
     return (main or [None])[0]
+
+
+def open_folder_in_editor(app, profile, folder, background=True):
+    """Ask an ALREADY-RUNNING Hunch editor instance to open `folder` in a new window.
+
+    Electron keeps ONE instance per --user-data-dir, so this second launch hands its argv to the
+    running instance and exits, instead of starting a rival that would fight for the profile lock.
+    This is the only way to change what a live instance has open: a folder passed at LAUNCH is seen
+    only by a cold start — `launch_chromium` reuses a live instance and never replays it."""
+    cmd = ["open"] + (["-g"] if background else []) + \
+          ["-na", app, "--args", f"--user-data-dir={profile}", folder]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    return proc.returncode == 0
 
 
 def _wait_for_port(port, timeout=15):
@@ -232,6 +280,8 @@ class CDPSession:
         self.snapshot_count = 0
         self.target_id = None       # the page target this session's ws is bound to
         self._known_targets = set()  # target ids we've already seen (to detect NEW tabs)
+        self.editor = False         # driving an Electron editor (multi-window) vs a browser
+        self.pinned = None          # editor: the folder this session is deliberately bound to
 
     def _list_page_targets(self):
         """All page (tab/window) targets on this debug port. Chrome reports the most recently
@@ -264,9 +314,10 @@ class CDPSession:
             except Exception:
                 pass
 
-    def connect(self, timeout=10, editor=False):
+    def connect(self, timeout=10, editor=False, folder=None):
         end = time.time() + timeout
         pages = []
+        self.editor = bool(editor)
         while time.time() < end and not (pages if not editor else _pick_workbench(pages)):
             pages = self._list_page_targets()
             if not pages or (editor and not _pick_workbench(pages)):
@@ -275,8 +326,9 @@ class CDPSession:
             raise RuntimeError(f"no CDP page target on :{self.port} — is the app launched with --remote-debugging-port?")
         # An editor exposes SEVERAL page targets that share the same workbench.html url — the real
         # editor window AND side panels like Cursor's "Agents" (title 'Cursor Agents'). They differ
-        # only by title, so bind the editor window (has the tree + terminal), not a side panel.
-        target = _pick_workbench(pages) or pages[0] if editor else pages[0]
+        # only by title, so bind the editor window (has the tree + terminal), not a side panel —
+        # and, when a folder was asked for, the window actually holding it.
+        target = _pick_workbench(pages, folder) or pages[0] if editor else pages[0]
         self._open_ws(target)
         self._known_targets = {p.get("id") for p in pages}
         return self
@@ -290,6 +342,20 @@ class CDPSession:
         if not pages:
             return False
         ids = {p.get("id") for p in pages}
+        if self.editor:
+            # An editor is MULTI-WINDOW: a new target is another window or a side panel the user
+            # (or the editor itself) opened — never a page we navigated to. Auto-following one
+            # would silently move the session off the workspace we were told to drive, which is
+            # exactly how a read of "the hunch window" came back with someone else's project.
+            # Only re-bind if our own window is gone.
+            self._known_targets = ids
+            if self.target_id in ids:
+                return False
+            hit = _pick_workbench(pages, self.pinned)
+            if hit is None:
+                return False
+            self._open_ws(hit)
+            return True
         new_pages = [p for p in pages if p.get("id") not in self._known_targets]
         switched = False
         if new_pages:
@@ -300,6 +366,39 @@ class CDPSession:
             switched = True
         self._known_targets = ids
         return switched
+
+    def workspace(self):
+        """The workspace/folder this session's editor window is on (from its live title)."""
+        return _title_workspace(self.title())
+
+    def bind_workspace(self, folder, timeout=12):
+        """Bind this session to the editor WINDOW that holds `folder`, polling until it appears.
+        Returns True once bound, False if no such window exists within `timeout`.
+
+        Editors are multi-window and every window shares the same workbench.html url, so a session
+        must be pinned by TITLE. Callers use the False return to actually open the folder (see
+        open_folder_in_editor) rather than reporting a workspace they never reached."""
+        end = time.time() + timeout
+        while True:
+            pages = self._list_page_targets()
+            hit = _pick_workbench(pages, folder)
+            if hit is not None and _title_matches(hit.get("title"), folder):
+                if hit.get("id") != self.target_id:
+                    self._open_ws(hit)
+                self._known_targets = {p.get("id") for p in pages}
+                self.pinned = folder
+                return True
+            if time.time() >= end:
+                return False
+            time.sleep(0.5)
+
+    def windows(self):
+        """The editor's real windows (workbench targets), newest first, with their workspace."""
+        return [{"index": i, "title": (p.get("title") or "")[:80],
+                 "workspace": _title_workspace(p.get("title")),
+                 "current": p.get("id") == self.target_id}
+                for i, p in enumerate(self._list_page_targets())
+                if "workbench.html" in (p.get("url", "") or "")]
 
     def tabs(self):
         pages = self._list_page_targets()
@@ -723,11 +822,13 @@ class CDPComputer:
         self.editor = editor
         self.tools = CDP_TOOLS
         self.session = None
+        self.launch_note = ""
         if connect:
-            launch_chromium(app, port, url=url, background=background, isolated=isolated,
-                            profile=profile, editor=editor)
+            self.launch_note = launch_chromium(app, port, url=url, background=background,
+                                               isolated=isolated, profile=profile, editor=editor)
             # editors expose several page targets — bind the workbench (holds the tree + terminal)
-            self.session = CDPSession(port).connect(editor=editor)
+            self.session = CDPSession(port).connect(editor=editor,
+                                                    folder=url if editor else None)
 
     def snapshot(self):
         return self.session.snapshot()[0]

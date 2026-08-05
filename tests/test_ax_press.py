@@ -305,3 +305,73 @@ def test_mouse_drag_posts_down_moves_up(monkeypatch):
     assert kinds[-1] == lm.Quartz.kCGEventLeftMouseUp
     assert kinds.count(lm.Quartz.kCGEventLeftMouseDragged) == 4     # intermediate motion
     assert events[0][1] == (0, 0) and events[-1][1] == (100, 200)   # correct endpoints
+
+
+# ── phantom-success guards (from a session lost inside Cursor's Open panel) ─────
+def test_show_default_ui_is_never_offered_for_a_row(monkeypatch):
+    """AXShowDefaultUI on a file row in an Open panel only toggles its disclosure — it opens
+    nothing, yet reports success, so the row 'clicks' forever with no effect. Rows must skip it."""
+    performed = []
+
+    def _perform(el, a):
+        if a == "AXPress":
+            return -25200
+        performed.append(a)
+        return 0
+
+    monkeypatch.setattr(lm, "AXUIElementPerformAction", _perform)
+    monkeypatch.setattr(ax, "get_actions", lambda el: ["AXShowDefaultUI"])
+    monkeypatch.setattr(ax, "get_attrs", lambda el, attrs: {
+        ax.kAXRoleAttribute: "AXRow", "AXSubrole": "", lm.kAXValueAttribute: None})
+    assert _bare_session()._ax_fire("el") is None
+    assert performed == []
+
+
+def test_show_default_ui_elsewhere_says_it_is_not_a_press(monkeypatch):
+    monkeypatch.setattr(lm, "AXUIElementPerformAction",
+                        lambda el, a: 0 if a == "AXShowDefaultUI" else -25200)
+    monkeypatch.setattr(ax, "get_actions", lambda el: ["AXShowDefaultUI"])
+    monkeypatch.setattr(ax, "get_attrs", lambda el, attrs: {
+        ax.kAXRoleAttribute: "AXGroup", "AXSubrole": "", lm.kAXValueAttribute: None})
+    msg = _bare_session()._ax_fire("el")
+    assert "NOT a press" in msg and "nothing was opened" in msg
+
+
+def _select_session():
+    s = _bare_session()
+    s.registry = {"e1": "el"}
+    return s
+
+
+def test_select_verifies_the_write_landed(monkeypatch):
+    monkeypatch.setattr(lm, "AXUIElementSetAttributeValue", lambda el, attr, v: 0)
+    monkeypatch.setattr(ax, "get_attr", lambda el, attr: True)
+    monkeypatch.setattr(lm.time, "sleep", lambda s: None)
+    assert _select_session().select("e1") == "selected e1"
+
+
+def test_select_reports_an_accepted_but_dropped_write(monkeypatch):
+    """A native Open panel returns success for AXSelected and leaves the row unselected — the
+    panel's Open button then stays disabled with nothing explaining why."""
+    monkeypatch.setattr(lm, "AXUIElementSetAttributeValue", lambda el, attr, v: 0)
+    monkeypatch.setattr(ax, "get_attr", lambda el, attr: None)
+    monkeypatch.setattr(lm.time, "sleep", lambda s: None)
+    msg = _select_session().select("e1")
+    assert "ACCEPTED BUT DROPPED" in msg
+    assert "open_file" in msg          # steers to the one-call path instead of the panel
+
+
+def test_select_falls_back_to_the_container_selection(monkeypatch):
+    """Some lists track selection on the parent's AXSelectedRows, not on the row itself."""
+    state = {"sel": False}
+
+    def _set(el, attr, v):
+        if attr == "AXSelectedRows":
+            state["sel"] = True
+        return 0
+
+    monkeypatch.setattr(lm, "AXUIElementSetAttributeValue", _set)
+    monkeypatch.setattr(ax, "get_attr",
+                        lambda el, attr: "parent" if attr == "AXParent" else state["sel"])
+    monkeypatch.setattr(lm.time, "sleep", lambda s: None)
+    assert _select_session().select("e1") == "selected e1 (via its container's AXSelectedRows)"
