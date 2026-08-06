@@ -286,6 +286,14 @@ _MAX_NODES = 3000          # default node budget for a FULL-window walk
 _MAX_DEPTH = 18            # default depth for a FULL-window walk
 _SCOPED_MAX_NODES = 10000  # defaults for scoped (ref=) subtree walks and find()
 _SCOPED_MAX_DEPTH = 100    # "full depth" while still guarding Python recursion
+# HARD recursion guard, independent of max_depth. max_depth counts only EMITTED
+# nodes (scaffolding is walked "for free" so the visible tree isn't dominated by
+# wrapper groups), so a long enough chain of uninteresting containers recurses
+# without ever advancing `depth`. The node budget is then the only backstop, and
+# with _MAX_NODES=3000 > CPython's 1000-frame limit it loses the race: a real
+# System Settings pane raised RecursionError mid-walk and killed snapshot()
+# outright (2026-08-06). Truncate here instead — a capped tree beats a crash.
+_MAX_RECURSION = 300
 _NODES_CEILING = 50000     # hard safety ceiling everywhere
 _MAX_CHILDREN = 200        # per-node sibling cap for a FULL-window walk (marked + recoverable)
 _SCOPED_MAX_CHILDREN = 1000  # raised cap for scoped (ref=) walks and find(): page a big list in
@@ -693,8 +701,13 @@ class MacSession:
                       "app": app_name, "matches": len(results), "searched": searched[0]}
 
     def _walk(self, el, depth, parent_key, lines, compact, max_depth, budget, sib=None,
-              root_key=None, max_children=_MAX_CHILDREN):
+              root_key=None, max_children=_MAX_CHILDREN, raw_depth=0):
         if budget["left"] <= 0:
+            budget["hit"] = True
+            return
+        if raw_depth >= _MAX_RECURSION:
+            # Every frame counts here, emitted or not — see _MAX_RECURSION.
+            lines.append("  " * depth + "…(nesting limit reached — subtree not walked)")
             budget["hit"] = True
             return
         budget["left"] -= 1
@@ -739,7 +752,7 @@ class MacSession:
         child_sib = {}
         for child in list(children)[:max_children]:
             self._walk(child, depth_out, key, lines, compact, max_depth, budget, child_sib,
-                       max_children=max_children)
+                       max_children=max_children, raw_depth=raw_depth + 1)
         if len(children) > max_children:
             # Recoverable, like the depth/node caps: give the truncated container a
             # ref (mint one if it wasn't emitted — a list container is usually
