@@ -14,7 +14,7 @@ from .base import Backend
 __all__ = ["Backend", "NAMES", "get", "available", "meta", "provider_names"]
 
 # Ordered: 'auto' resolution prefers earlier entries when several are usable.
-NAMES = ("api", "subscription", "codex")
+NAMES = ("api", "subscription", "codex", "ollama")
 
 
 def get(name):
@@ -29,6 +29,9 @@ def get(name):
     if name == "codex":
         from .codex import CodexBackend
         return CodexBackend
+    if name == "ollama":
+        from .ollama import OllamaBackend
+        return OllamaBackend
     from ..errors import HunchError
     raise HunchError(f"unknown backend {name!r} — use "
                      + ", ".join(repr(n) for n in NAMES) + ", or 'auto'")
