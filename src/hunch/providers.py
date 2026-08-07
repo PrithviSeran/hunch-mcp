@@ -16,7 +16,9 @@ Standalone, without a Mac instance (e.g. a setup script):
 
 Only SUBSCRIPTION / login transports are exposed — metered API keys are intentionally
 left out for now (they add confusion and nobody drives Hunch on their own key). Each
-provider therefore maps to exactly one login-based agent backend.
+provider therefore maps to exactly one login-based agent backend. The exception is
+'ollama' (a local model): it has no account at all, so its auth surface is a
+server-reachability check rather than a sign-in.
 
 To add a vendor: subclass Provider, implement login/logout/status/make_backend, and
 register it in PROVIDERS. Nothing else in the SDK needs to learn the new name.
@@ -136,7 +138,44 @@ class CodexProvider(Provider):
         return CodexBackend.deps_installed()
 
 
-PROVIDERS = {"claude": ClaudeProvider, "codex": CodexProvider}
+class OllamaProvider(Provider):
+    """A local model served by Ollama — no account, so the auth surface degrades to a
+    server-reachability check: login() verifies the daemon answers (raising with the
+    fix when it doesn't), status() reports reachable-as-signed-in, logout() is a no-op."""
+
+    name = "ollama"
+    extra = ""                      # stdlib transport; nothing to install
+
+    def _reachable(self):
+        from .backends.ollama import OllamaBackend
+        return OllamaBackend.available()
+
+    def login(self, **kwargs):
+        from .backends.ollama import OllamaBackend
+        if not self._reachable():
+            raise HunchError(f"no Ollama server at {OllamaBackend._host()} — start it "
+                             "with `ollama serve` (or install: brew install ollama)")
+        return self.status()
+
+    def logout(self, **kwargs):
+        return None                 # nothing to sign out of
+
+    def status(self, **kwargs):
+        from .backends.ollama import OllamaBackend
+        up = self._reachable()
+        return AuthStatus("ollama", up, "local" if up else None,
+                          plan=OllamaBackend.default_model if up else None)
+
+    def make_backend(self, hunch, *, auth=None, app_id=None, can_use_tool=None):
+        from .backends.ollama import OllamaBackend
+        return OllamaBackend(hunch, app_id=app_id, can_use_tool=can_use_tool)
+
+    @classmethod
+    def deps_installed(cls):
+        return True
+
+
+PROVIDERS = {"claude": ClaudeProvider, "codex": CodexProvider, "ollama": OllamaProvider}
 
 
 def names():
