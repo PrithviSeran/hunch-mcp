@@ -144,6 +144,37 @@ def test_usage_accumulates_and_reset_clears():
     assert b.messages == []
 
 
+def test_chat_retries_transient_http_errors(monkeypatch):
+    # qwen3.5's tool-template parse flake: Ollama 500s once, then the retry lands.
+    import io
+    attempts = []
+    def flaky_urlopen(req, timeout=None):
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise urllib.error.HTTPError(
+                "u", 500, "err", {},
+                io.BytesIO(b'{"error": "XML syntax error on line 5"}'))
+        class _R:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return b'{"message": {"role": "assistant", "content": "hi"}}'
+        return _R()
+    monkeypatch.setattr("urllib.request.urlopen", flaky_urlopen)
+    out = OllamaBackend(_FakeHunch())._chat({"model": "m"})
+    assert out["message"]["content"] == "hi" and len(attempts) == 3
+
+
+def test_chat_gives_up_after_retries(monkeypatch):
+    import io
+    def always_500(req, timeout=None):
+        raise urllib.error.HTTPError("u", 500, "err", {},
+                                     io.BytesIO(b'{"error": "XML syntax error"}'))
+    monkeypatch.setattr("urllib.request.urlopen", always_500)
+    with pytest.raises(HunchError) as e:
+        OllamaBackend(_FakeHunch())._chat({"model": "m"})
+    assert "XML syntax error" in str(e.value)
+
+
 def test_no_server_raises_friendly_hint(monkeypatch):
     b = OllamaBackend(_FakeHunch())
     monkeypatch.setattr(

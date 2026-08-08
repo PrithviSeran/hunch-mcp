@@ -91,29 +91,36 @@ class OllamaBackend(Backend):
                               "parameters": t["input_schema"]}}
                 for t in AGENT_TOOLS]
 
-    def _chat(self, body):
+    def _chat(self, body, _attempts=3):
         """POST one /api/chat turn and return the decoded response — the single live
         transport touch-point (override in tests). Timeout is generous: a cold model
-        load plus a long prefill on Apple Silicon can take minutes."""
-        req = urllib.request.Request(
-            self._host() + "/api/chat", data=json.dumps(body).encode(),
-            headers={"Content-Type": "application/json"})
-        try:
-            with urllib.request.urlopen(req, timeout=600) as r:
-                return json.loads(r.read())
-        except urllib.error.HTTPError as e:
-            detail = ""
+        load plus a long prefill on Apple Silicon can take minutes. Transient HTTP
+        errors are retried: qwen3.5's tool-call XML template occasionally fails to
+        parse a single generation and Ollama 500s ('element <function> closed by
+        </parameter>', seen 2026-08-08) — a per-request fluke that must not kill the
+        whole episode."""
+        for attempt in range(_attempts):
+            req = urllib.request.Request(
+                self._host() + "/api/chat", data=json.dumps(body).encode(),
+                headers={"Content-Type": "application/json"})
             try:
-                detail = json.loads(e.read()).get("error", "")
-            except Exception:
-                pass
-            if "not found" in detail.lower():
-                raise HunchError(f"Ollama has no model {body['model']!r} — pull it with: "
-                                 f"ollama pull {body['model']}") from e
-            raise HunchError(f"ollama request failed: {detail or e}") from e
-        except urllib.error.URLError as e:
-            raise HunchError(f"no Ollama server at {self._host()} — start it with "
-                             "`ollama serve` (or install: brew install ollama)") from e
+                with urllib.request.urlopen(req, timeout=600) as r:
+                    return json.loads(r.read())
+            except urllib.error.HTTPError as e:
+                detail = ""
+                try:
+                    detail = json.loads(e.read()).get("error", "")
+                except Exception:
+                    pass
+                if "not found" in detail.lower():
+                    raise HunchError(f"Ollama has no model {body['model']!r} — pull it "
+                                     f"with: ollama pull {body['model']}") from e
+                if attempt < _attempts - 1:
+                    continue
+                raise HunchError(f"ollama request failed: {detail or e}") from e
+            except urllib.error.URLError as e:
+                raise HunchError(f"no Ollama server at {self._host()} — start it with "
+                                 "`ollama serve` (or install: brew install ollama)") from e
 
     def _body(self, model, system):
         return {"model": model, "stream": False, "think": False,
