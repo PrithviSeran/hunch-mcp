@@ -103,19 +103,37 @@ def test_fallback_parses_prose_tool_call(monkeypatch):
 
 
 def test_fallback_ignores_non_tool_json(monkeypatch):
-    b = _backend([_msg('the config is ```json\n{"volume": 11}\n``` — done')],
-                 monkeypatch=monkeypatch)
+    # 3 identical responses: the no-tool-call reply is nudged twice, then accepted.
+    resp = _msg('the config is ```json\n{"volume": 11}\n``` — done')
+    b = _backend([resp, resp, resp], monkeypatch=monkeypatch)
     r = b.run("read config")
     assert b._calls == [] and r.stop_reason == "end_turn"
-    assert r.usage["fallback_tool_calls"] == 0
+    assert r.usage["fallback_tool_calls"] == 0 and r.usage["continue_nudges"] == 2
 
 
 def test_strict_disables_fallback(monkeypatch):
     monkeypatch.setenv("HUNCH_OLLAMA_STRICT", "1")
     prose = '```json\n{"name": "list_apps", "arguments": {}}\n```'
-    b = _backend([_msg(prose)], monkeypatch=monkeypatch)
+    resp = _msg(prose)
+    b = _backend([resp, resp, resp], monkeypatch=monkeypatch)
     r = b.run("apps?")
     assert b._calls == [] and r.stop_reason == "end_turn"
+
+
+def test_announce_without_act_is_nudged(monkeypatch):
+    # The measured 04/12 failure: a plan narration with no tool call must be pushed
+    # back into acting, and the nudge counted.
+    b = _backend([
+        _msg("I'll read the file and copy the total."),
+        _msg(tool_calls=[{"function": {"name": "list_apps", "arguments": {}}}]),
+        _msg("done"),
+    ], monkeypatch=monkeypatch)
+    r = b.run("do it")
+    assert b._calls == [("list_apps", {})]
+    assert r.usage["continue_nudges"] == 1 and r.text == "done" and not r.aborted
+    # once a tool has run, a no-call response ends the episode (no further nudge)
+    assert [m["content"] for m in b.messages if m.get("role") == "user"][1].startswith(
+        "You have not called any tool")
 
 
 def test_screenshot_bytes_ride_images_channel(monkeypatch):
@@ -136,9 +154,10 @@ def test_max_turns_aborts(monkeypatch):
 
 
 def test_usage_accumulates_and_reset_clears():
-    b = _backend([{**_msg("hi"), "prompt_eval_count": 100, "eval_count": 7}])
+    resp = {**_msg("hi"), "prompt_eval_count": 100, "eval_count": 7}
+    b = _backend([resp, resp, resp])       # nudged twice, so three requests total
     r = b.run("hello")
-    assert (r.usage["input_tokens"], r.usage["output_tokens"]) == (100, 7)
+    assert (r.usage["input_tokens"], r.usage["output_tokens"]) == (300, 21)
     assert b.messages          # conversation kept for continuation
     b.reset()
     assert b.messages == []

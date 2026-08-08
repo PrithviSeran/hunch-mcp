@@ -198,8 +198,10 @@ class OllamaBackend(Backend):
         strict = os.environ.get("HUNCH_OLLAMA_STRICT") == "1"
 
         self.messages.append({"role": "user", "content": task})
-        usage = {"input_tokens": 0, "output_tokens": 0, "fallback_tool_calls": 0}
+        usage = {"input_tokens": 0, "output_tokens": 0, "fallback_tool_calls": 0,
+                 "continue_nudges": 0}
         stop_reason, final_text, aborted, turn = "max_turns", "", True, 0
+        acted = False                  # any tool call dispatched this run
         self._abort = False
 
         for turn in range(1, max_turns + 1):
@@ -223,9 +225,22 @@ class OllamaBackend(Backend):
                 calls = self._fallback_calls(text)
                 usage["fallback_tool_calls"] += len(calls)
             if calls:
+                acted = True
                 # ALL results appended before the next request, mirroring ApiBackend
                 for c in calls:
                     self.messages.append(self._run_tool(c["name"], c["arguments"], emit))
+                continue
+
+            # Announce-without-act: small local models sometimes narrate the plan and
+            # stop before any tool call (also seen when Ollama drops a generation's
+            # malformed tool-call XML, leaving only prose). Ending there scores a
+            # formatting fluke as a task failure, so push back — bounded and COUNTED
+            # (usage['continue_nudges']) to keep the measurement honest.
+            if not acted and usage["continue_nudges"] < 2:
+                usage["continue_nudges"] += 1
+                self.messages.append({"role": "user", "content":
+                                      "You have not called any tool yet. Do not describe "
+                                      "the plan — act now by calling a tool."})
                 continue
 
             stop_reason, final_text, aborted = "end_turn", text, False
