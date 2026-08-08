@@ -197,6 +197,39 @@ def test_cap_semantics():
     assert _cap_nodes(999999, 3000) == 50000
 
 
+def test_deep_scaffolding_does_not_blow_the_stack():
+    """A long chain of UNINTERESTING containers must truncate, not RecursionError.
+
+    max_depth only advances on EMITTED nodes, so scaffolding is walked for free
+    — which means a deep enough chain recurses with `depth` pinned at 0 and the
+    node budget (3000) as the only backstop, well past CPython's 1000-frame
+    limit. A real System Settings pane hit exactly this and killed snapshot()
+    (2026-08-06). _MAX_RECURSION must stop it first.
+    """
+    root = FakeEl("AXGroup")          # AXGroup with no title/value: never emitted
+    tip = root
+    for _ in range(1500):
+        child = FakeEl("AXGroup")
+        tip.children.append(child)
+        tip = child
+    tip.children.append(FakeEl("AXButton", title="Deep"))
+
+    with _patched(Fetcher()):
+        out = _snapshot_tree(_session(), root)   # must not raise
+    assert "nesting limit reached" in out
+    # and the guard must fire well below CPython's limit
+    assert local_mac._MAX_RECURSION < 1000
+
+
+def test_shallow_tree_unaffected_by_recursion_guard():
+    """The guard must not perturb ordinary trees."""
+    root = FakeEl("AXWindow", title="W", children=[
+        FakeEl("AXGroup", children=[FakeEl("AXButton", title="OK")])])
+    with _patched(Fetcher()):
+        out = _snapshot_tree(_session(), root)
+    assert "OK" in out and "nesting limit" not in out
+
+
 def test_cdp_truncation_marker():
     from hunch.cdp import CDPSession
     s = CDPSession.__new__(CDPSession)
