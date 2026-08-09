@@ -51,6 +51,13 @@ _mac = Hunch(
     policy="personal",        # ~/.hunch/config.json live + HUNCH_NO_INTERNAL_GATE, as always
     check_permissions=False,  # AX problems surface per-tool, not at import
     notify=_notify,           # keeps the app-mode banner suppression
+    # HUNCH_SIMULTANEOUS=1 starts the server with the hard focus-free guarantee:
+    # no pixel-click fallback, and shared keyboard/cursor actions are refused
+    # rather than performed. Previously this could only be turned on by the AGENT
+    # calling simultaneous_mode() mid-session, so any embedder — or benchmark —
+    # that forgot inherited an agent free to grab the user's cursor. Making it
+    # settable at startup lets the operator, not the model, own that promise.
+    simultaneous=bool(os.environ.get("HUNCH_SIMULTANEOUS")),
 )
 _gate = _mac._gate            # single Gate: approval state behaves as the old module globals
 _as_str = gate.as_str         # kept aliases (tests + external callers)

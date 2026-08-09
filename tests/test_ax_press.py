@@ -102,6 +102,136 @@ def test_ax_activate_finds_inner_control(monkeypatch):
     assert msg == "pressed (inner control)"
 
 
+def test_click_axrow_false_press_reports_no_navigation(monkeypatch):
+    """System Settings sidebar: AXPress returns success but the pane title does
+    not change — click() must say so instead of claiming a navigation."""
+    s = _bare_session()
+    s.registry = {"e17": "row"}
+    s._pid = 1
+    titles = iter(["Wallpaper", "Wallpaper", "Wallpaper"])  # before, after press, after select
+    monkeypatch.setattr(ax, "get_attr", lambda el, attr:
+                        "AXRow" if attr == ax.kAXRoleAttribute else None)
+    monkeypatch.setattr(lm.MacSession, "_focused_window_title",
+                        lambda self: next(titles))
+    monkeypatch.setattr(lm.MacSession, "_ax_activate", lambda self, el: "pressed")
+    monkeypatch.setattr(lm, "AXUIElementSetAttributeValue", lambda el, attr, v: 0)
+    monkeypatch.setattr(lm.time, "sleep", lambda s: None)
+    out = s.click("e17")
+    assert "no navigation" in out and "Wallpaper" in out
+    assert "Do not retry the same click" in out
+
+
+def test_click_axrow_select_fallback_when_press_lies(monkeypatch):
+    """When AXPress is a no-op, selecting the row can still navigate — report that."""
+    s = _bare_session()
+    s.registry = {"e14": "row"}
+    s._pid = 1
+    titles = iter(["Wallpaper", "Wallpaper", "Accessibility"])
+    monkeypatch.setattr(ax, "get_attr", lambda el, attr:
+                        "AXRow" if attr == ax.kAXRoleAttribute else None)
+    monkeypatch.setattr(lm.MacSession, "_focused_window_title",
+                        lambda self: next(titles))
+    monkeypatch.setattr(lm.MacSession, "_ax_activate", lambda self, el: "pressed")
+    monkeypatch.setattr(lm, "AXUIElementSetAttributeValue", lambda el, attr, v: 0)
+    monkeypatch.setattr(lm.time, "sleep", lambda s: None)
+    out = s.click("e14")
+    assert "selected e14" in out and "Accessibility" in out
+
+
+def test_click_axrow_real_nav_reports_pressed(monkeypatch):
+    """When the pane title actually changes after AXPress, treat it as success —
+    no select fallback, no 'no navigation' warning."""
+    s = _bare_session()
+    s.registry = {"e3": "row"}
+    s._pid = 1
+    titles = iter(["Wallpaper", "Accessibility"])
+    monkeypatch.setattr(ax, "get_attr", lambda el, attr:
+                        "AXRow" if attr == ax.kAXRoleAttribute else None)
+    monkeypatch.setattr(lm.MacSession, "_focused_window_title",
+                        lambda self: next(titles))
+    monkeypatch.setattr(lm.MacSession, "_ax_activate", lambda self, el: "pressed")
+    monkeypatch.setattr(lm.time, "sleep", lambda s: None)
+    selects = []
+    monkeypatch.setattr(lm, "AXUIElementSetAttributeValue",
+                        lambda el, attr, v: selects.append(attr) or 0)
+    out = s.click("e3")
+    assert out == "pressed e3"
+    assert "no navigation" not in out
+    assert selects == []  # title already changed — don't poke AXSelected
+
+
+def test_click_non_row_skips_title_verify(monkeypatch):
+    """Buttons/switches keep the old path — no window-title probe."""
+    s = _bare_session()
+    s.registry = {"e9": "btn"}
+    titles = []
+    monkeypatch.setattr(ax, "get_attr", lambda el, attr:
+                        "AXButton" if attr == ax.kAXRoleAttribute else None)
+    monkeypatch.setattr(lm.MacSession, "_focused_window_title",
+                        lambda self: titles.append("x") or "x")
+    monkeypatch.setattr(lm.MacSession, "_ax_activate", lambda self, el: "pressed")
+    out = s.click("e9")
+    assert out == "pressed e9"
+    assert titles == []
+
+
+def test_coerce_actions_accepts_json_string():
+    """Local models sometimes pass actions as a JSON string, not an array."""
+    ok, err = lm.LocalComputer._coerce_actions(
+        '[{"action":"click","ref":"e12"}]')
+    assert err is None and ok == [{"action": "click", "ref": "e12"}]
+
+
+def test_coerce_actions_accepts_list_of_dicts():
+    actions = [{"action": "click", "ref": "e1"}]
+    ok, err = lm.LocalComputer._coerce_actions(actions)
+    assert err is None and ok is actions
+
+
+def test_coerce_actions_rejects_garbage_string():
+    """Unparseable stringified actions (e.g. ref:e17 without quotes) get a clear
+    error — never `'str' object has no attribute 'get'`."""
+    ok, err = lm.LocalComputer._coerce_actions(
+        '[{"action":"click","ref":e17}]')  # invalid JSON
+    assert ok is None and "array of objects" in err
+
+
+def test_coerce_actions_rejects_non_list_and_bad_items():
+    ok, err = lm.LocalComputer._coerce_actions({"action": "click"})
+    assert ok is None and "array of objects" in err
+    ok, err = lm.LocalComputer._coerce_actions(["click", {"action": "click"}])
+    assert ok is None and "each item must be an object" in err
+
+
+def test_act_string_actions_do_not_crash(monkeypatch):
+    lc = object.__new__(lm.LocalComputer)
+    lc.simultaneous = True
+    lc.session = _bare_session()
+    lc._last_snap = "=== Fake ===\n"
+    monkeypatch.setattr(lm.LocalComputer, "snapshot", lambda self, **k: "=== Fake ===\n")
+    monkeypatch.setattr(lm.time, "sleep", lambda s: None)
+    out = lc.act('[{"action":"click","ref":e17}]')  # the exact 2026-08-08 failure shape
+    assert "array of objects" in out
+    assert "attribute 'get'" not in out
+
+
+def test_act_parses_valid_json_string_and_runs(monkeypatch):
+    """A well-formed stringified array must coerce and execute, not error."""
+    lc = object.__new__(lm.LocalComputer)
+    lc.simultaneous = True
+    lc.session = _bare_session()
+    lc.session.disturbances = {"pixel_clicks": 0, "keystrokes": 0, "key_combos": 0,
+                               "app_raises": 0, "drags": 0}
+    lc._last_snap = "=== Fake ===\n"
+    clicks = []
+    monkeypatch.setattr(lm.LocalComputer, "snapshot", lambda self, **k: "=== Fake ===\n")
+    monkeypatch.setattr(lm.MacSession, "click", lambda self, ref, **k: clicks.append(ref) or f"pressed {ref}")
+    monkeypatch.setattr(lm.time, "sleep", lambda s: None)
+    out = lc.act('[{"action":"click","ref":"e12"}]')
+    assert clicks == ["e12"]
+    assert "pressed e12" in out
+
+
 def test_click_pixel_fallback_refuses_without_activation(monkeypatch):
     """No AX vocabulary anywhere and the app can't be raised: the click must be
     refused — never post cursor events blind."""

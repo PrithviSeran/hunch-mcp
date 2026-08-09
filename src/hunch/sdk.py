@@ -138,6 +138,10 @@ class Hunch:
         self._computer = LocalComputer(app=app, simultaneous=simultaneous,
                                        max_depth=snapshot_max_depth,
                                        max_nodes=snapshot_max_nodes)
+        # Last app aim'd by focus_app / launch_app / snapshot(app=...). Empty
+        # snapshot() prefers this over frontmost so a bare snapshot after
+        # focus_app("System Settings") does not silently read Cursor.
+        self._aimed_app = None
         # Namespaced defaults (names only — same semantics): derived CDP port + profile.
         if app_id and cdp_port is None:
             import zlib
@@ -169,19 +173,25 @@ class Hunch:
 
     def snapshot(self, app="", ref=None, max_depth=None, max_nodes=None, max_children=None):
         """The app's focused window as a ref-annotated accessibility tree (focus-free).
-        Empty `app` targets the frontmost app. Pass ref="e42" to expand ONLY that
-        element's subtree at full depth (other refs stay valid). Truncation is never
-        silent: capped output ends in an explicit …marker naming the ref to expand.
-        max_children raises the per-node sibling cap to page a big list in."""
+        Empty `app` targets the last aimed app (focus_app / launch_app /
+        snapshot(app=...)), else the frontmost app. Pass ref="e42" to expand ONLY
+        that element's subtree at full depth (other refs stay valid). Truncation is
+        never silent: capped output ends in an explicit …marker naming the ref to
+        expand. max_children raises the per-node sibling cap to page a big list in."""
         if ref is not None:
             return self._computer.snapshot(ref=ref, max_depth=max_depth, max_nodes=max_nodes,
                                            max_children=max_children)
-        prev = self._computer.app
-        self._computer.app = app or _frontmost()
+        prev, prev_aimed = self._computer.app, self._aimed_app
+        if app:
+            self._computer.app = app
+            self._aimed_app = app
+        else:
+            self._computer.app = self._aimed_app or _frontmost()
         out = self._computer.snapshot(max_depth=max_depth, max_nodes=max_nodes,
                                       max_children=max_children)
         if isinstance(out, str) and out.startswith("(app '") and "not found" in out:
-            self._computer.app = prev   # a failed target must not poison later calls
+            # a failed target must not poison later calls
+            self._computer.app, self._aimed_app = prev, prev_aimed
         return out
 
     def find(self, role=None, name_contains=None, app="", max_results=20):
@@ -189,12 +199,15 @@ class Hunch:
         return only matching elements, each with an actable [ref]. role is
         case-insensitive with the AX prefix optional ("button" == AXButton);
         name_contains matches title/description/value as a substring."""
-        prev = self._computer.app
+        prev, prev_aimed = self._computer.app, self._aimed_app
         if app:
             self._computer.app = app
+            self._aimed_app = app
+        elif self._aimed_app:
+            self._computer.app = self._aimed_app
         out = self._computer.find(role=role, name_contains=name_contains, max_results=max_results)
         if isinstance(out, str) and out.startswith("(app '") and "not found" in out:
-            self._computer.app = prev
+            self._computer.app, self._aimed_app = prev, prev_aimed
         return out
 
     def act(self, actions, reason="", confirm=False):
@@ -202,6 +215,12 @@ class Hunch:
         menu/key/click_xy by ref) and return the updated tree. Focus-stealing actions are
         gated; a user refusal raises ApprovalDenied. StaleRef means re-snapshot.
         confirm=True skips the dialog (the user already approved out-of-band)."""
+        # Coerce before the focus-steal gate so a stringified actions payload
+        # (local-model failure mode) does not blow up on a.get inside the gate.
+        coerced, bad = LocalComputer._coerce_actions(actions)
+        if bad:
+            return bad
+        actions = coerced
         blocked = gate.check_focus_steal(self._computer, actions, self._gate,
                                          confirm=confirm, reason=reason)
         if blocked:
@@ -230,6 +249,7 @@ class Hunch:
         set_focus_reason(reason)
         msg = _launch_app(name, force_accessibility, background=self._computer.simultaneous)
         self._computer.app = name
+        self._aimed_app = name
         refs = self._computer.snapshot().count("[e")
         return (f"{msg}; accessibility tree has {refs} elements"
                 + ("" if refs > 15 else
@@ -246,6 +266,7 @@ class Hunch:
         set_focus_reason(reason)
         msg = _focus_app(name)
         self._computer.app = name
+        self._aimed_app = name
         return msg
 
     @property

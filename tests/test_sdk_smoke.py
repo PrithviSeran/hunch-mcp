@@ -309,6 +309,97 @@ def test_simultaneous_property():
     assert h._computer.simultaneous is True
 
 
+def test_snapshot_empty_app_prefers_aimed_after_focus(monkeypatch):
+    """Regression (AX-nav sweep 2026-08-08): after focus_app('System Settings'),
+    a bare snapshot() must NOT silently read the frontmost app (often Cursor)."""
+    h = _client()
+    seen = []
+
+    def fake_snapshot(self, ref=None, max_depth=None, max_nodes=None, max_children=None):
+        seen.append(self.app)
+        return f"=== {self.app} — focused window (snapshot #1) ===\n"
+
+    monkeypatch.setattr(h._computer.__class__, "snapshot", fake_snapshot)
+    monkeypatch.setattr(hunch.sdk, "_frontmost", lambda: "Cursor")
+    monkeypatch.setattr(hunch.sdk, "_focus_app", lambda name: f"focused {name}")
+    h.focus_app("System Settings", reason="test")
+    out = h.snapshot()  # empty app
+    assert seen[-1] == "System Settings"
+    assert "System Settings" in out
+    # Explicit app still wins, and retargets aim.
+    h.snapshot(app="Notes")
+    assert seen[-1] == "Notes"
+    h.snapshot()
+    assert seen[-1] == "Notes"
+
+
+def test_find_and_launch_also_set_aimed_app(monkeypatch):
+    h = _client()
+    seen = []
+
+    def fake_snapshot(self, ref=None, max_depth=None, max_nodes=None, max_children=None):
+        seen.append(("snap", self.app))
+        return f"=== {self.app} ===\n[e1] AXButton\n"
+
+    def fake_find(self, role=None, name_contains=None, max_results=20):
+        seen.append(("find", self.app))
+        return f"[e1] in {self.app}"
+
+    monkeypatch.setattr(h._computer.__class__, "snapshot", fake_snapshot)
+    monkeypatch.setattr(h._computer.__class__, "find", fake_find)
+    monkeypatch.setattr(hunch.sdk, "_frontmost", lambda: "Cursor")
+    monkeypatch.setattr(hunch.sdk, "_launch_app",
+                        lambda name, force=False, background=False: f"launched {name}")
+    h.launch_app("Mail", reason="test")
+    assert h._aimed_app == "Mail"
+    h.find(role="button")  # bare find → aimed Mail, not Cursor
+    assert seen[-1] == ("find", "Mail")
+    h.find(role="button", app="Notes")
+    assert h._aimed_app == "Notes"
+    assert seen[-1] == ("find", "Notes")
+
+
+def test_failed_snapshot_does_not_poison_aimed_app(monkeypatch):
+    h = _client()
+    monkeypatch.setattr(hunch.sdk, "_frontmost", lambda: "Cursor")
+    monkeypatch.setattr(hunch.sdk, "_focus_app", lambda name: f"focused {name}")
+    h.focus_app("System Settings", reason="test")
+
+    def boom(self, ref=None, max_depth=None, max_nodes=None, max_children=None):
+        return "(app 'BogusApp' not found — is it running?)"
+
+    monkeypatch.setattr(h._computer.__class__, "snapshot", boom)
+    out = h.snapshot(app="BogusApp")
+    assert "not found" in out
+    assert h._aimed_app == "System Settings"  # failed aim rolled back
+
+
+def test_sdk_act_coerces_string_before_focus_gate(monkeypatch):
+    """Stringified actions must fail with a clear message, not AttributeError
+    inside gate.check_focus_steal (a.get)."""
+    h = _client()
+    called = []
+
+    def boom(computer, actions, g, confirm=False, reason=""):
+        called.append(actions)
+        # Would have crashed pre-fix: for c in actions: a.get(...)
+        for a in actions:
+            a.get("action")
+        return None
+
+    monkeypatch.setattr(gate, "check_focus_steal", boom)
+    out = h.act('[{"action":"click","ref":e17}]')
+    assert "array of objects" in out
+    assert called == []  # never reached the gate
+
+
+def test_hunch_constructor_honors_simultaneous_flag():
+    """server.py wires HUNCH_SIMULTANEOUS into this constructor arg."""
+    h = Hunch(check_permissions=False, confirm="off", simultaneous=True)
+    assert h.simultaneous is True
+    assert h._computer.simultaneous is True
+
+
 if __name__ == "__main__":
     mod = sys.modules[__name__]
     for name in sorted(n for n in dir(mod) if n.startswith("test_")):
