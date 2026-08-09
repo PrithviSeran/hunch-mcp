@@ -12,6 +12,7 @@ Requires: Accessibility permission granted to the running process
 
 import os
 import base64
+import json
 import re
 import subprocess
 import tempfile
@@ -859,6 +860,21 @@ class MacSession:
             return self._ax_sweep(parent)
         return None
 
+    def _focused_window_title(self):
+        """Title of this session's focused/main window, or None if unreadable.
+        Used to catch SwiftUI 'AXPress success' lies on sidebar rows (System
+        Settings reports pressed while the pane title stays 'Wallpaper')."""
+        pid = getattr(self, "_pid", None)
+        if pid is None:
+            return None
+        try:
+            win = ax.get_window(AXUIElementCreateApplication(pid))
+            if win is None:
+                return None
+            return str(ax.get_attr(win, ax.kAXTitleAttribute) or "") or None
+        except Exception:  # noqa: BLE001 — best-effort signal only
+            return None
+
     def click(self, ref, allow_pixel=True):
         """Activate the element via the AX layer — occlusion-proof and no cursor
         movement: its own press action, a press-like alternative, a checkbox/switch
@@ -867,8 +883,28 @@ class MacSession:
         then only after deliberately raising the app, because a pixel click both
         moves the shared cursor and lands on whichever window is frontmost."""
         el = self._el(ref)
+        role = str(ax.get_attr(el, ax.kAXRoleAttribute) or "")
+        # Sidebar/list rows are the main SwiftUI false-success surface: AXPress
+        # returns 0 while the pane does not change. Capture the window title so
+        # we can refuse to call that a navigation.
+        before = self._focused_window_title() if role == "AXRow" else None
         msg = self._ax_activate(el)
         if msg:
+            if before is not None:
+                time.sleep(0.35)
+                after = self._focused_window_title()
+                if after == before:
+                    # Selection (not press) is what some sidebars actually honor.
+                    if AXUIElementSetAttributeValue(el, "AXSelected", True) == 0:
+                        time.sleep(0.35)
+                        after = self._focused_window_title()
+                        if after is not None and after != before:
+                            return (f"selected {ref} (navigated {before!r} → {after!r})")
+                    return (f"{msg} {ref} — no navigation: window still {before!r}. "
+                            f"AXPress reported success but the pane did not change "
+                            f"(common in System Settings / SwiftUI). Do not retry the "
+                            f"same click — try the View menu, a different control, or "
+                            f"select() the row.")
             return f"{msg} {ref}"
         if not allow_pixel:
             return f"{ref}: no AX press action; a pixel click would move the shared cursor — skipped"
@@ -1403,7 +1439,31 @@ class LocalComputer:
         x, y = a.get(f"{side}_x"), a.get(f"{side}_y")
         return (int(x), int(y)) if x is not None and y is not None else None
 
+    @staticmethod
+    def _coerce_actions(actions):
+        """Normalize `actions` to a list of dicts. Small local models (and some
+        providers) occasionally pass a JSON *string* instead of an array — iterating
+        that string made every char hit `.get` and raised
+        `'str' object has no attribute 'get'` (seen 2026-08-08 on qwen3.5:9b)."""
+        if isinstance(actions, str):
+            try:
+                actions = json.loads(actions)
+            except (json.JSONDecodeError, TypeError):
+                return None, ("actions must be an array of objects like "
+                              '[{"action":"click","ref":"e12"}], not a string — '
+                              "got a JSON string that doesn't parse. Re-send as a "
+                              "real array, not a stringified one.")
+        if not isinstance(actions, list):
+            return None, (f"actions must be an array of objects, got {type(actions).__name__}")
+        if any(not isinstance(a, dict) for a in actions):
+            return None, ("actions must be an array of objects like "
+                          '[{"action":"click","ref":"e12"}] — each item must be an object')
+        return actions, None
+
     def act(self, actions):
+        actions, bad = self._coerce_actions(actions)
+        if bad:
+            return bad
         sim = self.simultaneous
         _dist_before = dict(self.session.disturbances)
         # Only bring the app forward if the batch actually contains a focus-stealing action.
