@@ -30,7 +30,7 @@ def test_ax_fire_flips_switch_value_with_readback(monkeypatch):
     monkeypatch.setattr(lm, "AXUIElementSetAttributeValue",
                         lambda el, attr, v: state.update(v=v) or 0)
     monkeypatch.setattr(lm.time, "sleep", lambda s: None)
-    assert _bare_session()._ax_fire("el") == "toggled to 1"
+    assert _bare_session()._ax_fire("el") == "toggled to 1 (on)"
     assert state["v"] == 1
 
 
@@ -46,6 +46,51 @@ def test_ax_fire_rejects_dropped_value_write(monkeypatch):
     monkeypatch.setattr(lm, "AXUIElementSetAttributeValue", lambda el, attr, v: 0)
     monkeypatch.setattr(lm.time, "sleep", lambda s: None)
     assert _bare_session()._ax_fire("el") is None
+
+
+def test_ax_fire_does_not_trust_lying_checkbox_press(monkeypatch):
+    """AXPress success with unchanged value must fall through to a verified flip."""
+    state = {"v": 0}
+    monkeypatch.setattr(lm, "AXUIElementPerformAction", lambda el, a: 0)  # press "succeeds"
+    monkeypatch.setattr(ax, "get_actions", lambda el: [])
+    monkeypatch.setattr(ax, "get_attrs", lambda el, attrs: {
+        ax.kAXRoleAttribute: "AXCheckBox", "AXSubrole": "AXSwitch",
+        lm.kAXValueAttribute: state["v"]})
+    monkeypatch.setattr(ax, "get_attr", lambda el, attr: state["v"])  # value never changes on press
+    monkeypatch.setattr(lm, "AXUIElementSetAttributeValue",
+                        lambda el, attr, v: state.update(v=v) or 0)
+    monkeypatch.setattr(lm.time, "sleep", lambda s: None)
+    assert _bare_session()._ax_fire("el") == "toggled to 1 (on)"
+    assert state["v"] == 1
+
+
+def test_ax_fire_trusts_checkbox_press_when_value_flips(monkeypatch):
+    state = {"v": 0}
+
+    def _press(el, a):
+        state["v"] = 1
+        return 0
+
+    monkeypatch.setattr(lm, "AXUIElementPerformAction", _press)
+    monkeypatch.setattr(ax, "get_actions", lambda el: [])
+    monkeypatch.setattr(ax, "get_attrs", lambda el, attrs: {
+        ax.kAXRoleAttribute: "AXCheckBox", "AXSubrole": "",
+        lm.kAXValueAttribute: 0})
+    monkeypatch.setattr(ax, "get_attr", lambda el, attr: state["v"])
+    monkeypatch.setattr(lm.time, "sleep", lambda s: None)
+    assert _bare_session()._ax_fire("el") == "toggled to 1 (on)"
+
+
+def test_click_checkbox_failure_teaches_ax_path(monkeypatch):
+    """When AX can't flip a checkbox and pixel is refused, return a teaching string."""
+    s = _bare_session()
+    s.registry = {"e3": "box"}
+    monkeypatch.setattr(ax, "get_attr", lambda el, attr:
+                        "AXCheckBox" if attr == ax.kAXRoleAttribute else None)
+    monkeypatch.setattr(lm.MacSession, "_ax_activate", lambda self, el: None)
+    out = s.click("e3", allow_pixel=False)
+    assert "checkbox/switch did not change" in out
+    assert "val='0'" in out and "defaults write" in out
 
 
 def test_ax_fire_prefers_alternative_action_over_toggle(monkeypatch):
@@ -71,23 +116,32 @@ def test_static_text_press_success_is_not_trusted(monkeypatch):
 def test_label_ref_finds_sibling_switch_via_parent(monkeypatch):
     """Ref is the row's LABEL; the switch is a sibling — parent sweep must find it."""
     roles = {"label": "AXStaticText", "row": "AXGroup", "switch": "AXCheckBox"}
+    state = {"v": 0}
     pressed = []
-    monkeypatch.setattr(lm, "AXUIElementPerformAction",
-                        lambda el, a: (pressed.append((el, a)) or 0)
-                        if el == "switch" and a == "AXPress" else -25200)
+
+    def _press(el, a):
+        if el == "switch" and a == "AXPress":
+            pressed.append((el, a))
+            state["v"] = 1
+            return 0
+        return -25200
+
+    monkeypatch.setattr(lm, "AXUIElementPerformAction", _press)
     monkeypatch.setattr(ax, "get_actions", lambda el: [])
     monkeypatch.setattr(ax, "get_attrs", lambda el, attrs: {
         ax.kAXRoleAttribute: roles.get(el, "AXGroup"),
         "AXSubrole": "AXSwitch" if el == "switch" else "",
-        lm.kAXValueAttribute: 1 if el == "switch" else None})
+        lm.kAXValueAttribute: state["v"] if el == "switch" else None})
     monkeypatch.setattr(ax, "get_attr", lambda el, attr:
                         "row" if (el, attr) == ("label", "AXParent")
                         else (["label", "switch"] if (el, attr) == ("row", "AXChildren")
-                              else ([] if attr == "AXChildren" else None)))
+                              else (state["v"] if (el, attr) == ("switch", lm.kAXValueAttribute)
+                                    else ([] if attr == "AXChildren" else None))))
+    monkeypatch.setattr(lm.time, "sleep", lambda s: None)
     msg = _bare_session()._ax_activate("label")
-    assert msg == "pressed (inner control)"
+    assert msg == "toggled to 1 (on) (inner control)"
     assert pressed == [("switch", "AXPress")]
-
+    assert state["v"] == 1
 
 def test_ax_activate_finds_inner_control(monkeypatch):
     """Ref lands on a wrapper row; the real pressable control is a child."""

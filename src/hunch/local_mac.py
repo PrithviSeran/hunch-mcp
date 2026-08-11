@@ -789,6 +789,15 @@ class MacSession:
     # the agent believe it toggled something (observed on System Settings labels)
     _INERT_ROLES = ("AXStaticText", "AXImage")
 
+    @staticmethod
+    def _toggle_msg(val):
+        """Human + machine-readable checkbox/switch outcome: val 0=off, 1=on."""
+        try:
+            v = int(val)
+        except (TypeError, ValueError):
+            return f"toggled to {val}"
+        return f"toggled to {v} ({'on' if v else 'off'})"
+
     def _ax_fire(self, el):
         """Trigger the element through its own AX vocabulary: AXPress, press-like
         alternative actions, then — for checkbox/switch roles — an AXValue flip
@@ -801,8 +810,26 @@ class MacSession:
         sub = str(a.get("AXSubrole") or "")
         if role in self._INERT_ROLES:
             return None
+        is_toggle = role in ("AXCheckBox", "AXRadioButton") or sub in ("AXSwitch", "AXToggle")
+        before_val = None
+        if is_toggle:
+            try:
+                before_val = int(a[kAXValueAttribute])
+            except (TypeError, ValueError):
+                before_val = None
         if AXUIElementPerformAction(el, "AXPress") == 0:
-            return "pressed"
+            if not is_toggle:
+                return "pressed"
+            # SwiftUI often reports AXPress success while the checkbox stays put —
+            # only trust a press when the value actually flipped.
+            time.sleep(0.15)
+            try:
+                after_val = int(ax.get_attr(el, kAXValueAttribute))
+            except (TypeError, ValueError):
+                after_val = None
+            if before_val is not None and after_val is not None and after_val != before_val:
+                return self._toggle_msg(after_val)
+            # fall through: try alternatives / verified AXValue write
         actions = ax.get_actions(el)
         for name in self._PRESS_ALTERNATIVES:
             if name == "AXShowDefaultUI" and role in self._NO_SHOW_DEFAULT_UI:
@@ -812,16 +839,17 @@ class MacSession:
                     return ("performed AXShowDefaultUI — this only REVEALS an element's default "
                             "UI, it is NOT a press, so nothing was opened or chosen — on")
                 return f"performed {name}"
-        if role in ("AXCheckBox", "AXRadioButton") or sub in ("AXSwitch", "AXToggle"):
+        if is_toggle:
             try:
-                new = 0 if int(a[kAXValueAttribute]) else 1
+                cur = before_val if before_val is not None else int(a[kAXValueAttribute])
+                new = 0 if cur else 1
             except (TypeError, ValueError):
                 new = 1
             if AXUIElementSetAttributeValue(el, kAXValueAttribute, new) == 0:
                 time.sleep(0.15)
                 try:
                     if int(ax.get_attr(el, kAXValueAttribute)) == new:
-                        return f"toggled to {new}"
+                        return self._toggle_msg(new)
                 except (TypeError, ValueError):
                     pass
         return None
@@ -906,7 +934,14 @@ class MacSession:
                             f"same click — try the View menu, a different control, or "
                             f"select() the row.")
             return f"{msg} {ref}"
+        is_toggle = role in ("AXCheckBox", "AXRadioButton")
         if not allow_pixel:
+            if is_toggle:
+                return (f"{ref}: checkbox/switch did not change via AX (press reported success "
+                        f"without a value flip, or AXValue write was dropped — common in SwiftUI "
+                        f"System Settings). Re-snapshot: val='0' is OFF, val='1' is ON. If this "
+                        f"ref is a label, act on the sibling AXCheckBox. Do NOT use defaults write "
+                        f"or AppleScript for System Settings toggles.")
             return f"{ref}: no AX press action; a pixel click would move the shared cursor — skipped"
         c = self._center(el)
         if c is None:

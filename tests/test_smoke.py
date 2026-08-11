@@ -133,6 +133,26 @@ def test_applescript_empty_result_explains_electron_zero_windows():
     assert gate.applescript_empty_hint('tell application "System Events" to keystroke "a"') == ""
 
 
+def test_applescript_settings_refusal_blocks_defaults_and_ui_script():
+    """Freeze miss mode: agents invent defaults write / System Events clicks for Settings."""
+    from hunch import gate
+    msg = gate.applescript_settings_refusal(
+        'do shell script "defaults write com.apple.dock launchanim -bool true"')
+    assert msg and msg.startswith("REFUSED") and "AXCheckBox" in msg
+    msg2 = gate.applescript_settings_refusal(
+        'tell application "System Events" to tell process "System Settings" to click checkbox 1')
+    assert msg2 and msg2.startswith("REFUSED") and "snapshot" in msg2
+    assert gate.applescript_settings_refusal('tell application "Music" to play') is None
+
+
+def test_playbook_covers_toggle_and_select_policy():
+    from hunch.playbook import HUNCH_PLAYBOOK
+    pb = HUNCH_PLAYBOOK
+    assert "val='0'" in pb and "val='1'" in pb
+    assert "defaults write" in pb
+    assert "VISIBLE TEXT" in pb
+
+
 def test_twin_process_warning_names_which_copy_the_tree_is(monkeypatch):
     """Hunch's CDP-driven Cursor and the user's own are two processes with one name: the AX
     tools can read one while web_* drives the other, both looking perfectly valid."""

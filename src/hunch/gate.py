@@ -205,6 +205,27 @@ def applescript_empty_hint(script):
     return ""
 
 
+def applescript_settings_refusal(script):
+    """REFUSED string if the script tries to flip System Settings via defaults/UI scripting,
+    else None. Those panes are SwiftUI; snapshot/find/act on the AXCheckBox is the reliable path
+    (and defaults keys are easy to invent wrong while the pane stays unchanged)."""
+    s = (script or "").lower()
+    if "defaults write" in s:
+        return ("REFUSED: don't use `defaults write` (via AppleScript / do shell script) to flip "
+                "System Settings, Accessibility, Dock, or similar toggles — the preference key is "
+                "easy to get wrong and the Settings pane won't match. Use "
+                "snapshot(app='System Settings') + find + act click on the AXCheckBox, then "
+                "re-snapshot and confirm val='1' (on) or val='0' (off).")
+    settings_app = ("system settings" in s or "system preferences" in s)
+    ui_drive = ("system events" in s and any(k in s for k in (
+        "click", "checkbox", "radio button", "set value", "keystroke")))
+    if settings_app and ui_drive:
+        return ("REFUSED: don't UI-script System Settings / System Preferences via AppleScript — "
+                "SwiftUI panes don't respond reliably. Use snapshot/find/act on the AXCheckBox "
+                "instead, and verify val flipped to 0 (off) or 1 (on).")
+    return None
+
+
 HUNCH_DIR = os.path.realpath(os.path.expanduser("~/.hunch"))
 
 

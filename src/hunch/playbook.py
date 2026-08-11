@@ -58,6 +58,13 @@ LAYERS (most-direct first):
    it. Only if the tree stays empty even after the force relaunch is the app truly locked — see below.
 
 KEY WORKFLOWS:
+- TOGGLES / CHECKBOXES (System Settings, Accessibility, …): in the tree, `AXCheckBox val='0'` means
+  OFF and `val='1'` means ON — never invent other meanings. Prefer `find` / `snapshot` to locate the
+  control (or its label's sibling checkbox), then `act` click that ref. ALWAYS re-`snapshot` (or read
+  the act delta) and confirm the value flipped before declaring done. Do NOT use `defaults write`,
+  `do shell script`, or AppleScript UI-clicks to flip System Settings — those paths are refused and
+  often write the wrong key while the pane stays unchanged. Sidebar rows (Spotlight, Motion, …): if
+  click reports "no navigation", `select` the row or use the View menu — do not grind the same click.
 - Sign into a site: `web_login(app, url)` opens a background banner-tagged window and notifies
   the user; then wait for their "done".
 - Log in with SAVED credentials: if `list_credentials` shows a service, `web_open` the site then
@@ -119,8 +126,10 @@ KEY WORKFLOWS:
   goal (Sign up, Log in, Apply, Get started, Menu) in the tree and CLICK it by ref. 4) `web_snapshot`
   again (new tabs auto-follow) and repeat, working page by page to the actual form. If you can't find
   the link, scroll (`key` PageDown) or open the nav/menu — NEVER fall back to typing a guessed URL.
-- Filling a form: `web_snapshot`, then `web_act` "type" each field (replaces + handles dropdowns).
-  Don't submit unless told; read fields back so the user can review.
+- Filling a form: `web_snapshot`, then `web_act` "type" each field (REPLACES content). For a native
+  `<select>` / combobox, type the option's VISIBLE TEXT into the select's own ref — NEVER click the
+  dropdown or its `<option>` nodes (CDP can't open the OS menu; that thrash burns turns). Then type
+  other fields, submit only if told, and re-`web_snapshot` to confirm.
 
 DESTRUCTIVE / SHELL / PRIVILEGED OPS:
 - Prefer `trash` (reversible) over `rm`; only empty the Trash when the task truly needs the space

@@ -281,9 +281,10 @@ def test_open_editor_rejects_a_missing_path_before_launching(monkeypatch, tmp_pa
 class _RecordingSession(cdp.CDPSession):
     """A CDPSession that records CDP commands instead of hitting a socket, and answers the
     xterm-detection probe as configured."""
-    def __init__(self, is_terminal):
+    def __init__(self, is_terminal, select_kind="OK"):
         self.calls = []
         self._is_terminal = is_terminal
+        self._select_kind = select_kind
         self.registry = {"e5": 42}
 
     def _cmd(self, method, params=None, timeout=20):
@@ -294,8 +295,32 @@ class _RecordingSession(cdp.CDPSession):
             fn = (params or {}).get("functionDeclaration", "")
             if "xterm-helper-textarea" in fn:      # the _XTERM_FOCUS_FN probe
                 return {"result": {"value": "TERMINAL" if self._is_terminal else "NOT_TERMINAL"}}
+            if "IS_SELECT" in fn:                  # the _SELECT_KIND_FN probe
+                return {"result": {"value": self._select_kind}}
             return {"result": {"value": "set"}}     # the _SET_FN path
+        if method == "DOM.getBoxModel":
+            return {"model": {"content": [0, 0, 10, 0, 10, 10, 0, 10]}}
         return {}
+
+
+def test_click_refuses_native_select():
+    s = _RecordingSession(is_terminal=False, select_kind="IS_SELECT")
+    out = s.click("e5")
+    assert out.startswith("REFUSED") and "VISIBLE TEXT" in out
+    assert not any(m == "Input.dispatchMouseEvent" for m, _ in s.calls)
+
+
+def test_click_refuses_select_option_node():
+    s = _RecordingSession(is_terminal=False, select_kind="IS_OPTION")
+    out = s.click("e5")
+    assert out.startswith("REFUSED") and "option" in out.lower()
+
+
+def test_click_still_dispatches_for_normal_elements():
+    s = _RecordingSession(is_terminal=False, select_kind="OK")
+    out = s.click("e5")
+    assert out == "clicked e5"
+    assert any(m == "Input.dispatchMouseEvent" for m, _ in s.calls)
 
 
 def test_terminal_type_uses_keystrokes_not_value_set():

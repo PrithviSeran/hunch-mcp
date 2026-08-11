@@ -532,6 +532,23 @@ class CDPSession:
         return (box[0] + box[2]) / 2, (box[1] + box[5]) / 2
 
     def click(self, ref):
+        # Native <select>/combobox: CDP mouse events can't open the OS dropdown — clicking
+        # thrash (and getBoxModel on <option>) burns turns. Teach type-by-visible-text instead.
+        backend = self.registry.get(ref)
+        if backend is None:
+            raise KeyError(f"stale ref {ref}")
+        obj = self._cmd("DOM.resolveNode", {"backendNodeId": backend}).get("object", {}).get("objectId")
+        if obj:
+            kind = (self._cmd("Runtime.callFunctionOn",
+                              {"objectId": obj, "functionDeclaration": self._SELECT_KIND_FN,
+                               "returnByValue": True}).get("result", {}).get("value", ""))
+            if kind == "IS_SELECT":
+                return (f"REFUSED: {ref} is a native <select>/combobox — CDP cannot open the OS "
+                        f"dropdown by clicking. Use web_act type on this same ref with the option's "
+                        f"VISIBLE TEXT (e.g. type \"January\"), then web_snapshot to confirm.")
+            if kind == "IS_OPTION":
+                return (f"REFUSED: {ref} is a <select> option node — don't click options. Type the "
+                        f"option's visible text into the parent <select>'s ref instead.")
         x, y = self._center(ref)
         for t in ("mousePressed", "mouseReleased"):
             self._cmd("Input.dispatchMouseEvent",
@@ -541,6 +558,14 @@ class CDPSession:
     # JS that sets a field's value the way the DOM expects: REPLACES existing content (fixes
     # the append bug), fires input+change so React/Vue register it, and handles native <select>
     # dropdowns (which CDP mouse events can't open) by matching an option by value/visible text.
+    _SELECT_KIND_FN = r"""function(){
+      var el=this, tag=(el.tagName||'').toLowerCase();
+      var role=((el.getAttribute&&el.getAttribute('role'))||'').toLowerCase();
+      if(tag==='option') return 'IS_OPTION';
+      if(tag==='select' || role==='combobox' || role==='listbox') return 'IS_SELECT';
+      return 'OK';
+    }"""
+
     _SET_FN = r"""function(v){
       var el=this, tag=(el.tagName||'').toLowerCase();
       if(tag==='select'){
@@ -549,7 +574,8 @@ class CDPSession:
            || opts.filter(function(o){return o.text.trim().toLowerCase()===s.toLowerCase();})[0]
            || opts.filter(function(o){return o.text.toLowerCase().indexOf(s.toLowerCase())>=0;})[0];
         if(!o) return 'NO_OPTION: "'+s+'" not found; options include: '
-                 + opts.slice(0,15).map(function(o){return o.text.trim();}).join(' | ');
+                 + opts.slice(0,15).map(function(o){return o.text.trim();}).join(' | ')
+                 + ' — type one of those VISIBLE labels into this <select> ref; do not click options';
         el.value=o.value;
         el.dispatchEvent(new Event('input',{bubbles:true}));
         el.dispatchEvent(new Event('change',{bubbles:true}));

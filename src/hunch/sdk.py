@@ -284,7 +284,12 @@ class Hunch:
     def applescript(self, script, confirm=False):
         """Run AppleScript against scriptable apps (Mail, Music, Finder, …) focus-free.
         Mutating/'do shell script' scripts are gated; refusal raises ApprovalDenied.
-        confirm=True skips the dialog (the user already approved out-of-band)."""
+        confirm=True skips the dialog (the user already approved out-of-band).
+        System Settings toggles via defaults write / UI scripting are soft-refused with a
+        teaching string — AX snapshot/act is the reliable path."""
+        refusal = gate.applescript_settings_refusal(script)
+        if refusal:
+            return refusal
         category = gate.applescript_category(script)
         if category and not confirm and self._gate.enabled(category):
             preview = script.strip()[:400].replace("\n", "  ").replace("\r", " ")
