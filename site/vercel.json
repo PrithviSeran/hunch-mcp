@@ -3,6 +3,10 @@
   "trailingSlash": false,
   "rewrites": [
     {
+      "source": "/download",
+      "destination": "/api/download"
+    },
+    {
       "source": "/hunch/appcast.xml",
       "destination": "https://pub-8748b4003e764f8a888e32c8e2ce7057.r2.dev/appcast.xml"
     }

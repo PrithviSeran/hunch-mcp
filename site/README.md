@@ -14,7 +14,10 @@ Markdown in `content/`** by `build.py`.
 - `styles.css` — all styles (light default + `[data-theme="dark"]`)
 - `theme.js` — light/dark toggle (persisted in localStorage)
 - `assets/` — logos + favicon
-- `vercel.json` — `cleanUrls` (drops `.html`) + no trailing slash
+- `vercel.json` — `cleanUrls` (drops `.html`) + no trailing slash; `/download` → API
+- `api/download.js` — increments the DMG download counter on R2, then 302s to the file
+- `api/stats.js` — returns `{ downloads, updated_at }` (also at `/api/stats`)
+- `lib/r2.js` — shared R2/S3 SigV4 helper for the counter
 
 ## Editing / adding a blog post
 Posts are the single source of truth in `content/*.md` (YAML front matter +
@@ -37,6 +40,32 @@ The generated HTML is committed so the host needs no build step.
 3. **Root Directory = `site`**, **Framework Preset = Other** (no build command).
 4. Deploy. `cleanUrls` serves `/blogs` and `/blog/<slug>` without `.html`.
 5. Add your domain under the project's Domains tab.
+
+### DMG download tracking
+The hero **Download for macOS** button hits `/download`, which counts the hit in
+`stats/dmg.json` on the `hunch-updates` R2 bucket, then redirects to
+`https://pub-8748b4003e764f8a888e32c8e2ce7057.r2.dev/Hunch.dmg`.
+
+Read the running total anytime:
+```
+curl https://www.tryhunch.ca/api/stats
+# → {"downloads":12,"updated_at":"2026-…"}
+```
+
+For the counter to increment, set these **Vercel project env vars** (Production):
+- `R2_ACCESS_KEY_ID` — same key as the local `rclone` `r2` remote
+- `R2_SECRET_ACCESS_KEY` — matching secret
+
+Optional overrides (defaults match the existing bucket):
+- `R2_ENDPOINT` — `https://<accountid>.r2.cloudflarestorage.com`
+- `R2_BUCKET` — `hunch-updates`
+- `HUNCH_DMG_URL` — public URL of the DMG
+
+Without the credentials the redirect still works; only the count write is skipped.
+Re-upload a new DMG over the stable key when you cut a release:
+```
+rclone copyto dist/Hunch.dmg r2:hunch-updates/Hunch.dmg --s3-no-check-bucket
+```
 
 Local preview: `cd site && python3 -m http.server 8000` → http://localhost:8000
 (the dev server doesn't rewrite clean URLs; click through from the homepage or
