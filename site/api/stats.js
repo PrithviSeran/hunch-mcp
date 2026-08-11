@@ -1,5 +1,5 @@
 // GET /api/stats  →  { "downloads": N, "updated_at": "..." }
-const { readStats } = require('../lib/r2');
+const { readStats } = require('./_lib/r2');
 
 module.exports = async function handler(req, res) {
   if (req.method !== 'GET' && req.method !== 'HEAD') {

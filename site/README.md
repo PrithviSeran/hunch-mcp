@@ -17,7 +17,7 @@ Markdown in `content/`** by `build.py`.
 - `vercel.json` — `cleanUrls` (drops `.html`) + no trailing slash; `/download` → API
 - `api/download.js` — increments the DMG download counter on R2, then 302s to the file
 - `api/stats.js` — returns `{ downloads, updated_at }` (also at `/api/stats`)
-- `lib/r2.js` — shared R2/S3 SigV4 helper for the counter
+- `api/_lib/r2.js` — private shared R2/S3 SigV4 helper (underscore = not an HTTP route)
 
 ## Editing / adding a blog post
 Posts are the single source of truth in `content/*.md` (YAML front matter +

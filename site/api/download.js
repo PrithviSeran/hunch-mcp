@@ -1,6 +1,6 @@
 // GET /api/download  →  count + 302 to the Hunch.dmg on R2
 // Also reachable as /download via the rewrite in vercel.json.
-const { DMG_URL, incrementDownloads } = require('../lib/r2');
+const { DMG_URL, incrementDownloads } = require('./_lib/r2');
 
 module.exports = async function handler(req, res) {
   if (req.method !== 'GET' && req.method !== 'HEAD') {
