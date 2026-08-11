@@ -52,16 +52,18 @@ curl https://www.tryhunch.ca/api/stats
 # → {"downloads":12,"updated_at":"2026-…"}
 ```
 
-For the counter to increment, set these **Vercel project env vars** (Production):
-- `R2_ACCESS_KEY_ID` — same key as the local `rclone` `r2` remote
-- `R2_SECRET_ACCESS_KEY` — matching secret
+For the counter to increment, set these **Production** env vars in the Vercel
+project (same values as the local `rclone` `r2` remote), then redeploy:
 
-Optional overrides (defaults match the existing bucket):
+- `R2_ACCESS_KEY_ID`
+- `R2_SECRET_ACCESS_KEY`
 - `R2_ENDPOINT` — `https://<accountid>.r2.cloudflarestorage.com`
 - `R2_BUCKET` — `hunch-updates`
-- `HUNCH_DMG_URL` — public URL of the DMG
+
+Optional: `HUNCH_DMG_URL` overrides the public DMG URL.
 
 Without the credentials the redirect still works; only the count write is skipped.
+Until they're set, `/api/stats` still reads the public `stats/dmg.json` on R2.
 Re-upload a new DMG over the stable key when you cut a release:
 ```
 rclone copyto dist/Hunch.dmg r2:hunch-updates/Hunch.dmg --s3-no-check-bucket
