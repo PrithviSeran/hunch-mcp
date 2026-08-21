@@ -1,114 +1,14 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Hunch: an agent that runs your Mac without taking it over</title>
-<meta name="description" content="Hunch lets an LLM operate your real, already-signed-in Mac apps in the background, reading the accessibility tree and driving native APIs, focus-free.">
-<meta property="og:title" content="Hunch: an agent that runs your Mac without taking it over">
-<meta property="og:description" content="Hunch lets an LLM operate your real, already-signed-in Mac apps in the background, reading the accessibility tree and driving native APIs, focus-free.">
-<meta property="og:type" content="website">
-<meta property="og:image" content="https://www.tryhunch.ca/assets/og-hunch.png">
-<meta property="og:image:width" content="1731">
-<meta property="og:image:height" content="909">
-<meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:image" content="https://www.tryhunch.ca/assets/og-hunch.png">
-<link rel="icon" href="/assets/favicon.png">
-<link rel="stylesheet" href="/styles.css">
-<script>(function(){var r=document.documentElement;try{if(localStorage.getItem('hunch-theme')==='dark')r.setAttribute('data-theme','dark');}catch(e){}})();</script>
-</head>
-<body>
-<nav>
-  <div class="nav-inner">
-    <a class="brand" href="/"><img class="brand-logo" src="/assets/logo-mark.png" alt=""><span>Hunch</span></a>
-    <div class="nav-links">
-      <a href="/" aria-current="page">Home</a>
-      <a href="/blogs">Blogs</a>
-    </div>
-    <button class="toggle" id="themeBtn" aria-label="Toggle color theme">
-      <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg>
-      <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="4.2"/><path d="M12 2v2M12 20v2M4.2 4.2l1.5 1.5M18.3 18.3l1.5 1.5M2 12h2M20 12h2M4.2 19.8l1.5-1.5M18.3 5.7l1.5-1.5"/></svg>
-    </button>
-  </div>
-</nav>
-<main>
-<div class="wrap">
-    <div class="hero">
-      <img class="hero-logo" src="/assets/logo-app.png" alt="Hunch">
-      <div class="hero-content">
-        <h1>An agent that runs your Mac, without taking it over.</h1>
-      <p class="lede">Hunch lets an LLM operate your real, already-signed-in apps in the background. It reads the accessibility tree and drives native APIs, so it does real work while you keep using your machine.</p>
-      <div class="cta">
-        <a class="btn primary" href="/download">Download for macOS</a>
-        <a class="btn" href="https://github.com/PrithviSeran/hunch-mcp" target="_blank" rel="noopener">View on GitHub ↗</a>
-      </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- the numbers -->
-  <div class="block"><div class="wrap">
-    <h2>Benchmark results</h2>
-    <p class="intro">We gave three macOS agents the identical model and task prompts on a real, logged-in Mac; only the tool changed. Alongside task success we measured <em>disturbance</em>: how many times the foreground app changed and how far the cursor moved while the agent ran. It's the dimension every VM-based benchmark structurally can't see.</p>
-    <div class="tablewrap">
-      <table>
-        <thead><tr><th>Tool</th><th>Success</th><th>Total cost</th><th>Disturbance&nbsp;(focus·cursor)</th></tr></thead>
-        <tbody>
-          <tr class="win"><td>Hunch</td><td class="num">53/54</td><td class="num">$6.03</td><td class="num">14 · 3</td></tr>
-          <tr><td>Peekaboo</td><td class="num">41/53</td><td class="num">$31.03</td><td class="num">80 · 46</td></tr>
-          <tr><td>cua-driver</td><td class="num">31/54</td><td class="num">$37.42</td><td class="num">97 · 71</td></tr>
-        </tbody>
-      </table>
-    </div>
-    <p class="note">Hunch registered <strong>0 focus switches and 0 cursor moves on every native-API, cross-app, and web task</strong>; its whole footprint came from the three tiers that inherently touch the GUI. n=5 per task, one Apple Silicon Mac, Claude Sonnet held constant. <a class="link" href="https://github.com/PrithviSeran/mac-agent-bench" target="_blank" rel="noopener">Full methodology &amp; per-task table ↗</a></p>
-  </div></div>
-
-  <!-- how it works: the ladder -->
-  <div class="block"><div class="wrap">
-    <h2>How it works</h2>
-    <p class="intro">Every action runs through a single ladder that tries the least disruptive path it can. A screenshot-and-click loop starts at the bottom of this ladder; Hunch starts at the top, which is why it can drive a real Mac without raising an app or moving the pointer.</p>
-    <div class="ladder">
-      <div class="layer"><span class="n">01</span><span class="name">OS APIs<small>Files, clipboard, apps: the direct call, never a click.</small></span><span class="tag">focus-free</span></div>
-      <div class="layer"><span class="n">02</span><span class="name">AppleScript<small>Native automation for scriptable apps: Mail, Notes, Music, Reminders.</small></span><span class="tag">focus-free</span></div>
-      <div class="layer"><span class="n">03</span><span class="name">Web · Chrome DevTools<small>Drives a real, logged-in Chrome for things that only live on the web.</small></span><span class="tag">focus-free</span></div>
-      <div class="layer"><span class="n">04</span><span class="name">Accessibility tree<small>Reads &amp; acts on any app's UI in the background, even Electron apps like Discord.</small></span><span class="tag">focus-free</span></div>
-      <div class="layer gated"><span class="n">05</span><span class="name">Vision: screenshot + click<small>Gated last resort, only when no tree exists. This is the only layer that touches the screen.</small></span><span class="tag">gated</span></div>
-    </div>
-  </div></div>
-
-  <!-- quickstart -->
-  <div class="block"><div class="wrap">
-    <h2>Quickstart</h2>
-    <p class="intro">Point any MCP client at it, or import the session object directly in Python. Both are the same engine: one exposed as tools, one as a library.</p>
-    <div class="code-grid">
-      <div>
-        <p class="code-label">Install &amp; grant permissions</p>
-<pre><code><span class="tok-c"># PyPI (or: brew install prithviseran/hunch/hunch)</span>
-pipx install hunch-sdk
-hunch setup      <span class="tok-c"># walk the macOS grants</span>
-
-<span class="tok-c"># then point Claude / Cursor / your agent at:</span>
-hunch serve</code></pre>
-      </div>
-      <div>
-        <p class="code-label">Or drive it from Python</p>
-<pre><code><span class="tok-k">from</span> hunch <span class="tok-k">import</span> MacSession
-
-mac = MacSession()
-
-<span class="tok-c"># read any app's UI as text, focus-free</span>
-tree, _ = mac.snapshot(<span class="tok-k">"Discord"</span>)
-
-<span class="tok-c"># ...then act on an element in the tree</span>
-mac.act(<span class="tok-k">"press"</span>, ref=...)</code></pre>
-      </div>
-    </div>
-  </div></div>
-</main>
-<footer><div class="wrap"><div class="foot-inner">
-  <span class="foot-brand"><img class="foot-logo" src="/assets/logo-mark.png" alt="">Hunch · focus-free computer use for macOS.</span>
-  <span><a href="https://github.com/PrithviSeran/hunch-mcp" target="_blank" rel="noopener">GitHub</a> · <a href="/blogs">Blogs</a></span>
-</div></div></footer>
-<script src="/theme.js"></script>
-</body>
-</html>
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Hunch: free AI computer use for your Mac</title><meta name="description" content="Hunch is a free macOS agent that works across your apps, browser sessions, files, and saved logins in the background while you keep using your Mac."><meta property="og:title" content="Hunch: your Mac, working in the background"><meta property="og:description" content="A free macOS agent that works across your real apps while you keep using your Mac."><meta property="og:type" content="website"><meta property="og:image" content="https://www.tryhunch.ca/assets/og-hunch.png"><link rel="icon" href="/assets/favicon.png"><link rel="stylesheet" href="/styles.css?v=open-source-1"><script>(function(){var r=document.documentElement;try{if(localStorage.getItem('hunch-theme')==='dark')r.setAttribute('data-theme','dark')}catch(e){}})()</script></head><body>
+<nav><div class="nav-inner"><a class="brand" href="/"><img class="brand-logo" src="/assets/logo-mark.png" alt=""><span>Hunch</span></a><div class="nav-links"><a href="/" aria-current="page">Home</a><a href="#demos">Demos</a><a href="#capabilities">Capabilities</a><a href="/open-source.html">Open Source</a><a href="/security.html">Security</a><a href="/blogs.html">Blog</a></div><a class="nav-github" href="https://github.com/PrithviSeran/hunch-mcp" target="_blank" rel="noopener" aria-label="Hunch on GitHub"><svg class="github-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.64 0 8.13c0 3.59 2.29 6.64 5.47 7.71.4.08.55-.17.55-.39 0-.19-.01-.83-.01-1.51-2.01.38-2.53-.5-2.69-.96-.09-.23-.48-.96-.82-1.15-.28-.15-.68-.53-.01-.54.63-.01 1.08.59 1.23.83.72 1.23 1.87.88 2.33.67.07-.53.28-.88.51-1.08-1.78-.21-3.64-.91-3.64-4.02 0-.89.31-1.62.82-2.19-.08-.2-.36-1.04.08-2.16 0 0 .67-.22 2.2.84A7.5 7.5 0 0 1 8 3.9a7.5 7.5 0 0 1 2 .27c1.53-1.06 2.2-.84 2.2-.84.44 1.12.16 1.96.08 2.16.51.57.82 1.3.82 2.19 0 3.12-1.87 3.81-3.65 4.02.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .22.15.47.55.39A8.15 8.15 0 0 0 16 8.13C16 3.64 12.42 0 8 0Z"/></svg></a><button class="toggle" id="themeBtn" aria-label="Toggle color theme"><svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg><svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="4"/></svg></button></div></nav>
+<main><div class="wrap"><section class="hero launch-hero"><div class="hero-copy"><p class="free-line"><span>Free and Open Source</span></p><h1>Your Mac, working in the background.</h1><p class="lede">Hunch is a computer use agent that uses your Mac in the background to do your tasks. Ask from the menu bar, keep working, and stay in control.</p><div class="cta"><a class="btn primary" href="/download"><span class="apple-logo" aria-hidden="true"></span>Download free for macOS</a><a class="btn" href="#demos">Watch the demos ↓</a></div><p class="microcopy">Free to download and use. Bring your existing Claude or ChatGPT/Codex subscription—Hunch adds no usage fee or metered API bill.</p></div><div class="hero-visual"><img src="/assets/logo-app.png" alt="Hunch logo"></div></section></div>
+<section id="demos" class="block"><div class="wrap"><h2>Hunch is your new AI assistant that lives on your Mac</h2><p class="intro">Hunch can work with native apps, websites, files, developer tools, and saved logins in the same task.</p><div class="demo-grid">
+<article class="demo-card"><video autoplay loop muted playsinline preload="metadata" poster="/assets/poster-browser.png"><source src="/assets/demo-browser.mp4" type="video/mp4"></video><div class="demo-body"><blockquote>“Log in to Quercus using my U of T credentials. Go to CSCC63, download all the tutorial and past final exam PDFs, and move them to the C63 folder in Downloads. After that, open C63 in Cursor, start the Codex CLI in the terminal, and ask Codex to generate practice final exams for me.”</blockquote></div></article>
+<article class="demo-card"><video autoplay loop muted playsinline preload="metadata" poster="/assets/poster-imovie.png"><source src="/assets/demo-imovie.mp4" type="video/mp4"></video><div class="demo-body"><blockquote>“In iMovie, add text over the second clip that says ‘Hunch working in the background.’ For the third clip, add text that says ‘Hunch performing a series of AppleScript commands to retrieve the credentials and add them to Vercel.’”</blockquote></div></article>
+<article class="demo-card"><video autoplay loop muted playsinline preload="metadata" poster="/assets/poster-creds.png"><source src="/assets/demo-credentials.mp4" type="video/mp4"></video><div class="demo-body"><blockquote>“Go to Codex and open the Hunch MCP section. There should be a conversation about counting the number of Hunch downloads. Review the conversation and complete the steps shown in: ‘One step left for the counter to increment: add these production environment variables to the Vercel project using the same values as your local rclone R2 remote, then redeploy.’”</blockquote></div></article>
+<article class="demo-card"><video autoplay loop muted playsinline preload="metadata" poster="/assets/poster-files.png"><source src="/assets/demo-file-usage.mov" type="video/quicktime"></video><div class="demo-body"><blockquote>“In Downloads, create a folder named Hunch and move the video ‘Hunch Demo 1’ into it.”</blockquote></div></article></div></div></section>
+<section id="capabilities" class="block capabilities-block"><div class="wrap"><p class="eyebrow">Built for real work</p><h2>One agent for your whole Mac.</h2><p class="intro">Give Hunch the outcome. It can cross app boundaries and finish the steps that normally interrupt your flow.</p><div class="capability-grid"><div class="capability-card"><span class="capability-mark">⌘</span><div><span class="capability-label">Mac apps</span><h3>Use the apps already on your Mac.</h3><p>Work in Finder, Mail, Notes, Calendar, iMovie, Music, and other native apps through direct system interfaces.</p></div></div><div class="capability-card"><span class="capability-mark">◎</span><div><span class="capability-label">Browser</span><h3>Work inside your logged-in websites.</h3><p>Research, download, organize, and complete browser workflows using the sessions already available on your Mac.</p></div></div><div class="capability-card"><span class="capability-mark">↳</span><div><span class="capability-label">Files</span><h3>Turn messy folders into finished work.</h3><p>Create folders, rename files, sort downloads, open projects, and move material between apps without manual cleanup.</p></div></div><div class="capability-card"><span class="capability-mark">›_</span><div><span class="capability-label">Developer tools</span><h3>Continue the task in Cursor or Codex.</h3><p>Open repositories, inspect issues, prepare notes, and hand work to a coding agent without losing the original context.</p></div></div><div class="capability-card credential-capability"><span class="capability-mark">◇</span><div><span class="capability-label">Saved access</span><h3>Your credentials stay on your Mac.</h3><p>Hunch stores saved logins, API keys, and tokens in macOS Keychain. It can use them locally when a task requires access, but secret values are never displayed to the AI.</p><ul class="capability-points"><li>Credential values do not appear in the task conversation.</li><li>Review or delete saved access from Hunch at any time.</li><li>Keep sending, publishing, and external actions approval-gated.</li></ul><a class="text-link" href="/security.html">Read the full security model →</a></div></div><div class="capability-card"><span class="capability-mark">✓</span><div><span class="capability-label">Multi-step work</span><h3>Chain actions across apps with clear limits.</h3><p>Give one request, continue with follow-ups, and keep external or disruptive actions behind your approval rules.</p></div></div></div></div></section>
+<section id="setup" class="block setup-block"><div class="wrap"><p class="eyebrow">Set up in minutes</p><h2>Three steps, then ask Hunch.</h2><p class="intro">Connect your AI subscription, choose how Hunch may work, and optionally save the access your tasks need.</p><div class="setup-timeline"><div class="setup-step"><div class="setup-index"><span>01</span></div><div class="setup-copy"><h3>Sign in</h3><p>Choose Claude or ChatGPT/Codex. Your existing subscription powers Hunch, so there is no separate Hunch usage bill.</p></div><figure><img src="/assets/sign-in-hunch.png" alt="Hunch sign-in screen with Claude and ChatGPT or Codex options"></figure></div><div class="setup-step"><div class="setup-index"><span>02</span></div><div class="setup-copy"><h3>Choose permissions</h3><p>Enable the macOS permissions Hunch needs, then decide which actions can run directly and which should ask first.</p></div><figure><img src="/assets/permissions-hunch.png" alt="Hunch permissions and approval settings"></figure></div><div class="setup-step"><div class="setup-index"><span>03</span></div><div class="setup-copy"><h3>Add credentials</h3><p>Optionally save logins or API keys in macOS Keychain for tasks that need authenticated access.</p></div><figure><img src="/assets/credentials-hunch.png" alt="Hunch credentials settings for logins and API keys"></figure></div></div></div></section>
+<section class="block"><div class="wrap"><p class="eyebrow">The least disruptive path first</p><h2>How Hunch works</h2><p class="intro">Hunch chooses the most direct interface available. Screenshots and cursor control are the fallback, not the default.</p><div class="ladder"><div class="layer"><span class="n">01</span><span class="name">OS APIs<small>Files, clipboard, apps, and lifecycle operations.</small></span><span class="tag">focus-free</span></div><div class="layer"><span class="n">02</span><span class="name">AppleScript<small>Native automation for scriptable apps.</small></span><span class="tag">focus-free</span></div><div class="layer"><span class="n">03</span><span class="name">Web · Chrome DevTools<small>Real logged-in browser and Electron sessions.</small></span><span class="tag">focus-free</span></div><div class="layer"><span class="n">04</span><span class="name">Accessibility tree<small>Read and act on native app controls in the background.</small></span><span class="tag">focus-free</span></div><div class="layer gated"><span class="n">05</span><span class="name">Vision: screenshot + click<small>Only when no structured interface exists; always gated.</small></span><span class="tag">approval</span></div></div></div></section>
+<section class="block download-block"><div class="wrap download-simple"><div class="download-copy"><p class="eyebrow">Free for macOS</p><h2>Download Hunch for macOS</h2><p>Use your existing Claude or ChatGPT/Codex subscription. Hunch adds no subscription or metered API bill.</p></div><div class="download-actions"><div class="cta"><a class="btn primary" href="/download"><span class="apple-logo" aria-hidden="true"></span>Download free for macOS</a><a class="btn" href="https://github.com/PrithviSeran/hunch-mcp" target="_blank" rel="noopener">View on GitHub ↗</a></div><p class="microcopy">Install the menu-bar app and start with <code>⌥ Space</code>.</p></div></div></section>
+<section class="block compact-proof"><div class="wrap"><p class="eyebrow">Measured on a real Mac</p><h2>Less screen disturbance.</h2><p class="intro">In our benchmark, Hunch ran the same tasks with the same model while tracking foreground changes and cursor movement—the dimension virtual-machine benchmarks cannot see.</p><div class="tablewrap"><table><thead><tr><th>Tool</th><th>Success</th><th>Total cost</th><th>Disturbance</th></tr></thead><tbody><tr class="win"><td>Hunch</td><td class="num">53/54</td><td class="num">$6.03</td><td class="num">14 · 3</td></tr><tr><td>Peekaboo</td><td class="num">41/53</td><td class="num">$31.03</td><td class="num">80 · 46</td></tr><tr><td>cua-driver</td><td class="num">31/54</td><td class="num">$37.42</td><td class="num">97 · 71</td></tr></tbody></table></div><p class="note"><a class="link" href="https://github.com/PrithviSeran/mac-agent-bench" target="_blank" rel="noopener">Read the full methodology and per-task table ↗</a></p></div></section></main>
+<footer><div class="wrap"><div class="foot-inner"><span class="foot-brand"><img class="foot-logo" src="/assets/logo-mark.png" alt="">Hunch · AI computer use for macOS.</span><span class="foot-links"><a href="/open-source.html">Open Source</a><span aria-hidden="true">·</span><a href="/security.html">Security</a><span aria-hidden="true">·</span><a href="/privacy.html">Privacy</a><span aria-hidden="true">·</span><a class="footer-github" href="https://github.com/PrithviSeran/hunch-mcp" target="_blank" rel="noopener"><svg class="github-icon" viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.64 0 8.13c0 3.59 2.29 6.64 5.47 7.71.4.08.55-.17.55-.39 0-.19-.01-.83-.01-1.51-2.01.38-2.53-.5-2.69-.96-.09-.23-.48-.96-.82-1.15-.28-.15-.68-.53-.01-.54.63-.01 1.08.59 1.23.83.72 1.23 1.87.88 2.33.67.07-.53.28-.88.51-1.08-1.78-.21-3.64-.91-3.64-4.02 0-.89.31-1.62.82-2.19-.08-.2-.36-1.04.08-2.16 0 0 .67-.22 2.2.84A7.5 7.5 0 0 1 8 3.9a7.5 7.5 0 0 1 2 .27c1.53-1.06 2.2-.84 2.2-.84.44 1.12.16 1.96.08 2.16.51.57.82 1.3.82 2.19 0 3.12-1.87 3.81-3.65 4.02.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .22.15.47.55.39A8.15 8.15 0 0 0 16 8.13C16 3.64 12.42 0 8 0Z"/></svg>GitHub</a><span aria-hidden="true">·</span><a href="/blogs.html">Blog</a></span></div></div></footer><script src="/theme.js?v=combined-1"></script></body></html>

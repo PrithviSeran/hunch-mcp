@@ -364,6 +364,13 @@ in their server-info display; the model receives it in full.
 Read [SECURITY.md](SECURITY.md): threat model (prompt injection, mainly), what the gates do and
 don't cover, and how to report vulnerabilities.
 
+## Project status
+
+Hunch is currently maintained as a personal open-source project. It controls real apps, files,
+browser sessions, and credentials on your Mac, so review the source, keep approvals enabled, and
+use least-privilege credentials. The software is provided on an **“AS IS”** basis, without
+warranties or conditions, under the Apache License 2.0.
+
 ## License
 
 Apache-2.0; see [LICENSE](LICENSE).
