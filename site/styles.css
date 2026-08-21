@@ -423,25 +423,25 @@
   .security-document{max-width:1040px;padding-top:68px}
   .security-document>h1{font-size:56px;max-width:17ch;margin:12px 0 24px}
   .security-document>.security-lede{font-size:20px;max-width:760px;margin-bottom:70px}
-  .security-document .security-section{padding:54px 0}
+  .security-document .security-section{padding:54px 0;border-top:0}
   .security-heading{display:grid;grid-template-columns:170px minmax(0,1fr);gap:28px;align-items:start;margin-bottom:30px}
   .security-heading h2{font-size:32px;margin:0;max-width:24ch}
   .security-label{font:11px var(--mono);color:var(--hunch);letter-spacing:.08em;text-transform:uppercase;padding-top:8px}
-  .boundary-ledger{border-top:1px solid var(--text)}
-  .boundary-row{display:grid;grid-template-columns:220px minmax(0,1fr) minmax(0,1.2fr);gap:28px;padding:21px 18px;border-bottom:1px solid var(--border);align-items:start}
+  .boundary-ledger{display:flex;flex-direction:column;gap:3px}
+  .boundary-row{display:grid;grid-template-columns:220px minmax(0,1fr) minmax(0,1.2fr);gap:28px;padding:21px 18px;align-items:start}
   .boundary-row>strong{font-size:15px;line-height:1.45}
   .boundary-row>span{font-size:14px;color:var(--muted);line-height:1.55}
   .boundary-head{padding-top:12px;padding-bottom:12px;background:var(--surface-2)}
   .boundary-head>span{font:10px var(--mono);letter-spacing:.07em;text-transform:uppercase;color:var(--muted-2)}
   .local-tag{display:inline-flex;margin:0 7px 3px 0;padding:2px 7px;border:1px solid color-mix(in srgb,var(--hunch) 40%,var(--border));border-radius:999px;color:var(--hunch);font:10px var(--mono);font-weight:600;text-transform:uppercase;letter-spacing:.04em}
-  .credential-path{display:grid;grid-template-columns:repeat(4,1fr);border-top:1px solid var(--text)}
-  .credential-path>div{position:relative;padding:25px 26px 8px 0;margin-right:26px;border-right:1px solid var(--border)}
-  .credential-path>div:last-child{margin-right:0;border-right:0}
+  .credential-path{display:grid;grid-template-columns:repeat(4,1fr)}
+  .credential-path>div{position:relative;padding:25px 26px 8px 0;margin-right:26px}
+  .credential-path>div:last-child{margin-right:0}
   .credential-path>div:not(:last-child)::after{content:"→";position:absolute;right:-18px;top:22px;padding:0 6px;background:var(--bg);color:var(--hunch);font:15px var(--mono)}
   .credential-path b{display:block;font-size:15px;margin-bottom:8px}
   .credential-path span{display:block;color:var(--muted);font-size:13.5px;line-height:1.55}
   .security-control-grid{display:grid;grid-template-columns:1fr 1fr;gap:64px}
-  .security-control-grid>div{border-top:1px solid var(--text);padding-top:22px}
+  .security-control-grid>div{padding-top:22px}
   .security-control-grid h3{font-size:19px;margin:0 0 20px}
   .security-control-grid dl{margin:0}
   .security-control-grid dl>div{display:contents}
@@ -449,12 +449,12 @@
   .security-control-grid dt:first-child{margin-top:0}
   .security-control-grid dd{margin:3px 0 0;color:var(--muted);font-size:14px;line-height:1.55}
   .security-document .text-link{font-size:14px;margin-top:8px}
-  .security-limit-list{list-style:none;padding:0;margin:0;border-top:1px solid var(--text)}
-  .security-limit-list li{display:grid;grid-template-columns:290px minmax(0,1fr);gap:36px;padding:18px 0;border-bottom:1px solid var(--border)}
+  .security-limit-list{list-style:none;padding:0;margin:0}
+  .security-limit-list li{display:grid;grid-template-columns:290px minmax(0,1fr);gap:36px;padding:14px 0}
   .security-limit-list b{font-size:15px}
   .security-limit-list span{color:var(--muted);font-size:14px;line-height:1.55}
   .security-close{display:grid;grid-template-columns:1fr 1fr;gap:76px}
-  .security-close>div{border-top:1px solid var(--text);padding-top:20px}
+  .security-close>div{padding-top:20px}
   .security-close .security-label{display:block;padding:0 0 18px}
   .security-close h2{font-size:27px;margin:0 0 12px}
   .security-close p{font-size:14px;color:var(--muted);line-height:1.6;margin:0}
@@ -482,8 +482,8 @@
     .boundary-row>span:nth-child(2)::before{content:"On your Mac"}
     .boundary-row>span:nth-child(3)::before{content:"Selected AI provider"}
     .credential-path,.security-control-grid,.security-close{grid-template-columns:1fr}
-    .credential-path>div,.credential-path>div:nth-child(2){margin:0;border-right:0;border-bottom:1px solid var(--border);padding:20px 0}
-    .credential-path>div:last-child{border-bottom:0}
+    .credential-path{row-gap:12px}
+    .credential-path>div,.credential-path>div:nth-child(2){margin:0;padding:20px 0}
     .credential-path>div::after{display:none!important}
     .security-control-grid{gap:32px}
     .security-limit-list li{grid-template-columns:1fr;gap:6px}
