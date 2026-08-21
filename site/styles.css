@@ -424,9 +424,8 @@
   .security-document>h1{font-size:56px;max-width:17ch;margin:12px 0 24px}
   .security-document>.security-lede{font-size:20px;max-width:760px;margin-bottom:70px}
   .security-document .security-section{padding:54px 0;border-top:0}
-  .security-heading{display:grid;grid-template-columns:170px minmax(0,1fr);gap:28px;align-items:start;margin-bottom:30px}
+  .security-heading{display:block;margin-bottom:30px}
   .security-heading h2{font-size:32px;margin:0;max-width:24ch}
-  .security-label{font:11px var(--mono);color:var(--hunch);letter-spacing:.08em;text-transform:uppercase;padding-top:8px}
   .boundary-ledger{display:flex;flex-direction:column;gap:3px}
   .boundary-row{display:grid;grid-template-columns:220px minmax(0,1fr) minmax(0,1.2fr);gap:28px;padding:21px 18px;align-items:start}
   .boundary-row>strong{font-size:15px;line-height:1.45}
@@ -455,7 +454,6 @@
   .security-limit-list span{color:var(--muted);font-size:14px;line-height:1.55}
   .security-close{display:grid;grid-template-columns:1fr 1fr;gap:76px}
   .security-close>div{padding-top:20px}
-  .security-close .security-label{display:block;padding:0 0 18px}
   .security-close h2{font-size:27px;margin:0 0 12px}
   .security-close p{font-size:14px;color:var(--muted);line-height:1.6;margin:0}
   @media(max-width:820px){
