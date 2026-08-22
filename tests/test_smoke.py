@@ -6,6 +6,8 @@ Needs pyobjc (imports the server) but touches no Keychain items and no UI.
 
 import os
 import sys
+import tomllib
+from pathlib import Path
 
 import hunch
 import hunch.creds as creds
@@ -15,6 +17,12 @@ import hunch.server as server
 
 def test_version():
     assert hunch.__version__
+
+
+def test_runtime_version_matches_package_metadata():
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    project_version = tomllib.loads(pyproject.read_text())["project"]["version"]
+    assert hunch.__version__ == project_version
 
 
 def test_tool_count():

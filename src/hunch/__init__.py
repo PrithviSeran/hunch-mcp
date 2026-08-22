@@ -5,7 +5,7 @@ doctor) must work even when pyobjc or the MCP SDK are missing, so nothing here
 may import them. The server loads lazily via `hunch serve`.
 """
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 # Public SDK surface, loaded lazily (PEP 562) so bare `import hunch` stays dependency-free.
 # Names mapped to .sdk/.agent/.local_mac pull in pyobjc; .errors/.auth/.providers stay
