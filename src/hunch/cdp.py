@@ -14,6 +14,8 @@ the same agent loop.
 import os
 import re
 import json
+import base64
+import struct
 import zlib
 import time
 import socket
@@ -555,6 +557,44 @@ class CDPSession:
                       {"type": t, "x": x, "y": y, "button": "left", "clickCount": 1})
         return f"clicked {ref}"
 
+    def _image_to_viewport(self, x, y):
+        """Map coordinates from the last web_screenshot PNG to CSS viewport coordinates.
+
+        Page.captureScreenshot can return device-pixel images on Retina displays while CDP input
+        events always consume CSS pixels.  Derive the scale from the actual PNG and viewport rather
+        than assuming devicePixelRatio: browser zoom and emulation can make that assumption wrong.
+        """
+        scale = getattr(self, "_last_screenshot_scale", None)
+        if not scale:
+            return float(x), float(y)
+        sx, sy = scale
+        return float(x) / sx, float(y) / sy
+
+    def click_xy(self, x, y):
+        """Click a visual/canvas target using coordinates read from web_screenshot."""
+        vx, vy = self._image_to_viewport(x, y)
+        for t in ("mousePressed", "mouseReleased"):
+            self._cmd("Input.dispatchMouseEvent",
+                      {"type": t, "x": vx, "y": vy, "button": "left", "clickCount": 1})
+        return f"clicked screenshot point ({x}, {y})"
+
+    def drag_xy(self, from_x, from_y, to_x, to_y):
+        """Drag between screenshot coordinates inside the renderer without moving the OS cursor."""
+        x1, y1 = self._image_to_viewport(from_x, from_y)
+        x2, y2 = self._image_to_viewport(to_x, to_y)
+        self._cmd("Input.dispatchMouseEvent",
+                  {"type": "mousePressed", "x": x1, "y": y1, "button": "left", "clickCount": 1})
+        # A few intermediate events make canvas editors recognize a drag rather than a click.
+        for i in range(1, 6):
+            f = i / 5
+            self._cmd("Input.dispatchMouseEvent",
+                      {"type": "mouseMoved", "x": x1 + (x2 - x1) * f,
+                       "y": y1 + (y2 - y1) * f, "button": "left", "buttons": 1})
+        self._cmd("Input.dispatchMouseEvent",
+                  {"type": "mouseReleased", "x": x2, "y": y2,
+                   "button": "left", "clickCount": 1})
+        return f"dragged screenshot point ({from_x}, {from_y}) to ({to_x}, {to_y})"
+
     # JS that sets a field's value the way the DOM expects: REPLACES existing content (fixes
     # the append bug), fires input+change so React/Vue register it, and handles native <select>
     # dropdowns (which CDP mouse events can't open) by matching an option by value/visible text.
@@ -635,6 +675,37 @@ class CDPSession:
             if idx < len(segs) - 1:
                 self._press_enter()
 
+    @staticmethod
+    def _key_descriptor(ch):
+        """Best-effort DOM key metadata; the char event's text is the source of truth."""
+        if ch == "\n":
+            return "Enter", "Enter", 13, "\r", "\r"
+        if ch == " ":
+            return " ", "Space", 32, " ", " "
+        if len(ch) == 1 and ch.isascii() and ch.isalpha():
+            return ch, "Key" + ch.upper(), ord(ch.upper()), ch, ch.lower()
+        if len(ch) == 1 and ch.isascii() and ch.isdigit():
+            return ch, "Digit" + ch, ord(ch), ch, ch
+        return ch, "", 0, ch, ch
+
+    def _type_at_focus(self, text):
+        """Type into a focused rich/canvas editor as actual CDP keyboard events.
+
+        Google Docs visibly places its caret after a renderer click but silently ignores
+        Input.insertText. A rawKeyDown -> char -> keyUp sequence is the same path used by browser
+        automation keyboards and is accepted by Docs, Slides, and conventional web editors.
+        """
+        for ch in text:
+            key, code, vk, inserted, unmodified = self._key_descriptor(ch)
+            base = {"key": key, "code": code, "windowsVirtualKeyCode": vk,
+                    "nativeVirtualKeyCode": vk}
+            # Do not pipeline across characters. Docs drops later input if the next key sequence
+            # arrives before the renderer has completed the previous one.
+            self._cmd("Input.dispatchKeyEvent", {**base, "type": "rawKeyDown"})
+            self._cmd("Input.dispatchKeyEvent", {**base, "type": "char", "text": inserted,
+                                                  "unmodifiedText": unmodified})
+            self._cmd("Input.dispatchKeyEvent", {**base, "type": "keyUp"})
+
     def type_text(self, ref, text):
         """Fill a field, REPLACING its content. Works for text inputs, textareas, and native
         <select> dropdowns (matches an option by visible text/value). An xterm.js TERMINAL
@@ -642,8 +713,8 @@ class CDPSession:
         PTY (newlines become Enter — a trailing newline runs the command). Falls back to focus +
         select-all + insertText for contenteditable / rich editors."""
         if not ref:
-            self._insert_stream(text)
-            return f"typed {len(text)} chars at focus"
+            self._type_at_focus(text)
+            return f"typed {len(text)} chars at focus as keyboard events"
         backend = self.registry.get(ref)
         if backend is None:
             raise KeyError(f"stale ref {ref}")
@@ -805,7 +876,24 @@ class CDPSession:
         page. Use this for genuinely visual web content (a chart/canvas/image) the tree can't convey."""
         self._follow_new_tab()
         r = self._cmd("Page.captureScreenshot", {"format": "png"})
-        return r.get("data", "")
+        data = r.get("data", "")
+        # Save a mapping for subsequent click_xy/drag actions. PNG's IHDR stores width/height
+        # at bytes 16..24; no image dependency is needed just to read it.
+        try:
+            raw = base64.b64decode(data)
+            if raw[:8] != b"\x89PNG\r\n\x1a\n":
+                raise ValueError("not PNG")
+            image_w, image_h = struct.unpack(">II", raw[16:24])
+            viewport = self._cmd("Runtime.evaluate", {
+                "expression": "JSON.stringify([window.innerWidth,window.innerHeight])",
+                "returnByValue": True,
+            }).get("result", {}).get("value", "")
+            viewport_w, viewport_h = json.loads(viewport)
+            if image_w and image_h and viewport_w and viewport_h:
+                self._last_screenshot_scale = (image_w / viewport_w, image_h / viewport_h)
+        except Exception:
+            self._last_screenshot_scale = (1.0, 1.0)
+        return data
 
     def close(self):
         if self.ws:
@@ -821,7 +909,8 @@ CDP_TOOLS = [
      "input_schema": {"type": "object", "properties": {}}},
     {"name": "act",
      "description": ("Execute one or more page actions in order, then get the updated tree. "
-                     "click (press an element by ref), type (fill a field by ref — REPLACES its "
+                     "click (press an element by ref), click_xy/drag (act at coordinates from the "
+                     "latest screenshot, for canvas editors), type (fill a field by ref — REPLACES its "
                      "content, fires real input/change events; also selects a native <select> "
                      "dropdown option by its visible text, e.g. type 'January' into a month select), "
                      "key (press a key like 'return'/'tab' with optional modifiers), navigate (go "
@@ -829,9 +918,12 @@ CDP_TOOLS = [
                      "CDP can't open the OS dropdown; use type with the option text instead."),
      "input_schema": {"type": "object", "properties": {"actions": {"type": "array", "items": {
          "type": "object", "properties": {
-             "action": {"type": "string", "enum": ["click", "type", "key", "navigate"]},
+             "action": {"type": "string", "enum": ["click", "click_xy", "drag", "type", "key", "navigate"]},
              "ref": {"type": "string"}, "text": {"type": "string"}, "key": {"type": "string"},
-             "modifiers": {"type": "array", "items": {"type": "string"}}, "url": {"type": "string"}},
+             "modifiers": {"type": "array", "items": {"type": "string"}}, "url": {"type": "string"},
+             "x": {"type": "number"}, "y": {"type": "number"},
+             "from_x": {"type": "number"}, "from_y": {"type": "number"},
+             "to_x": {"type": "number"}, "to_y": {"type": "number"}},
          "required": ["action"]}}}, "required": ["actions"]}},
 ]
 
@@ -866,6 +958,11 @@ class CDPComputer:
             try:
                 if act == "click":
                     lines.append(self.session.click(a["ref"]))
+                elif act == "click_xy":
+                    lines.append(self.session.click_xy(a["x"], a["y"]))
+                elif act == "drag":
+                    lines.append(self.session.drag_xy(a["from_x"], a["from_y"],
+                                                      a["to_x"], a["to_y"]))
                 elif act == "type":
                     lines.append(self.session.type_text(a.get("ref"), a.get("text", "")))
                 elif act == "key":

@@ -36,7 +36,10 @@ LAYERS (most-direct first):
    NOT the OS `screenshot` (that grabs the physical screen = the user's own window in the background);
    `web_screenshot` is the focus-free way to see the CDP page as pixels. FORMS: `web_act` "type"
    REPLACES a field and picks a native <select> option by its visible text (type "January") — NEVER
-   click a native dropdown.
+   click a native dropdown. CANVAS EDITORS (Google Docs/Slides, drawing tools): if the editable
+   surface has no ref, `web_screenshot`, then `web_act` click_xy at the visual insertion point,
+   then `web_act` type WITHOUT a ref. Coordinate clicks/drags are injected into the background
+   renderer and do not move the user's cursor or focus the OS window.
    NEW TABS: if a click/form opens a new tab, the next `web_snapshot` AUTO-FOLLOWS it — so just
    snapshot again to reach the new page. `web_tabs` lists open tabs; `web_switch_tab(i)` moves
    deliberately (back to a prior tab, or if auto-follow picked the wrong one).
@@ -130,6 +133,10 @@ KEY WORKFLOWS:
   `<select>` / combobox, type the option's VISIBLE TEXT into the select's own ref — NEVER click the
   dropdown or its `<option>` nodes (CDP can't open the OS menu; that thrash burns turns). Then type
   other fields, submit only if told, and re-`web_snapshot` to confirm.
+- Editing a web canvas (Google Docs/Slides and similar): enable the app's screen-reader support when
+  offered, then use `web_screenshot` for pixels. If the body/object has no ref, click_xy at its
+  screenshot coordinate and immediately `type` WITHOUT a ref (or key/drag). Verify with another
+  web_screenshot. Do not cross into native snapshot/act: that targets a different Chrome process.
 
 DESTRUCTIVE / SHELL / PRIVILEGED OPS:
 - Prefer `trash` (reversible) over `rm`; only empty the Trash when the task truly needs the space

@@ -292,10 +292,15 @@ def web_screenshot() -> Image:
 def web_act(actions: list) -> str:
     """Execute focus-free page actions on the CDP-controlled app, then return the updated tree.
     Each: {"action":"click","ref":"e12"} | {"action":"type","ref":"e12","text":"hi"} |
+    {"action":"click_xy","x":500,"y":250} | {"action":"drag","from_x":10,"from_y":20,
+    "to_x":200,"to_y":220} |
     {"action":"key","key":"return"} | {"action":"navigate","url":"https://..."}.
     `type` REPLACES a field's content (no more appending) and selects native <select> dropdown
     options by their visible text (e.g. type "January" into a month picker) — do NOT click a
     native dropdown and hunt for the option; CDP can't open the OS popup, so use `type`.
+    For a visual editor whose canvas has no element ref (Google Docs/Slides, drawing tools), call
+    web_screenshot, click_xy at a screenshot coordinate, then `type` WITHOUT a ref to type at the
+    established focus. These renderer-local actions remain background/focus-free.
     To follow a link, CLICK it by ref — do NOT `navigate` to a guessed/constructed URL; only
     navigate to a URL the user gave you or that you read from the page (navigate refuses a host
     that doesn't resolve)."""

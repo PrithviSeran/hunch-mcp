@@ -550,8 +550,8 @@ class Web:
         return self._computer.snapshot()
 
     def act(self, actions):
-        """Page actions by ref: click / type (replaces field content; picks <select>
-        options by visible text) / key / navigate. Returns the updated tree."""
+        """Page actions: click by ref; click_xy/drag at web-screenshot coordinates; type
+        (replaces a referenced field, or types at focus without a ref); key; navigate."""
         self._session()
         return self._computer.act(actions)
 

@@ -50,14 +50,16 @@ _ACTION_ITEM = {
         "to_x": {"type": "integer"}, "to_y": {"type": "integer"}},
     "required": ["action"]}
 
-# The web/CDP action item — a smaller verb set (no menu/pixel; navigate instead).
+# The web/CDP action item. Its coordinates are renderer-local and focus-free, unlike native pixels.
 _WEB_ACTION_ITEM = {
     "type": "object",
     "properties": {
-        "action": {"type": "string", "enum": ["click", "type", "key", "navigate"]},
+        "action": {"type": "string", "enum": ["click", "click_xy", "drag", "type", "key", "navigate"]},
         "ref": {"type": "string"}, "text": {"type": "string"},
         "key": {"type": "string"}, "modifiers": {"type": "array", "items": {"type": "string"}},
-        "url": {"type": "string"}},
+        "url": {"type": "string"}, "x": {"type": "number"}, "y": {"type": "number"},
+        "from_x": {"type": "number"}, "from_y": {"type": "number"},
+        "to_x": {"type": "number"}, "to_y": {"type": "number"}},
     "required": ["action"]}
 
 
@@ -143,7 +145,8 @@ AGENT_TOOLS = [
      "input_schema": _obj()},
     {"name": "web_act",
      "description": ("Run focus-free page actions, then get the updated tree. Verbs: click (by ref), "
-                     "type (REPLACES a field; picks <select> options by visible text), key, navigate "
+                     "click_xy/drag (coordinates from web_screenshot; canvas editors), type "
+                     "(with ref REPLACES a field; without ref types at current focus), key, navigate "
                      "(only to a URL you were given or read from the page — click links, don't guess)."),
      "input_schema": _obj({"actions": {"type": "array", "items": _WEB_ACTION_ITEM}}, ["actions"])},
     {"name": "web_restart",

@@ -12,6 +12,8 @@ Dependency-light: no live editor, no CDP socket — the AX and CDP calls are stu
 """
 
 import sys
+import base64
+import struct
 
 import hunch.cdp as cdp
 import hunch.local_mac as local_mac
@@ -323,6 +325,43 @@ def test_click_still_dispatches_for_normal_elements():
     assert any(m == "Input.dispatchMouseEvent" for m, _ in s.calls)
 
 
+def test_click_xy_uses_last_screenshot_scale():
+    s = _RecordingSession(is_terminal=False)
+    s._last_screenshot_scale = (2.0, 2.0)
+    out = s.click_xy(500, 250)
+    events = [p for m, p in s.calls if m == "Input.dispatchMouseEvent"]
+    assert out == "clicked screenshot point (500, 250)"
+    assert [(p["x"], p["y"]) for p in events] == [(250.0, 125.0), (250.0, 125.0)]
+
+
+def test_drag_xy_is_focus_free_renderer_input():
+    s = _RecordingSession(is_terminal=False)
+    s._last_screenshot_scale = (1.0, 1.0)
+    s.drag_xy(10, 20, 110, 70)
+    events = [p for m, p in s.calls if m == "Input.dispatchMouseEvent"]
+    assert events[0]["type"] == "mousePressed"
+    assert events[-1]["type"] == "mouseReleased"
+    assert events[-1]["x"] == 110 and events[-1]["y"] == 70
+    assert len([p for p in events if p["type"] == "mouseMoved"]) == 5
+
+
+def test_screenshot_records_png_to_viewport_scale():
+    class ShotSession(_RecordingSession):
+        def _cmd(self, method, params=None, timeout=20):
+            if method == "Page.captureScreenshot":
+                # Minimal bytes sufficient for the PNG signature + IHDR width/height parser.
+                raw = b"\x89PNG\r\n\x1a\n" + b"\0" * 8 + struct.pack(">II", 2000, 1200)
+                return {"data": base64.b64encode(raw).decode()}
+            if method == "Runtime.evaluate":
+                return {"result": {"value": "[1000,600]"}}
+            return super()._cmd(method, params, timeout)
+
+    s = ShotSession(is_terminal=False)
+    s._follow_new_tab = lambda: None
+    assert s.capture_screenshot()
+    assert s._last_screenshot_scale == (2.0, 2.0)
+
+
 def test_terminal_type_uses_keystrokes_not_value_set():
     """Typing into a terminal ref must go through Input.insertText + an Enter keystroke for the
     trailing newline, and must NOT set the textarea .value (which xterm ignores)."""
@@ -358,6 +397,24 @@ def test_insert_stream_splits_newlines():
                    if m == "Input.dispatchKeyEvent" and p.get("key") == "Enter" and p["type"] == "keyDown"]
     assert inserts == ["line1", "line2"]
     assert len(enter_downs) == 2         # one Enter per newline (each = a keyDown+keyUp pair)
+
+
+def test_ref_less_type_uses_full_keyboard_sequences():
+    """Canvas editors (notably Google Docs) ignore insertText despite showing a caret."""
+    s = _RecordingSession(is_terminal=False)
+    s.calls = []
+    out = s.type_text(None, "Ab\n")
+    assert "keyboard events" in out
+    inputs = [(method, params) for method, params in s.calls
+              if method == "Input.dispatchKeyEvent"]
+    assert not any(method == "Input.insertText" for method, _ in s.calls)
+    assert [params["type"] for _, params in inputs] == [
+        "rawKeyDown", "char", "keyUp",
+        "rawKeyDown", "char", "keyUp",
+        "rawKeyDown", "char", "keyUp",
+    ]
+    chars = [params["text"] for _, params in inputs if params["type"] == "char"]
+    assert chars == ["A", "b", "\r"]
 
 
 def test_backtick_key_has_backquote_code():
