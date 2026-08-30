@@ -668,23 +668,52 @@ class Files:
         hit = next((p for p in paths if gate.protected(p)), None)
         if hit is not None:
             return self._refused(hit, "deletable")
+        if self._h._gate.enabled("destructive_file"):
+            preview = ", ".join(str(p)[:60] for p in paths[:3])
+            if len(paths) > 3:
+                preview += f" … (+{len(paths) - 3} more)"
+            if not self._h._gate.confirm_dialog(
+                f"{self._h.app_name} wants to move {len(paths)} item(s) to Trash: {preview} — allow?",
+                category="destructive_file", detail=preview, screen_approval=False):
+                from .gate import ApprovalDenied
+                raise ApprovalDenied("user did not approve moving items to Trash")
         return os_ops.trash(paths)
 
     def move(self, src, dst):
         for p in (src, dst):
             if p and gate.protected(p):
                 return self._refused(p, "writable")
+        if self._h._gate.enabled("destructive_file"):
+            detail = f"{src} -> {dst}"
+            if not self._h._gate.confirm_dialog(
+                f"{self._h.app_name} wants to move {src!r} to {dst!r} — allow?",
+                category="destructive_file", detail=detail, screen_approval=False):
+                from .gate import ApprovalDenied
+                raise ApprovalDenied("user did not approve move")
         return os_ops.move(src, dst)
 
     def copy(self, src, dst):
         for p in (src, dst):
             if p and gate.protected(p):
                 return self._refused(p, "writable")
+        if self._h._gate.enabled("destructive_file"):
+            detail = f"{src} -> {dst}"
+            if not self._h._gate.confirm_dialog(
+                f"{self._h.app_name} wants to copy {src!r} to {dst!r} — allow?",
+                category="destructive_file", detail=detail, screen_approval=False):
+                from .gate import ApprovalDenied
+                raise ApprovalDenied("user did not approve copy")
         return os_ops.copy(src, dst)
 
     def mkdir(self, path):
         if gate.protected(path):
             return self._refused(path, "writable")
+        if self._h._gate.enabled("destructive_file"):
+            if not self._h._gate.confirm_dialog(
+                f"{self._h.app_name} wants to create folder {path!r} — allow?",
+                category="destructive_file", detail=str(path), screen_approval=False):
+                from .gate import ApprovalDenied
+                raise ApprovalDenied("user did not approve mkdir")
         return os_ops.make_dir(path)
 
     def open(self, path, app=None):

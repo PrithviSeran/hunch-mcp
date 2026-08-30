@@ -19,6 +19,7 @@ import tempfile
 import time
 
 from . import ax_tree_mac as ax  # reuse the AX primitives (get_attrs, bounds, list_apps, get_window)
+from .notify import as_str  # AppleScript string escaping (canonical home is notify.py)
 from ApplicationServices import (
     AXUIElementCreateApplication, AXUIElementPerformAction,
     AXUIElementSetAttributeValue, AXUIElementSetMessagingTimeout,
@@ -1255,7 +1256,7 @@ def launch_app(name, force_accessibility=False, background=False):
         # lets the app save state), then hard-kill if it won't go: some apps (Discord) IGNORE SIGTERM,
         # so the reliable fallback is SIGKILL (pkill -9), which needs no Automation permission.
         if old_pids:
-            subprocess.run(["osascript", "-e", f'tell application "{name}" to quit'], check=False)
+            subprocess.run(["osascript", "-e", f'tell application {as_str(name)} to quit'], check=False)
             gone_by = time.time() + 4
             while time.time() < gone_by and _pids_named(name):
                 time.sleep(0.3)

@@ -120,7 +120,7 @@ def find(role: str = "", name_contains: str = "", app: str = "", max_results: in
 
 
 @mcp.tool()
-def act(actions: list, confirm: bool = False, reason: str = "") -> str:
+def act(actions: list, reason: str = "") -> str:
     """Execute one or more UI actions in order (by element ref), then return what
     CHANGED on screen since your last view (~ changed, + new, gone: refs; unchanged
     lines omitted). First look, a window change, or heavy churn returns the full
@@ -157,13 +157,12 @@ def act(actions: list, confirm: bool = False, reason: str = "") -> str:
     shared keyboard/mouse and require the app frontmost). For those it pops a click-to-approve
     dialog ('Go ahead' / 'Cancel') on the user's screen and only proceeds if they click Go
     ahead — so it never grabs the screen by surprise, and the user approves with ONE CLICK (no
-    typing). Focus-free actions run immediately. Pass confirm=true only if the user has already
-    approved and you want to skip the dialog.
+    typing). Focus-free actions run immediately.
 
     When the batch contains ANY focus-stealing action, ALWAYS pass `reason` — one short human
     sentence for WHY you need the screen (e.g. "press Enter to submit the search"). It is shown
     to the user in the focus warning and the approval prompt."""
-    return _run("act", actions=actions, confirm=confirm, reason=reason)
+    return _run("act", actions=actions, reason=reason)
 
 
 @mcp.tool()
@@ -434,7 +433,7 @@ def clipboard_set(text: str) -> str:
 
 
 @mcp.tool()
-def applescript(script: str, confirm: bool = False) -> str:
+def applescript(script: str) -> str:
     """Run AppleScript to control scriptable native apps FOCUS-FREE via Apple Events — the
     app's own command layer, not its UI/keyboard/focus. Unlocks Mail, Messages, Notes,
     Reminders, Calendar, Music, Finder, Safari, Keynote, etc. (e.g.
@@ -447,10 +446,9 @@ def applescript(script: str, confirm: bool = False) -> str:
 
     SAFETY: read-only queries (get / count) run directly. Scripts that mutate, send, delete,
     quit, or use 'do shell script' pop a one-click 'Go ahead' dialog on the user's screen and
-    only run if approved (pass confirm=true to skip the dialog if the user already approved).
-    Note: the FIRST time Hunch scripts a given app, macOS shows a one-time 'allow control'
-    permission prompt the user must accept."""
-    return _run("applescript", script=script, confirm=confirm)
+    only run if approved. Note: the FIRST time Hunch scripts a given app, macOS shows a
+    one-time 'allow control' permission prompt the user must accept."""
+    return _run("applescript", script=script)
 
 
 def main():

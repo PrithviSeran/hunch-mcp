@@ -75,7 +75,7 @@ def open_path(path, app=None):
     ws = NSWorkspace.sharedWorkspace()
     target = _abspath(path) if os.path.exists(_abspath(path)) else str(path)
     if app:
-        os.system(f'open -a {app!r} {target!r}')  # simple, reliable app routing
+        subprocess.run(["open", "-a", app, target], check=False)
         return f"opened {target} with {app}"
     if os.path.exists(target):
         ok = ws.openURL_(NSURL.fileURLWithPath_(target))
