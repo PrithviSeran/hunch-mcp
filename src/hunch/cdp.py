@@ -23,6 +23,7 @@ import subprocess
 import tempfile
 import urllib.request
 import urllib.parse
+import ipaddress
 
 import websocket  # websocket-client
 
@@ -33,6 +34,37 @@ def _host_resolves(host):
         return True
     except Exception:
         return False
+
+
+def _is_blocked_host(host):
+    """True for loopback / private / link-local / reserved / multicast hosts (SSRF)."""
+    if not host:
+        return False
+    h = host.lower().strip()
+    if h == "localhost" or h.endswith(".localhost"):
+        return True
+    raw = h.strip("[]")  # [::1] -> ::1
+    try:
+        ip = ipaddress.ip_address(raw)
+        return (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_unspecified or ip.is_multicast)
+    except ValueError:
+        pass
+    # hostname -> resolve and check any A/AAAA is private
+    try:
+        infos = socket.getaddrinfo(host, None, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM)
+        for _, _, _, _, sockaddr in infos:
+            ip_str = sockaddr[0]
+            try:
+                ip = ipaddress.ip_address(ip_str)
+                if (ip.is_private or ip.is_loopback or ip.is_link_local
+                        or ip.is_reserved or ip.is_unspecified or ip.is_multicast):
+                    return True
+            except ValueError:
+                continue
+    except Exception:
+        return False  # NXDOMAIN handled by caller
+    return False
 
 
 # ── ARIA/CDP roles worth surfacing (interactive + content), like the AX filter ──
@@ -828,9 +860,18 @@ class CDPSession:
         return ("accounts.google.com" in low) or ("/signin" in low) or ("sign in" in low)
 
     def navigate(self, url):
-        # Guard against a GUESSED/hallucinated URL: if the host doesn't resolve, don't navigate to a
-        # dead page — steer back to clicking the real link (whose href/redirect knows the true target).
-        host = urllib.parse.urlparse(url).hostname
+        # SSRF + hallucination guards: block private/internal hosts before any fetch,
+        # then ensure the host actually resolves. Private check must come first – a
+        # private host *does* resolve (localhost -> 127.0.0.1) and would otherwise be fetched.
+        parsed = urllib.parse.urlparse(url)
+        host = parsed.hostname
+        if parsed.scheme and parsed.scheme.lower() not in ("http", "https"):
+            return (f"REFUSED: navigation to scheme '{parsed.scheme}' is blocked — only http/https "
+                    f"are allowed. If you need a file, use the filesystem tools.")
+        if host and _is_blocked_host(host):
+            return (f"REFUSED: navigation to private/internal host '{host}' is blocked (SSRF "
+                    f"protection). Navigate only to public http(s) hosts, or click a link by ref "
+                    f"instead of guessing a URL.")
         if host and not _host_resolves(host):
             return (f"'{url}' — host '{host}' does NOT resolve (DNS). If you constructed or guessed this "
                     "URL, don't: go back to the page and CLICK the actual link (by ref) so its real "
