@@ -5,6 +5,7 @@ Needs pyobjc (imports the server) but touches no Keychain items and no UI.
 """
 
 import os
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -141,6 +142,45 @@ def test_applescript_empty_result_explains_electron_zero_windows():
     assert gate.applescript_empty_hint('tell application "System Events" to keystroke "a"') == ""
 
 
+def test_applescript_timeout_is_inconclusive(monkeypatch):
+    """A slow query is not proof that Automation permission is missing."""
+    from hunch import os_ops
+
+    def time_out(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(os_ops.subprocess, "run", time_out)
+    ok, message = os_ops.run_applescript('tell application "Mail" to get name of every account',
+                                         timeout=3)
+    assert ok is False
+    assert message.startswith("[APPLESCRIPT_TIMEOUT]")
+    assert "does NOT prove" in message
+    assert "AUTOMATION_DENIED" not in message
+
+
+def test_applescript_permission_hints_require_explicit_evidence():
+    from hunch import gate
+
+    assert gate.applescript_hint("query timed out after 60 seconds") == ""
+    assert gate.applescript_hint("nothing was returned") == ""
+    assert "AUTOMATION_DENIED" in gate.applescript_hint(
+        "Not authorized to send Apple events to Mail. (-1743)")
+    assert "ACCESSIBILITY_DENIED" in gate.applescript_hint(
+        "osascript is not allowed assistive access. (-25211)")
+
+
+def test_messages_database_denial_prefers_supported_ui_fallback():
+    from hunch import gate
+
+    hint = gate.applescript_hint(
+        "sqlite3: authorization denied while opening database",
+        'do shell script "sqlite3 ~/Library/Messages/chat.db ..."')
+    assert "FULL_DISK_ACCESS_REQUIRED" in hint
+    assert "separate from Hunch's normal" in hint
+    assert "Do not ask the user to grant it" in hint
+    assert "snapshot/act" in hint
+
+
 def test_applescript_settings_refusal_blocks_defaults_and_ui_script():
     """Freeze miss mode: agents invent defaults write / System Events clicks for Settings."""
     from hunch import gate
@@ -159,6 +199,9 @@ def test_playbook_covers_toggle_and_select_policy():
     assert "val='0'" in pb and "val='1'" in pb
     assert "defaults write" in pb
     assert "VISIBLE TEXT" in pb
+    assert "PERMISSION CLAIMS REQUIRE EXPLICIT EVIDENCE" in pb
+    assert "do not read `~/Library/Messages/chat.db`" in pb
+    assert "make at most one small native account probe" in pb
 
 
 def test_twin_process_warning_names_which_copy_the_tree_is(monkeypatch):
