@@ -25,12 +25,18 @@ DEFAULT_GATES = {
 }
 
 CONFIG_KEYS = ["gates.focus_steal", "gates.app_to_front", "gates.shell",
-               "gates.destructive_applescript", "gates.destructive_file", "auto_approve_all"]
+               "gates.destructive_applescript", "gates.destructive_file",
+               "notifications.user_attention", "auto_approve_all"]
 
 
 def default_config() -> dict:
     return {"version": 1, "auto_approve_all": False, "auto_approve_warned": False,
-            "gates": dict(DEFAULT_GATES)}
+            "gates": dict(DEFAULT_GATES), "notifications": {"user_attention": False}}
+
+
+def user_attention_notifications_enabled() -> bool:
+    """Whether the personal MCP server may send unsolicited desktop banners."""
+    return bool(get(load(), "notifications.user_attention"))
 
 
 def load() -> dict:
