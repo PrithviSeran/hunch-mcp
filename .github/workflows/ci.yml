@@ -30,6 +30,6 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Install package and test runner
-        run: python -m pip install . pytest
+        run: python -m pip install '.[agent]' pytest
       - name: Run tests
         run: python -m pytest tests/
