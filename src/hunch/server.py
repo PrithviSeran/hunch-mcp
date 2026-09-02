@@ -447,7 +447,11 @@ def applescript(script: str) -> str:
     SAFETY: read-only queries (get / count) run directly. Scripts that mutate, send, delete,
     quit, or use 'do shell script' pop a one-click 'Go ahead' dialog on the user's screen and
     only run if approved. Note: the FIRST time Hunch scripts a given app, macOS shows a
-    one-time 'allow control' permission prompt the user must accept."""
+    one-time 'allow control' permission prompt the user must accept.
+
+    ERROR EVIDENCE: a timeout or empty result does NOT establish a permission problem. Only
+    report missing permissions when the result explicitly says ACCESSIBILITY_DENIED,
+    AUTOMATION_DENIED, or FULL_DISK_ACCESS_REQUIRED."""
     return _run("applescript", script=script)
 
 

@@ -302,7 +302,7 @@ class Hunch:
         if ok:
             hint = "" if out else gate.applescript_empty_hint(script)
             return f"(no output){hint}" if hint else out
-        return f"AppleScript error: {out[:600]}{gate.applescript_hint(out)}"
+        return f"AppleScript error: {out[:600]}{gate.applescript_hint(out, script)}"
 
     def notify(self, message, title=None):
         """Notify the user: through the instance's notify handler if one was given

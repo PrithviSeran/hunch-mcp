@@ -170,15 +170,32 @@ def applescript_category(script):
             else None)
 
 
-def applescript_hint(out):
-    """Permission-aware suffix for an AppleScript error (TCC denials), or ""."""
-    if "assistive access" in out.lower() or "-25211" in out:
-        return (" — macOS blocked this: the app hosting Hunch lacks the Accessibility "
+def applescript_hint(out, script=""):
+    """Classification suffix for explicit AppleScript/TCC failures, or "".
+
+    Timeouts and empty results are deliberately not permission evidence. Protected database
+    access is a separate Full Disk Access capability and should fall back to the supported UI
+    path rather than teaching the agent to request a broad grant.
+    """
+    low = (out or "").lower()
+    script_low = (script or "").lower()
+    denied = any(k in low for k in ("authorization denied", "operation not permitted",
+                                     "permission denied"))
+    messages_db = "library/messages/chat.db" in low or "library/messages/chat.db" in script_low
+    if denied and messages_db:
+        return (" [FULL_DISK_ACCESS_REQUIRED] Direct access to Messages chat.db is blocked by "
+                "macOS Full Disk Access, which is separate from Hunch's normal Accessibility, "
+                "Automation, and Screen Recording permissions. Do not ask the user to grant it "
+                "by default; continue through Messages AppleScript or snapshot/act instead.")
+    if "assistive access" in low or "-25211" in low:
+        return (" [ACCESSIBILITY_DENIED] macOS explicitly blocked this: the app hosting Hunch "
+                "lacks the Accessibility "
                 "permission. Tell the user: System Settings → Privacy & Security → "
                 "Accessibility, enable the MCP host app (toggle off/on if already listed), "
                 "then restart it. `hunch doctor` explains.")
-    if "not authorized" in out.lower() or "-1743" in out:
-        return (" — Automation consent missing for the target app. macOS shows a one-time "
+    if "not authorized" in low or "-1743" in low:
+        return (" [AUTOMATION_DENIED] macOS explicitly denied Automation access to the target "
+                "app. macOS shows a one-time "
                 "'allow control' prompt on first use; if it was denied, tell the user to "
                 "re-enable it in System Settings → Privacy & Security → Automation.")
     return ""

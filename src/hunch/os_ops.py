@@ -107,6 +107,16 @@ def run_applescript(script, timeout=60):
         with os.fdopen(fd, "w") as f:
             f.write(script)
         r = subprocess.run(["osascript", path], capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # A timeout is operationally ambiguous: the target app may be busy, the query may be
+        # expensive, or macOS may have a consent sheet open. Never turn that ambiguity into a
+        # claim that a permission is missing; only osascript's explicit TCC errors establish it.
+        return False, (
+            f"[APPLESCRIPT_TIMEOUT] AppleScript exceeded {timeout} seconds. This result is "
+            "inconclusive and does NOT prove a macOS permission problem. Try one smaller query, "
+            "then switch to another available layer instead of requesting permissions. Only "
+            "report an Automation denial when osascript explicitly returns -1743 or "
+            "'not authorized'.")
     except Exception as e:  # noqa: BLE001
         return False, str(e)
     finally:
