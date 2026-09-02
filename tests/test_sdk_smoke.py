@@ -162,6 +162,18 @@ def test_notify_handler_routing():
         assert "notify" in str(e)
 
 
+def test_notifications_are_opt_in(monkeypatch):
+    sent = []
+    monkeypatch.setattr("hunch.sdk._notify", lambda *args, **kwargs: sent.append((args, kwargs)))
+    h = Hunch(check_permissions=False, confirm="off")
+    assert h.notify("quiet") is False
+    assert sent == []
+
+    enabled = Hunch(check_permissions=False, confirm="off", notify=True)
+    assert enabled.notify("hello") is True
+    assert len(sent) == 1
+
+
 def test_protected_covers_app_dirs():
     assert gate.protected(os.path.expanduser("~/.hunch/apps/com.acme.mailbot/creds_index.json"))
     assert gate.protected(os.path.expanduser("~/.hunch/config.json"))
@@ -258,6 +270,19 @@ def test_server_is_an_app_on_the_sdk():
     assert server._gate is server._mac._gate
     assert server._gate._policy == "personal"
     assert server._mac._notify_handler is server._notify
+
+
+def test_server_notifications_follow_personal_config(monkeypatch):
+    sent = []
+    monkeypatch.setattr(server, "_APP_OWNS_PERMS", False)
+    monkeypatch.setattr(server.policy, "user_attention_notifications_enabled", lambda: False)
+    monkeypatch.setattr(server, "_notify_impl", lambda *args, **kwargs: sent.append((args, kwargs)))
+    assert server._notify("quiet") is False
+    assert sent == []
+
+    monkeypatch.setattr(server.policy, "user_attention_notifications_enabled", lambda: True)
+    assert server._notify("needed") is True
+    assert len(sent) == 1
 
 
 def test_server_run_delegation(monkeypatch):

@@ -19,6 +19,7 @@ from mcp.server.fastmcp import FastMCP, Image
 
 from .playbook import HUNCH_PLAYBOOK
 from . import gate
+from . import policy
 from .notify import notify as _notify_impl
 
 
@@ -35,11 +36,14 @@ def _notify(message, title="Hunch"):
     In app mode the Hunch popover re-surfaces itself instead (the app pops it when the
     notify_user / web_login tool event streams through), so the banner would be a duplicate."""
     if _APP_OWNS_PERMS:
-        return
+        return True  # the host app re-surfaces itself from the streamed tool event
+    if not policy.user_attention_notifications_enabled():
+        return False
     try:
         _notify_impl(message, title, sound="Ping")
+        return True
     except Exception:
-        pass
+        return False
 
 
 # ── ONE Hunch instance: the engine behind every tool ──────────────────────────────
@@ -256,11 +260,12 @@ def web_login(app: str = "Google Chrome", url: str = "") -> str:
     `app` is the BROWSER name (default "Google Chrome"); `url` is the site's login/home page
     (e.g. "https://mail.google.com/") — do not pass a website as `app`.
     Opens the browser in the BACKGROUND at that URL (it does NOT steal focus), in a window
-    tagged with a green '🟢 HUNCH — LOG IN HERE' banner, and fires a desktop notification.
+    tagged with a green '🟢 HUNCH — LOG IN HERE' banner and uses the configured
+    user-attention notification when enabled.
     The user switches to that window on their own schedule and signs in themselves (Hunch
     never sees the password); the session then persists, and all later web_open / web_act
-    calls run focus-free. Tell the user a notification was sent and to switch to the
-    banner-tagged window when ready, sign in, leave it open, and confirm when done."""
+    calls run focus-free. Tell the user to switch to the banner-tagged window when ready,
+    sign in, leave it open, and confirm when done."""
     return _run("web_login", app=app, url=url)
 
 
@@ -374,8 +379,9 @@ def web_fill_secret(service: str, ref: str = "") -> str:
 def notify_user(message: str) -> str:
     """Alert the user when Hunch needs them SHORTLY — to finish a login, approve a 2FA /
     verification prompt, solve a captcha, or make a decision. Brings the Hunch window back up
-    (or fires a desktop notification when running outside the app). Call this the moment you
-    hit a step only the human can do, so they don't have to watch the screen."""
+    (or fires a desktop notification when running outside the app and the user enabled
+    `notifications.user_attention`). Call this the moment you hit a step only the human can
+    do, so they don't have to watch the screen."""
     return _run("notify_user", message=message)
 
 

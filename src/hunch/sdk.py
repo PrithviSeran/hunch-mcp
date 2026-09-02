@@ -60,7 +60,7 @@ class Hunch:
                  simultaneous=False, cdp_port=None,
                  snapshot_max_depth=None, snapshot_max_nodes=None,
                  provider="claude", auth=None, can_use_tool=None, app_name=None, policy=None,
-                 app_id=None, cdp_profile=None, notify=None):
+                 app_id=None, cdp_profile=None, notify=False):
         """provider: which LLM vendor drives the agent loop — 'claude' (Anthropic, on your
         Claude sign-in; the default) or 'codex' (OpenAI Codex, on a `codex login` session).
         Set once here; then mac.login() / mac.status() / mac.logout() and mac.agent all act
@@ -95,8 +95,9 @@ class Hunch:
         legacy/personal names (what the MCP server uses).
 
         cdp_profile: browser profile dir override (default derives from app_id).
-        notify: callable(message, title) replacing system notifications with your own
-        surface (e.g. an in-app toast)."""
+        notify: False/None (default) disables user-attention notifications; True opts
+        into native macOS banners; a callable(message, title) routes them through your
+        own surface (e.g. an in-app toast)."""
         if isinstance(policy, dict):
             unknown = set(policy.get("gates", {})) - set(_policy_mod.DEFAULT_GATES)
             if unknown:
@@ -106,11 +107,12 @@ class Hunch:
             if not app_id or not all(c.isalnum() or c in "._-" for c in app_id):
                 raise HunchError(f"invalid app_id {app_id!r} — use letters, digits, '.', "
                                  "'_', '-' (reverse-DNS style, e.g. 'com.acme.mailbot')")
-        if notify is not None and not callable(notify):
-            raise HunchError("notify must be a callable(message, title) or None")
+        if not (notify is None or isinstance(notify, bool) or callable(notify)):
+            raise HunchError("notify must be True, False, None, or a callable(message, title)")
         self.app_id = app_id
         self._app_id = app_id            # what Agent/_SubscriptionRunner read
-        self._notify_handler = notify
+        self._notify_handler = notify if callable(notify) else None
+        self._native_notifications = notify is True
         self.app_name = app_name or (app_id.split(".")[-1].replace("-", " ").replace("_", " ")
                                      .title() if app_id else "Hunch")
         try:
@@ -305,13 +307,14 @@ class Hunch:
         return f"AppleScript error: {out[:600]}{gate.applescript_hint(out)}"
 
     def notify(self, message, title=None):
-        """Notify the user: through the instance's notify handler if one was given
-        (your app's own surface), else a macOS desktop notification titled app_name."""
+        """Notify the user when explicitly configured; return whether it was delivered."""
         title = title or self.app_name
         if self._notify_handler is not None:
-            self._notify_handler(message, title)
-            return
+            return self._notify_handler(message, title) is not False
+        if not self._native_notifications:
+            return False
         _notify(message, title, sound="Ping")
+        return True
 
     def list_credentials(self):
         """Names + kinds of saved credentials (never any values). Fill them into a CDP
@@ -504,8 +507,8 @@ class Web:
 
     def login(self, url="", app="Google Chrome"):
         """Open a background, banner-tagged window for the HUMAN to sign in once (Hunch
-        never sees the password). Fires a desktop notification; the login persists in
-        the Hunch profile."""
+        never sees the password). Uses the configured user-attention notification, if
+        enabled; the login persists in the Hunch profile."""
         from .cdp import CDPComputer, quit_cdp
         self.close()
         quit_cdp(self.port)  # fresh window, no stale-instance reuse
@@ -520,10 +523,12 @@ class Web:
             s.navigate(url)
         s.wait_ready()
         s.mark()
-        self._h.notify("Switch to the green 'HUNCH — LOG IN HERE' window to sign in.",
-                       f"{self._h.app_name} needs you to sign in")
-        return ("opened a background, banner-tagged window and sent a notification — "
-                "have the user sign in there and leave it open, then continue")
+        notified = self._h.notify(
+            "Switch to the green 'HUNCH — LOG IN HERE' window to sign in.",
+            f"{self._h.app_name} needs you to sign in")
+        notice = "sent the configured notification" if notified else "notifications are disabled"
+        return (f"opened a background, banner-tagged window; {notice} — have the user sign "
+                "in there and leave it open, then continue")
 
     def restart(self, url="", app="Google Chrome"):
         """Quit and reopen the CDP instance fresh (same persistent profile, login kept).

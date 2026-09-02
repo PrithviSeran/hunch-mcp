@@ -134,7 +134,8 @@ AGENT_TOOLS = [
                            "isolated": {"type": "boolean"}})},
     {"name": "web_login",
      "description": ("Open a background, banner-tagged window for the HUMAN to sign in once (Hunch "
-                     "never sees the password); the login then persists. Fires a desktop notification."),
+                     "never sees the password); the login then persists. Uses the configured "
+                     "user-attention notification when enabled."),
      "input_schema": _obj({"app": {"type": "string"}, "url": {"type": "string"}})},
     {"name": "web_snapshot",
      "description": "Read the CDP-controlled page as an accessibility tree. Call web_open first.",
@@ -292,7 +293,10 @@ def _set_simultaneous(mac, on):
 
 
 def _notify(mac, message):
-    mac.notify(message, f"{getattr(mac, 'app_name', 'Hunch')} needs you")
+    delivered = mac.notify(message, f"{getattr(mac, 'app_name', 'Hunch')} needs you")
+    if delivered is False:
+        return ("user-attention notifications are disabled; ask the user directly in your "
+                f"response: {message}")
     return f"notified the user: {message}"
 
 

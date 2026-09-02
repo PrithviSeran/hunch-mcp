@@ -242,7 +242,7 @@ mac = Hunch(
                                         #   profile, and CDP port; never a behavior switch
     app_name="Acme Mailbot",            # what consent dialogs + notifications say
     confirm=my_consent_callback,        # ConsentRequest -> bool, rendered in YOUR UI
-    notify=my_toast_handler,            # (message, title) -> your surface, not macOS banners
+    notify=my_toast_handler,            # callback, or True for native macOS banners (default: off)
     policy={"gates": {"shell": True}},  # instance-owned safety; the user's personal
                                         #   config can never disarm your app
     auth=OAuthToken(token),             # the exact Claude subscription token YOUR app manages
@@ -323,6 +323,10 @@ metadata) via its file tools; permission changes are for humans in a terminal.
 | `HUNCH_NO_INTERNAL_GATE=1` | suppress all internal dialogs (for host apps that run their own approval UX) |
 | `HUNCH_FORCE_SANDBOX=1` | web layer uses a throwaway, logged-out browser profile |
 | `HUNCH_NOTIFY_FOCUS=0` | silence the "Hunch is switching apps" notifications (they fire only for switches no dialog asked about) |
+
+User-attention desktop notifications are opt-in. For the personal MCP server, enable them with
+`hunch config set notifications.user_attention on`. SDK apps can pass `notify=True` for native
+macOS banners or a `notify(message, title)` callback for their own UI; the default is disabled.
 
 ## FAQ
 

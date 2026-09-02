@@ -73,7 +73,8 @@ def _print_config():
     for key in policy.CONFIG_KEYS:
         val = policy.get(cfg, key)
         if val is None:
-            val = policy.DEFAULT_GATES.get(key.split(".", 1)[-1], False)
+            val = (policy.DEFAULT_GATES.get(key.split(".", 1)[-1], False)
+                   if key.startswith("gates.") else False)
         effective = policy.gate_enabled(key.split(".", 1)[-1]) if key.startswith("gates.") else val
         note = ""
         if env_override and key.startswith("gates."):
@@ -91,7 +92,7 @@ def cmd_config(args):
         return 0
     if args.action == "reset":
         policy.save(policy.default_config())
-        print("config reset to defaults (all gates on).")
+        print("config reset to defaults (all gates on; user-attention notifications off).")
         return 0
     # set
     key, value = args.key, args.value

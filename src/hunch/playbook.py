@@ -68,8 +68,8 @@ KEY WORKFLOWS:
   `do shell script`, or AppleScript UI-clicks to flip System Settings — those paths are refused and
   often write the wrong key while the pane stays unchanged. Sidebar rows (Spotlight, Motion, …): if
   click reports "no navigation", `select` the row or use the View menu — do not grind the same click.
-- Sign into a site: `web_login(app, url)` opens a background banner-tagged window and notifies
-  the user; then wait for their "done".
+- Sign into a site: `web_login(app, url)` opens a background banner-tagged window and uses the
+  configured user-attention notification when enabled; then wait for their "done".
 - Log in with SAVED credentials: if `list_credentials` shows a service, `web_open` the site then
   `web_fill_login(service)` — Hunch types the saved email+password straight into the page and you
   NEVER see the values; then submit via `web_act`. No saved credential? Use `web_login` instead.

@@ -70,6 +70,16 @@ def test_app_to_front_gate_default_on():
     assert "gates.app_to_front" in policy.CONFIG_KEYS
 
 
+def test_user_attention_notifications_default_off(monkeypatch, tmp_path):
+    monkeypatch.setattr(policy, "CONFIG_PATH", str(tmp_path / "config.json"))
+    assert "notifications.user_attention" in policy.CONFIG_KEYS
+    assert policy.user_attention_notifications_enabled() is False
+    cfg = policy.default_config()
+    policy.set_key(cfg, "notifications.user_attention", True)
+    policy.save(cfg)
+    assert policy.user_attention_notifications_enabled() is True
+
+
 def test_screen_approval_dedupe():
     import hunch.local_mac as local_mac
     # A fresh approval lets the front gate pass with NO dialog...
