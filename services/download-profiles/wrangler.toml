@@ -1,0 +1,10 @@
+name = "hunch-download-api"
+main = "worker.mjs"
+compatibility_date = "2026-09-08"
+workers_dev = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "hunch-profiles"
+database_id = "3a934b8e-06a7-4e0a-8396-6cf0827c53d8"
+migrations_dir = "migrations"

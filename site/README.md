@@ -14,7 +14,7 @@ Markdown in `content/`** by `build.py`.
 - `styles.css` — all styles (light default + `[data-theme="dark"]`)
 - `theme.js` — light/dark toggle (persisted in localStorage)
 - `assets/` — logos + favicon
-- `vercel.json` — `cleanUrls` (drops `.html`) + no trailing slash; `/download` → API
+- `vercel.json` — `cleanUrls` (drops `.html`) + no trailing slash; `/download` → download form
 - `api/download.js` — increments the DMG download counter on R2, then 302s to the file
 - `api/stats.js` — returns `{ downloads, updated_at }` (also at `/api/stats`)
 - `api/_lib/r2.js` — private shared R2/S3 SigV4 helper (underscore = not an HTTP route)
@@ -41,34 +41,40 @@ The generated HTML is committed so the host needs no build step.
 4. Deploy. `cleanUrls` serves `/blogs` and `/blog/<slug>` without `.html`.
 5. Add your domain under the project's Domains tab.
 
-### DMG download tracking
-The hero **Download for macOS** button hits `/download`, which counts the hit in
-`stats/dmg.json` on the `hunch-updates` R2 bucket, then redirects to
-`https://pub-8748b4003e764f8a888e32c8e2ce7057.r2.dev/Hunch.dmg`.
+### Download form and profiles
 
-Read the running total anytime:
-```
-curl https://www.tryhunch.ca/api/stats
-# → {"downloads":12,"updated_at":"2026-…"}
-```
+Every macOS download button points to `/download` (`download.html`). The form requires
+name and email and accepts optional LinkedIn, X, GitHub, and other social/website URLs.
+`download.js` sends JSON to `POST /api/download`. That endpoint saves the profile via
+`hunch-download-api`, then returns the DMG URL. Save failures keep the visitor on the
+form and never start the download. `GET`/`HEAD /api/download` redirects to the form.
 
-For the counter to increment, set these **Production** env vars in the Vercel
-project (same values as the local `rclone` `r2` remote), then redeploy:
+The Worker lives in `../services/download-profiles/`. It uses the existing
+`hunch-profiles` D1 database and **the existing `profiles` table**, with email as its
+case-insensitive primary key. Repeat email submissions update the name and supplied
+social links; empty social fields preserve stored links. The original app profile API
+continues to work with the added columns. No new profile table is created.
 
-- `R2_ACCESS_KEY_ID`
-- `R2_SECRET_ACCESS_KEY`
-- `R2_ENDPOINT` — `https://<accountid>.r2.cloudflarestorage.com`
-- `R2_BUCKET` — `hunch-updates`
+The additive migration `0002_profile_socials.sql` was applied on September 8, 2026.
+Do not reapply it to a database where those columns already exist. This service shares
+a database with the native app's profile service; inspect the schema before migrations.
 
-Optional: `HUNCH_DMG_URL` overrides the public DMG URL.
+Deploy the Worker from `services/download-profiles` with `wrangler deploy`, then deploy
+this site to the existing Vercel project. No new Vercel secrets are required. Tests:
 
-Without the credentials the redirect still works; only the count write is skipped.
-Until they're set, `/api/stats` still reads the public `stats/dmg.json` on R2.
-Re-upload a new DMG over the stable key when you cut a release:
-```
-rclone copyto dist/Hunch.dmg r2:hunch-updates/Hunch.dmg --s3-no-check-bucket
+```bash
+node --test services/download-profiles/tests/download.test.mjs
 ```
 
-Local preview: `cd site && python3 -m http.server 8000` → http://localhost:8000
-(the dev server doesn't rewrite clean URLs; click through from the homepage or
-hit `.html` paths directly — Vercel handles the rewrite in production).
+The existing R2 aggregate counter now increments after a successful form save rather
+than on a GET/HEAD request. Repeat submissions may increment it again; it is not a
+unique-profile count. The existing R2 environment variables remain required for counting:
+`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_ENDPOINT`, `R2_BUCKET`.
+The total is readable at `https://www.tryhunch.ca/api/stats`.
+
+The stable DMG remains in the `hunch-updates` R2 bucket. Direct file downloads and the
+Sparkle appcast are unchanged. The form is a website download flow, not access control
+for the publicly available app. Profile email addresses are self-reported, not verified.
+
+Local static preview: `cd site && python3 -m http.server 8000`, then visit
+`/download.html`. Submitting requires the Vercel API (or a local Vercel dev server).

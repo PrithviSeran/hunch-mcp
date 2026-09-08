@@ -1,0 +1,26 @@
+.download-page{display:grid;grid-template-columns:1fr 1fr;gap:90px;padding-top:72px;padding-bottom:90px;align-items:start}
+.download-intro .art-back{display:block;margin-bottom:38px}
+.download-logo{display:block;margin-bottom:24px;border-radius:24px}
+.download-intro h1{font-family:var(--serif);font-size:clamp(42px,5vw,64px);line-height:1.08;font-weight:400;letter-spacing:-.04em;margin:0 0 22px}
+.download-intro p{max-width:36ch;color:var(--muted)}
+.download-intro .lede{font-size:22px;color:var(--text)}
+.download-form-section{padding-top:8px}
+.download-form-section h2{font-size:27px;margin:0 0 26px}
+.form-field{margin-bottom:19px}
+.form-field label{display:block;font-size:15px;font-weight:600;margin-bottom:7px}
+.download-form-section span{font-weight:400;color:var(--muted);font-size:14px}
+.form-field input{display:block;width:100%;min-width:0;padding:12px 14px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);font:inherit;font-size:16px}
+.form-field input::placeholder{color:var(--muted)}
+.download-page :focus-visible{outline:3px solid var(--hunch);outline-offset:3px}
+.download-form-section fieldset{border:0;border-top:1px solid var(--border);padding:18px 0 0;margin:30px 0 0;min-width:0}
+.download-form-section legend{padding:0 12px 0 0;font-size:15px;font-weight:600}
+.social-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.form-notice{font-size:13px;color:var(--muted);line-height:1.6;margin:6px 0 20px}
+.form-submit{width:100%;cursor:pointer;font:inherit;justify-content:center}
+.form-submit:disabled{opacity:.6;cursor:wait}
+.form-status{font-size:14px;margin:12px 0 0;min-height:1.6em}
+.form-status[data-error=true]{color:#b42318}
+[data-theme=dark] .form-status[data-error=true]{color:#ffb4ab}
+.form-trap{position:absolute;left:-10000px;width:1px;height:1px;overflow:hidden}
+#download-retry{font-size:14px}
+@media(max-width:760px){.download-page{grid-template-columns:1fr;gap:28px;padding-top:30px;padding-bottom:48px}.download-intro .art-back{margin-bottom:24px}.download-logo{width:72px;height:72px;border-radius:18px}.download-intro h1 br{display:none}.download-intro p{max-width:100%}.download-form-section{border-top:1px solid var(--border);padding-top:28px}.social-grid{grid-template-columns:1fr;gap:0}}
