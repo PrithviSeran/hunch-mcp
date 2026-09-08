@@ -8,7 +8,7 @@
 .download-form-section h2{font-size:27px;margin:0 0 26px}
 .form-field{margin-bottom:19px}
 .form-field label{display:block;font-size:15px;font-weight:600;margin-bottom:7px}
-.download-form-section span{font-weight:400;color:var(--muted);font-size:14px}
+.form-field label span,.download-form-section legend span{font-weight:400;color:var(--muted);font-size:14px}
 .form-field input{display:block;width:100%;min-width:0;padding:12px 14px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);font:inherit;font-size:16px}
 .form-field input::placeholder{color:var(--muted)}
 .download-page :focus-visible{outline:3px solid var(--hunch);outline-offset:3px}
