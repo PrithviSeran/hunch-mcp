@@ -113,15 +113,21 @@ class Gate:
 
     def mark_screen_approval(self):
         self._screen_ok_until = time.monotonic() + APPROVAL_WINDOW_S
+        self._screen_ok_target = getattr(self, "_screen_target", None)
         suppress_focus_notice(APPROVAL_WINDOW_S)
 
+    def bind_screen_target(self, target):
+        self._screen_target = target
+
     def screen_approved(self):
-        return time.monotonic() < self._screen_ok_until
+        return (time.monotonic() < self._screen_ok_until
+                and getattr(self, "_screen_ok_target", None) == getattr(self, "_screen_target", None))
 
     def front_gate(self, name, reason=""):
         """None if bringing `name` to the front may proceed, else a refusal message for the agent.
         Asks the user first (gates.app_to_front) unless they already approved a screen dialog
         moments ago, the gate is off, or the app is already frontmost (no real switch)."""
+        self.bind_screen_target(("app", name))
         if self.screen_approved() or not self.enabled("app_to_front"):
             return None
         if _frontmost()[0] == name:
@@ -139,10 +145,15 @@ def check_focus_steal(computer, actions, gate, confirm=False, reason=""):
     """Gate the focus-stealing actions in an `act` batch (key / click_xy / ref-less type — they
     use the shared keyboard/mouse and need the app frontmost). Returns None if the batch may
     run, else the refusal message. Sets the focus reason so the focus warning explains itself."""
+    from .targets import process_key
+    session = getattr(computer, "session", None)
+    gate.bind_screen_target((computer.app, process_key(getattr(session, "_identity", {})),
+                             getattr(session, "_selected_window", None)))
     stealing = [a for a in actions if computer._is_shared_input(a)]
     if stealing:
         set_focus_reason(reason)   # the focus-switch warning tells the user WHY
-    if stealing and not computer.simultaneous and not confirm and gate.enabled("focus_steal"):
+    if (stealing and not computer.simultaneous and not confirm
+            and not gate.screen_approved() and gate.enabled("focus_steal")):
         kinds = ", ".join(sorted({a.get("action") for a in stealing}))
         why = f" — {reason}" if reason else ""
         if not gate.confirm_dialog(f"{gate.app_name} wants to take over your screen ({kinds} on "
@@ -202,23 +213,15 @@ def applescript_hint(out, script=""):
 
 
 def applescript_empty_hint(script):
-    """Why a script that SUCCEEDED returned nothing — or "" if there's no known reason.
-
-    An empty result is the worst kind of answer: the script ran, nothing failed, and the agent
-    can't tell 'no windows' from 'this question can't be answered this way'. The common case is
-    asking System Events for a Chromium/Electron app's windows: those apps vend their UI to the
-    AX API, not to System Events' scripting bridge, so `count of windows` is a truthful-looking 0
-    no matter how many windows are on screen. Retrying the same script (the natural next move,
-    and the one that wastes turns) can never return anything else."""
+    """Explain the limits of an empty UI-scripting observation."""
     s = (script or "").lower()
     if "system events" not in s:
         return ""
     if "window" in s and "process" in s:
-        return ("\n[!] This returned EMPTY, and re-running it will too. System Events only sees "
-                "windows of apps that expose them to its scripting bridge — a Chromium/Electron "
-                "app (Cursor, VS Code, Slack, Discord, Chrome) reports 0 windows here even with "
-                "many open. Read its windows through the AX layer instead: snapshot(app=...) for "
-                "the focused window, or web_tabs after web_open for the CDP-driven copy.")
+        return ("\n[!] System Events UI scripting uses accessibility. An empty window enumeration "
+                "does not prove the app exposes no AX tree. Verify the process and permissions; "
+                "snapshot(app=...) also checks focused/main window and AXChildren fallbacks. "
+                "An attached CDP session is a separate surface with its own target identity.")
     return ""
 
 

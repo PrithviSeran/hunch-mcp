@@ -62,8 +62,14 @@ _mac = Hunch(
     # that forgot inherited an agent free to grab the user's cursor. Making it
     # settable at startup lets the operator, not the model, own that promise.
     simultaneous=bool(os.environ.get("HUNCH_SIMULTANEOUS")),
+    background_only=bool(os.environ.get("HUNCH_BACKGROUND_ONLY")),
 )
+if os.environ.get("HUNCH_RUNTIME_CONFIG"):
+    import json
+    _config = json.loads(os.environ["HUNCH_RUNTIME_CONFIG"])
+    _mac = Hunch(check_permissions=False, **_config)
 _gate = _mac._gate            # single Gate: approval state behaves as the old module globals
+mcp._mcp_server.instructions = HUNCH_PLAYBOOK + "\n" + _mac.session_summary()
 _as_str = gate.as_str         # kept aliases (tests + external callers)
 _protected = gate.protected
 _HUNCH_DIR = gate.HUNCH_DIR
@@ -124,7 +130,7 @@ def find(role: str = "", name_contains: str = "", app: str = "", max_results: in
 
 
 @mcp.tool()
-def act(actions: list, reason: str = "") -> str:
+def act(actions: list, reason: str = "", detailed: bool = False, postcondition: dict | None = None) -> str | dict:
     """Execute one or more UI actions in order (by element ref), then return what
     CHANGED on screen since your last view (~ changed, + new, gone: refs; unchanged
     lines omitted). First look, a window change, or heavy churn returns the full
@@ -166,7 +172,7 @@ def act(actions: list, reason: str = "") -> str:
     When the batch contains ANY focus-stealing action, ALWAYS pass `reason` — one short human
     sentence for WHY you need the screen (e.g. "press Enter to submit the search"). It is shown
     to the user in the focus warning and the approval prompt."""
-    return _run("act", actions=actions, reason=reason)
+    return _run("act", actions=actions, reason=reason, detailed=detailed, postcondition=postcondition)
 
 
 @mcp.tool()
@@ -206,8 +212,8 @@ def simultaneous_mode(on: bool = True) -> str:
     or switches your view: it reads apps WITHOUT bringing them forward, launches apps in
     the background, runs only the focus-free actions (click/select/set-a-field by ref),
     and REFUSES shared-input actions (typed keystrokes, key combos, pixel clicks) that
-    would disrupt you. Works for native apps; Electron apps read empty in this mode
-    (they need to be frontmost). Turn OFF to let Hunch bring apps forward and use the
+    would disrupt you. Background AX coverage is operation- and state-dependent,
+    including in Electron apps. Turn OFF to let Hunch bring apps forward and use the
     full input set (for when you're away from the machine)."""
     return _run("simultaneous_mode", on=on)
 
@@ -293,7 +299,7 @@ def web_screenshot() -> Image:
 
 
 @mcp.tool()
-def web_act(actions: list) -> str:
+def web_act(actions: list, detailed: bool = False, postcondition: dict | None = None) -> str | dict:
     """Execute focus-free page actions on the CDP-controlled app, then return the updated tree.
     Each: {"action":"click","ref":"e12"} | {"action":"type","ref":"e12","text":"hi"} |
     {"action":"click_xy","x":500,"y":250} | {"action":"drag","from_x":10,"from_y":20,
@@ -308,7 +314,7 @@ def web_act(actions: list) -> str:
     To follow a link, CLICK it by ref — do NOT `navigate` to a guessed/constructed URL; only
     navigate to a URL the user gave you or that you read from the page (navigate refuses a host
     that doesn't resolve)."""
-    return _run("web_act", actions=actions)
+    return _run("web_act", actions=actions, detailed=detailed, postcondition=postcondition)
 
 
 @mcp.tool()
@@ -459,6 +465,36 @@ def applescript(script: str) -> str:
     report missing permissions when the result explicitly says ACCESSIBILITY_DENIED,
     AUTOMATION_DENIED, or FULL_DISK_ACCESS_REQUIRED."""
     return _run("applescript", script=script)
+
+
+# Register before the module entry point starts the blocking server.
+@mcp.tool()
+def app_target(app: str = "", window: str = "", select: bool = False, inventory: str = "running") -> dict:
+    return _run("app_target", app=app, window=window, select=select, inventory=inventory)
+
+
+@mcp.tool()
+def app_capabilities(app: str, operation: str = "observe") -> dict:
+    return _run("app_capabilities", app=app, operation=operation)
+
+
+@mcp.tool()
+def app_recover(plan_id: str, target_id: str = "") -> dict:
+    return _run("app_recover", plan_id=plan_id, target_id=target_id)
+
+
+
+# The model-visible contract comes from one catalog, including descriptions.
+from .tool_registry import catalog
+_catalog_mode = "runtime"
+_definitions = {t["name"]: t for t in catalog(_catalog_mode)}
+for _name in list(mcp._tool_manager._tools):
+    if _name not in _definitions:
+        mcp._tool_manager.remove_tool(_name)
+    else:
+        _tool = mcp._tool_manager._tools[_name]
+        _tool.parameters = _definitions[_name]["input_schema"]
+        _tool.description = _definitions[_name]["description"]
 
 
 def main():

@@ -349,11 +349,11 @@ Privacy & Security → Screen Recording, or just let agents use `snapshot`, whic
 permission grants. Toggle the host off and on under Accessibility (and Screen Recording, if you
 use it), then restart the host.
 
-**An app's tree reads empty or shows only a sidebar.** Two different situations. Electron/CEF
-apps (Discord, Slack, Spotify, VS Code) need an accessibility flag; `snapshot` relaunches them
-once, in the background, to set it. Master-detail and Catalyst apps (WhatsApp, Mail) expose only
-the pane you're in: the agent should click into an item by ref and re-snapshot; the detail pane
-then appears. Also check the app actually has a window open.
+**An app's tree reads empty or shows only a sidebar.** Coverage depends on the operation,
+process, permissions, and window state. `snapshot` never restarts an app. Use `app_target`
+to inspect the exact process/window, then `app_capabilities` to inspect bounded recovery
+options. `app_recover` can execute an authorized accessibility or debugging recovery.
+Verify the resulting operation; an empty tree does not establish that an app lacks AX.
 
 **The web layer won't connect.** Chrome 136+ blocks the CDP debug port on your default profile, so
 Hunch drives its own Chrome (a separate data dir at `~/.hunch/chrome-cdp`), not your everyday one.

@@ -265,7 +265,9 @@ def test_server_is_an_app_on_the_sdk():
     """The inversion invariants: one engine (every MCP tool name resolves in the shared
     dispatch table), one Hunch instance, personal policy + notify wrapper wired in."""
     import hunch.agent as agent_mod
-    assert set(server.mcp._tool_manager._tools) == set(agent_mod._DISPATCH)
+    from hunch.tool_registry import catalog
+    assert set(server.mcp._tool_manager._tools) == {t["name"] for t in catalog()}
+    assert {t["name"] for t in catalog()} == set(agent_mod._DISPATCH)
     assert isinstance(server._mac, Hunch)
     assert server._gate is server._mac._gate
     assert server._gate._policy == "personal"

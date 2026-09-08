@@ -83,7 +83,7 @@ class _FakeHunch:
         self._rec("snapshot")
         return f"tree of {app or 'frontmost'}"
 
-    def act(self, actions, reason="", confirm=False):
+    def act(self, actions, reason="", confirm=False, detailed=False, postcondition=None):
         self._rec("act")
         return "acted"
 
@@ -161,7 +161,7 @@ def test_approval_denied_maps_to_content():
 def test_unexpected_error_is_error_flag():
     tu = tool_block("file_op", {"op": "move"}, "t1")   # missing src -> KeyError path? uses .get, so
     # force a genuine unexpected error via a broken dispatch arg
-    tu = tool_block("clipboard_set", {}, "t1")         # missing required 'text' -> KeyError
+    tu = tool_block("clipboard_set", {"text": "fixture"}, "t1")  # missing backend -> AttributeError
     res = _run_tool(_FakeHunchClipboardless(), tu)
     assert res["is_error"] is True and res["content"].startswith("error:")
 

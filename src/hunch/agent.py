@@ -35,186 +35,8 @@ DEFAULT_MODEL = "claude-opus-4-8"
 
 # ── tool schemas ──────────────────────────────────────────────────────────────
 # The full-input action item (native AX layer). Shared by the `act` tool.
-_ACTION_ITEM = {
-    "type": "object",
-    "properties": {
-        "action": {"type": "string",
-                   "enum": ["click", "right_click", "select", "type", "menu", "key", "window", "drag", "click_xy"]},
-        "ref": {"type": "string"}, "text": {"type": "string"},
-        "path": {"type": "array", "items": {"type": "string"}},
-        "key": {"type": "string"}, "modifiers": {"type": "array", "items": {"type": "string"}},
-        "x": {"type": "integer"}, "y": {"type": "integer"}, "w": {"type": "integer"}, "h": {"type": "integer"},
-        "app": {"type": "string"},
-        "from_ref": {"type": "string"}, "to_ref": {"type": "string"},
-        "from_x": {"type": "integer"}, "from_y": {"type": "integer"},
-        "to_x": {"type": "integer"}, "to_y": {"type": "integer"}},
-    "required": ["action"]}
-
-# The web/CDP action item. Its coordinates are renderer-local and focus-free, unlike native pixels.
-_WEB_ACTION_ITEM = {
-    "type": "object",
-    "properties": {
-        "action": {"type": "string", "enum": ["click", "click_xy", "drag", "type", "key", "navigate"]},
-        "ref": {"type": "string"}, "text": {"type": "string"},
-        "key": {"type": "string"}, "modifiers": {"type": "array", "items": {"type": "string"}},
-        "url": {"type": "string"}, "x": {"type": "number"}, "y": {"type": "number"},
-        "from_x": {"type": "number"}, "from_y": {"type": "number"},
-        "to_x": {"type": "number"}, "to_y": {"type": "number"}},
-    "required": ["action"]}
-
-
-def _obj(props=None, required=None):
-    return {"type": "object", "properties": props or {}, **({"required": required} if required else {})}
-
-
-# Names identical to the MCP tools so every HUNCH_PLAYBOOK reference resolves. Descriptions
-# are condensed (the deep procedural guidance lives in the playbook system prompt); each keeps
-# the prescriptive when-to-call sentence, which measurably lifts should-call rate on Opus.
-AGENT_TOOLS = [
-    {"name": "snapshot",
-     "description": ("See an app as an accessibility tree ([ref] per element) — your primary way "
-                     "to read UI focus-free. Pass an app name or leave blank for the frontmost. "
-                     "ref='e42' re-walks just that element's subtree; truncated trees end in `…` "
-                     "markers naming what was dropped."),
-     "input_schema": _obj({"app": {"type": "string"}, "ref": {"type": "string"},
-                           "max_depth": {"type": "integer"}, "max_nodes": {"type": "integer"},
-                           "max_children": {"type": "integer"}})},
-    {"name": "find",
-     "description": ("Search an app's WHOLE tree for matching elements without reading a full "
-                     "snapshot — the cheap way to locate one control in a big window. Filter by "
-                     "role (e.g. 'button', case-insensitive) and/or name_contains (substring of "
-                     "title/description/value). Returns actable [ref]s."),
-     "input_schema": _obj({"role": {"type": "string"}, "name_contains": {"type": "string"},
-                           "app": {"type": "string"}, "max_results": {"type": "integer"}})},
-    {"name": "act",
-     "description": ("Run UI actions in order by ref, then get what CHANGED on screen (unchanged lines omitted; snapshot gives the full tree). To tile/position a window use the 'window' verb (x/y/w/h, focus-free, targets the main window; pass `app` to target a specific app — to tile TWO apps give each window action its own `app`, e.g. app:'TextEdit' x:0 then app:'Notes' x:756). Verbs: click "
-                     "(activate), right_click (context menu), select (highlight a row), type (set "
-                     "a field by ref = focus-free; no ref types at focus = STEALS FOCUS), menu "
-                     "(invoke a menu-bar path, e.g. ['File','Move to Trash'] — the focus-free "
-                     "stand-in for ⌘-shortcuts), key/click_xy (STEAL FOCUS, last resort). Prefer "
-                     "the focus-free verbs. Pass `reason` when any action steals focus."),
-     "input_schema": _obj({"actions": {"type": "array", "items": _ACTION_ITEM},
-                           "reason": {"type": "string"}}, ["actions"])},
-    {"name": "screenshot",
-     "description": ("See the frontmost app as a PNG — only for genuinely visual content the tree "
-                     "can't convey (an image, a chart). To read UI text or check an action, "
-                     "re-snapshot instead. Image pixels are in point space, so a coordinate read "
-                     "here can go straight to a click_xy action."),
-     "input_schema": _obj()},
-    {"name": "list_apps", "description": "List the running GUI apps you can target with snapshot.",
-     "input_schema": _obj()},
-    {"name": "launch_app",
-     "description": ("Launch or focus an app (reliable OS call — beats clicking the Dock). Set "
-                     "force_accessibility=true for an Electron/Chromium app whose tree reads empty. "
-                     "In simultaneous mode it launches in the background."),
-     "input_schema": _obj({"name": {"type": "string"},
-                           "force_accessibility": {"type": "boolean"},
-                           "reason": {"type": "string"}}, ["name"])},
-    {"name": "simultaneous_mode",
-     "description": ("Toggle simultaneous mode. ON = never steal the user's cursor/keyboard/view "
-                     "(background reads, focus-free actions only, shared-input actions refused). "
-                     "OFF = may bring apps forward and use the full input set."),
-     "input_schema": _obj({"on": {"type": "boolean"}})},
-    {"name": "quit_app", "description": "Quit an app via the OS (reliable regardless of focus).",
-     "input_schema": _obj({"name": {"type": "string"}}, ["name"])},
-    {"name": "focus_app",
-     "description": ("Bring an app to the front and target it. This switches the user's view — "
-                     "always pass `reason` (one short sentence for why)."),
-     "input_schema": _obj({"name": {"type": "string"}, "reason": {"type": "string"}}, ["name"])},
-    {"name": "web_open",
-     "description": ("Open a Chromium browser or Electron app for FOCUS-FREE control over CDP — "
-                     "the way to drive web/Electron apps in the background. `app` is the browser "
-                     "(default 'Google Chrome'); put a website in `url`. Uses the persistent Hunch "
-                     "profile; call web_login once if it isn't signed in. CODE EDITORS: app="
-                     "'Cursor'/'Visual Studio Code'/'VSCodium'/'Windsurf' with the FOLDER/FILE in "
-                     "`url` opens a dedicated background editor window whose integrated TERMINAL you "
-                     "can type into (AX can't write it) — snapshot, then web_act 'type' on the "
-                     "'Terminal' tab (trailing newline runs the command); key ctrl+` opens one."),
-     "input_schema": _obj({"app": {"type": "string"}, "url": {"type": "string"},
-                           "isolated": {"type": "boolean"}})},
-    {"name": "web_login",
-     "description": ("Open a background, banner-tagged window for the HUMAN to sign in once (Hunch "
-                     "never sees the password); the login then persists. Uses the configured "
-                     "user-attention notification when enabled."),
-     "input_schema": _obj({"app": {"type": "string"}, "url": {"type": "string"}})},
-    {"name": "web_snapshot",
-     "description": "Read the CDP-controlled page as an accessibility tree. Call web_open first.",
-     "input_schema": _obj()},
-    {"name": "web_screenshot",
-     "description": ("PNG of the CDP page itself (focus-free) — for visual web content the tree "
-                     "can't convey. Use this, never the OS screenshot, for the background browser."),
-     "input_schema": _obj()},
-    {"name": "web_act",
-     "description": ("Run focus-free page actions, then get the updated tree. Verbs: click (by ref), "
-                     "click_xy/drag (coordinates from web_screenshot; canvas editors), type "
-                     "(with ref REPLACES a field; without ref types at current focus), key, navigate "
-                     "(only to a URL you were given or read from the page — click links, don't guess)."),
-     "input_schema": _obj({"actions": {"type": "array", "items": _WEB_ACTION_ITEM}}, ["actions"])},
-    {"name": "web_restart",
-     "description": ("Recover a BROKEN CDP browser by quitting and reopening it fresh (login kept). "
-                     "Last resort — don't restart a merely-slow page; wait and re-snapshot first."),
-     "input_schema": _obj({"app": {"type": "string"}, "url": {"type": "string"}})},
-    {"name": "web_tabs",
-     "description": "List the open CDP tabs (index, title, URL, which is current).",
-     "input_schema": _obj()},
-    {"name": "web_switch_tab",
-     "description": "Switch the CDP session to a tab by index (see web_tabs), then web_snapshot.",
-     "input_schema": _obj({"index": {"type": "integer"}}, ["index"])},
-    {"name": "list_credentials",
-     "description": ("List the service NAMES the user saved credentials for (names + kind only, "
-                     "never values). Fill them with web_fill_login / web_fill_secret."),
-     "input_schema": _obj()},
-    {"name": "web_fill_login",
-     "description": ("Fill the current CDP page's login form from the user's saved credential for "
-                     "`service`, WITHOUT the values entering your context — you only learn which "
-                     "fields were filled. Then submit via web_act. web_open first."),
-     "input_schema": _obj({"service": {"type": "string"}}, ["service"])},
-    {"name": "web_fill_secret",
-     "description": ("Type the user's saved protected value (API key/token) for `service` into a "
-                     "field on the current CDP page, WITHOUT the value entering your context. "
-                     "web_snapshot first and pass the field's ref."),
-     "input_schema": _obj({"service": {"type": "string"}, "ref": {"type": "string"}}, ["service"])},
-    {"name": "notify_user",
-     "description": ("Alert the user when you need them SHORTLY — to finish a login, approve a 2FA "
-                     "prompt, solve a captcha, or make a decision only they can. Call this the moment "
-                     "you hit a step only the human can do."),
-     "input_schema": _obj({"message": {"type": "string"}}, ["message"])},
-    {"name": "request_focus",
-     "description": ("Ask the user's permission BEFORE a focus-stealing step you'll do via other "
-                     "tools. Pops a one-click Go ahead / Cancel dialog and returns their choice."),
-     "input_schema": _obj({"reason": {"type": "string"}}, ["reason"])},
-    {"name": "trash",
-     "description": ("Move file(s)/folder(s) to the Trash by path — focus-free and reversible. Use "
-                     "this to delete files instead of driving Finder."),
-     "input_schema": _obj({"paths": {"type": "array", "items": {"type": "string"}}}, ["paths"])},
-    {"name": "file_op",
-     "description": ("Focus-free filesystem ops by path: op='move'|'copy' (src -> dst) or op='mkdir' "
-                     "(create a folder at src). For MULTIPLE operations pass batch=[{op,src,dst},...] "
-                     "in ONE call (e.g. sort a whole folder at once). To delete, use trash."),
-     "input_schema": _obj({"op": {"type": "string", "enum": ["move", "copy", "mkdir"]},
-                           "src": {"type": "string"}, "dst": {"type": "string"},
-                           "batch": {"type": "array", "items": {
-                               "type": "object", "properties": {
-                                   "op": {"type": "string", "enum": ["move", "copy", "mkdir"]},
-                                   "src": {"type": "string"}, "dst": {"type": "string"}},
-                               "required": ["op", "src"]}}})},
-    {"name": "open_file",
-     "description": ("Open a file/folder/URL/app-deep-link with its default (or a named) app — "
-                     "focus-free launch (also 'mailto:', 'spotify:track:...')."),
-     "input_schema": _obj({"path": {"type": "string"}, "app": {"type": "string"}}, ["path"])},
-    {"name": "reveal_in_finder",
-     "description": "Reveal/select item(s) in a Finder window by path (this does front Finder).",
-     "input_schema": _obj({"paths": {"type": "array", "items": {"type": "string"}}}, ["paths"])},
-    {"name": "clipboard_get", "description": "Read the clipboard's text — focus-free (no ⌘C).",
-     "input_schema": _obj()},
-    {"name": "clipboard_set", "description": "Put text on the clipboard — focus-free (no ⌘V).",
-     "input_schema": _obj({"text": {"type": "string"}}, ["text"])},
-    {"name": "applescript",
-     "description": ("Run AppleScript to control scriptable native apps FOCUS-FREE via Apple Events "
-                     "— Mail, Messages, Notes, Reminders, Calendar, Music, Finder, Safari. Prefer "
-                     "this over UI-driving those apps. Risky scripts prompt the user."),
-     "input_schema": _obj({"script": {"type": "string"}}, ["script"])},
-]
+from .tool_registry import catalog, catalog_for, _ACTION_ITEM, _WEB_ACTION_ITEM, _obj
+AGENT_TOOLS = catalog()
 
 AGENT_ADDENDUM = """\
 
@@ -254,7 +76,8 @@ _DISPATCH = {
     # `confirm` isn't in the agent tool schema (an agent must not self-approve); the MCP
     # server's tools DO pass it through when the human already approved out-of-band.
     "act": lambda m, a: m.act(a.get("actions", []), reason=a.get("reason", ""),
-                              confirm=a.get("confirm", False)),
+                              confirm=a.get("confirm", False), detailed=a.get("detailed", False),
+                              postcondition=a.get("postcondition")),
     "screenshot": lambda m, a: m.screenshot(),
     "list_apps": lambda m, a: m.list_apps(),
     "launch_app": lambda m, a: m.launch_app(a["name"], force_accessibility=a.get("force_accessibility", False),
@@ -267,7 +90,8 @@ _DISPATCH = {
     "web_login": lambda m, a: m.web.login(url=a.get("url", ""), app=a.get("app", "Google Chrome")),
     "web_snapshot": lambda m, a: m.web.snapshot(),
     "web_screenshot": lambda m, a: m.web.screenshot(),
-    "web_act": lambda m, a: m.web.act(a.get("actions", [])),
+    "web_act": lambda m, a: m.web.act(a.get("actions", []), detailed=a.get("detailed", False),
+                                     postcondition=a.get("postcondition")),
     "web_restart": lambda m, a: m.web.restart(url=a.get("url", ""), app=a.get("app", "Google Chrome")),
     "web_tabs": lambda m, a: m.web.tabs(),
     "web_switch_tab": lambda m, a: m.web.switch_tab(a["index"]),
@@ -285,6 +109,12 @@ _DISPATCH = {
     "applescript": lambda m, a: m.applescript(a["script"], confirm=a.get("confirm", False)),
 }
 
+
+_DISPATCH.update({
+    "app_target": lambda m, a: m.targets(**a),
+    "app_capabilities": lambda m, a: m.capabilities(**a),
+    "app_recover": lambda m, a: m.recover(**a),
+})
 
 def _set_simultaneous(mac, on):
     mac.simultaneous = bool(on)
@@ -334,24 +164,26 @@ def _dispatch_core(mac, name, args):
     fn = _DISPATCH.get(name)
     if fn is None:
         return f"unknown tool {name}", True
+    redact = getattr(mac, "_redact", lambda value: value)
     try:
-        return fn(mac, args or {}), False
+        from .tool_registry import validate_arguments
+        value = fn(mac, validate_arguments(name, args or {}))
+        return mac._redact(value) if hasattr(mac, "_redact") else value, False
     except ApprovalDenied as e:
-        return (f"REFUSED: {e} — the user declined; do not retry the identical action, "
-                "adapt or call notify_user"), False
+        return redact(f"REFUSED: {e} — do not retry the identical action; adapt or ask the user"), False
     except StaleRef:
         return "ref is stale — re-snapshot the app and use fresh refs", False
     except (WebNotOpen, AccessibilityNotGranted, HunchError) as e:
-        return str(e), False
+        return redact(str(e)), False
     except Exception as e:  # noqa: BLE001 — genuinely unexpected: flag it
-        return f"error: {e}", True
+        return redact(f"error: {e}"), True
 
 
 def _run_tool(mac, tool_use):
     """API-backend formatter: dispatch one tool_use block -> an anthropic tool_result dict
     (bytes become an anthropic-shaped image block)."""
     value, is_error = _dispatch_core(mac, tool_use.name, tool_use.input or {})
-    content = _img(value) if isinstance(value, bytes) else value
+    content = _img(value) if isinstance(value, bytes) else (json.dumps(value) if isinstance(value, dict) else value)
     out = {"type": "tool_result", "tool_use_id": tool_use.id, "content": content}
     if is_error:
         out["is_error"] = True
@@ -398,7 +230,7 @@ def _mcp_content(value, is_error):
         content = [{"type": "image", "data": base64.b64encode(value).decode(),
                     "mimeType": "image/png"}]
     else:
-        content = [{"type": "text", "text": str(value)}]
+        content = [{"type": "text", "text": json.dumps(value) if isinstance(value, dict) else str(value)}]
     return {"content": content, **({"is_error": True} if is_error else {})}
 
 
@@ -416,7 +248,7 @@ def _sdk_tools(mac):
         return handler
 
     return [tool(t["name"], t["description"], t["input_schema"])(_make(t["name"]))
-            for t in AGENT_TOOLS]
+            for t in catalog_for(mac)]
 
 
 class SubscriptionBackend(Backend):
@@ -489,6 +321,8 @@ class SubscriptionBackend(Backend):
                 message="the Hunch agent only runs Hunch tools")
 
         system = HUNCH_PLAYBOOK + "\n" + AGENT_ADDENDUM
+        if hasattr(self._h, "session_summary"):
+            system += "\n" + self._h.session_summary()
         if system_suffix:
             system += "\n" + system_suffix
         opts = dict(
@@ -510,7 +344,7 @@ class SubscriptionBackend(Backend):
             opts["can_use_tool"] = self._permit
         else:
             opts["can_use_tool"] = _allow_hunch_only
-            opts["allowed_tools"] = [f"mcp__hunch__{t['name']}" for t in AGENT_TOOLS]
+            opts["allowed_tools"] = [f"mcp__hunch__{t['name']}" for t in catalog_for(self._h)]
         return sdk.ClaudeAgentOptions(**opts)
 
     # — the loop —
@@ -655,6 +489,8 @@ class ApiBackend(Backend):
     def _system(self, system_suffix):
         blocks = [{"type": "text", "text": HUNCH_PLAYBOOK + "\n" + AGENT_ADDENDUM,
                    "cache_control": {"type": "ephemeral"}}]
+        if hasattr(self._h, "session_summary"):
+            blocks.append({"type": "text", "text": self._h.session_summary()})
         if system_suffix:
             blocks.append({"type": "text", "text": system_suffix})
         return blocks
@@ -662,7 +498,7 @@ class ApiBackend(Backend):
     def _request(self, client, model, max_tokens, system, effort):
         """Provider seam: build kwargs + run one streamed turn, return the final Message."""
         kwargs = dict(model=model, max_tokens=max_tokens, system=system,
-                      tools=AGENT_TOOLS, messages=self.messages,
+                      tools=catalog_for(self._h), messages=self.messages,
                       thinking={"type": "adaptive"})
         if effort:
             kwargs["output_config"] = {"effort": effort}

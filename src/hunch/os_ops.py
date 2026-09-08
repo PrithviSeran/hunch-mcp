@@ -72,16 +72,12 @@ def reveal(paths):
 
 def open_path(path, app=None):
     """Open a file/folder/URL with its default app (or a named app) — focus-free launch."""
-    ws = NSWorkspace.sharedWorkspace()
     target = _abspath(path) if os.path.exists(_abspath(path)) else str(path)
-    if app:
-        subprocess.run(["open", "-a", app, target], check=False)
-        return f"opened {target} with {app}"
-    if os.path.exists(target):
-        ok = ws.openURL_(NSURL.fileURLWithPath_(target))
-    else:
-        ok = ws.openURL_(NSURL.URLWithString_(target))  # web URL / scheme
-    return f"opened {target}" if ok else f"FAILED to open {target}"
+    command = ["open", "-g"] + (["-a", app] if app else []) + [target]
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
+    if result.returncode:
+        return f"FAILED to open {target}: {result.stderr.strip() or result.returncode}"
+    return f"background open requested for {target}" + (f" with {app}" if app else "")
 
 
 # ── Clipboard (focus-free; replaces ⌘C / ⌘V keystrokes) ──

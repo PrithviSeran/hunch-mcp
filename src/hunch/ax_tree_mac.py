@@ -80,7 +80,7 @@ kAXWindowsAttribute = "AXWindows"
 
 
 def list_apps():
-    """List running GUI apps (activation policy == regular) as {name, pid}.
+    """List running regular and accessory apps as {name, pid}.
 
     NSWorkspace.runningApplications() is a KVO-updated array that only refreshes when a Cocoa run
     loop is spinning — in a long-lived non-Cocoa process (the MCP server) it stays FROZEN at first
@@ -98,12 +98,12 @@ def list_apps():
             if not pid or pid in seen:
                 continue
             app = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
-            if app is not None and app.activationPolicy() == 0:
+            if app is not None and app.activationPolicy() in (0, 1):
                 seen[pid] = app.localizedName() or owner
     except Exception:
         pass
     for app in NSWorkspace.sharedWorkspace().runningApplications():
-        if app.activationPolicy() == 0 and app.processIdentifier() not in seen:
+        if app.activationPolicy() in (0, 1) and app.processIdentifier() not in seen:
             seen[app.processIdentifier()] = app.localizedName()
     return [{"name": n, "pid": p} for p, n in seen.items()]
 
@@ -113,6 +113,33 @@ def get_attr(element, attr):
     if err != 0:
         return None
     return value
+
+
+def read_attr(element, attr):
+    """Diagnostic reads preserve AX errors instead of conflating them with empty values."""
+    err, value = AXUIElementCopyAttributeValue(element, attr, None)
+    return {"error": int(err), "value": value if err == 0 else None}
+
+
+def discover_windows(ax_app):
+    windows, diagnostics = [], {}
+    for attr in (kAXFocusedWindowAttribute, kAXMainWindowAttribute,
+                 kAXWindowsAttribute, kAXChildrenAttribute):
+        result = read_attr(ax_app, attr)
+        diagnostics[attr] = result["error"]
+        value = result["value"]
+        values = (value or [])[:64] if attr in (kAXWindowsAttribute, kAXChildrenAttribute) else [value]
+        for element in values:
+            if element is None:
+                continue
+            if attr == kAXChildrenAttribute and get_attr(element, kAXRoleAttribute) != "AXWindow":
+                continue
+            existing = next((w for w in windows if w[0] == element), None)
+            if existing:
+                existing[1].append(attr)
+            else:
+                windows.append((element, [attr]))
+    return windows, diagnostics
 
 
 def get_actions(element):
@@ -430,7 +457,11 @@ def main():
     elif args.command == "dump":
         DEFAULT_MAX_NODES = args.max_nodes
         DEFAULT_MAX_CHILDREN = args.max_children
-        previous_front = NSWorkspace.sharedWorkspace().frontmostApplication() if args.activate else None
+        if args.activate:
+            from .local_mac import _frontmost
+            previous_front = NSRunningApplication.runningApplicationWithProcessIdentifier_(_frontmost()[1])
+        else:
+            previous_front = None
 
         if args.app_name is None:
             entries = dump_all_apps(args.max_depth, args.full, args.activate)

@@ -83,6 +83,19 @@ def _big_tree():
     return win
 
 
+def test_resolve_app_prefers_bundle_id_and_exact_path_when_names_collide(monkeypatch):
+    monkeypatch.setattr(local_mac.ax, "list_apps", lambda: [
+        {"name": "Keynote", "pid": 10}, {"name": "Keynote", "pid": 20},
+    ])
+    identities = {
+        10: {"name": "Keynote", "bundle_id": "com.apple.iWork.Keynote", "path": "/Applications/Keynote.app"},
+        20: {"name": "Keynote", "bundle_id": "com.apple.Keynote", "path": "/Applications/Keynote Creator Studio.app"},
+    }
+    monkeypatch.setattr(local_mac, "_running_identity", identities.get)
+    assert local_mac._resolve_app("com.apple.iWork.Keynote")["pid"] == 10
+    assert local_mac._resolve_app("/Applications/Keynote Creator Studio.app")["pid"] == 20
+
+
 def test_row_gets_accessible_name():
     # A nameless selectable row is collapsed to ONE line labelled from its subtree.
     row = FakeEl("AXRow", children=[FakeEl("AXStaticText", value="Inbox — 3 unread")])

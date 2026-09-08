@@ -31,18 +31,13 @@ from Quartz import CGPoint, CGSize
 import Quartz
 
 
-# Frameworks that mark an app as "embedded Chromium" — its UI is web content that the OS does NOT
-# put in the background accessibility tree. General, not app-specific: covers Electron (Cursor,
-# VS Code, Discord, Slack, …) and CEF (Chromium Embedded Framework — Spotify and others).
-_EMBEDDED_CHROMIUM = ("Electron Framework.framework", "Chromium Embedded Framework.framework")
+# Framework detection identifies candidate recovery mechanisms, not AX/CDP availability.
+_EMBEDDED_CHROMIUM = ("Electron Framework.framework", "Chromium Embedded Framework.framework",
+                     "Codex Framework.framework")
 
 
 def _embedded_chromium(pid):
-    """Return the embedded-Chromium framework the app bundles (Electron or CEF), else None. Such an
-    app renders its UI as web content that is NOT exposed to the AX tree in the background (only
-    while frontmost, and only if accessibility is force-enabled) — so a background snapshot reads
-    empty. Real Electron also opens a CDP debug port (web_open); hardened embeddings (e.g. CEF) may
-    open NEITHER a debug port NOR an AX tree, leaving only pixels/manual."""
+    """Return a bundled Chromium framework, without classifying operation coverage."""
     try:
         app = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
         url = app.bundleURL() if app else None
@@ -79,16 +74,9 @@ def _is_editor_terminal(el, pid):
     return bool(re.search(r"\bterminal\b", label))
 
 
-# ── forcing an embedded-Chromium app's tree to persist in the BACKGROUND ──────────────────
-# Verified 2026-07-18 on Discord (hardened Electron — strips --remote-debugging-port so CDP can't
-# attach): Chromium builds its web-content AX tree only while the app is active and TEARS IT DOWN on
-# deactivation (AXWindows → 0 the instant it loses focus). The Chromium switch --force-renderer-
-# accessibility flips it into permanent "complete" accessibility mode, so the FULL tree stays live
-# in the background (Discord: 558 nodes — servers, DMs, unread counts, usernames — read while Finder
-# was frontmost). The flag survives Discord's launcher even though the debug-port flag does not.
-# So embedded-Chromium apps ARE focus-free-readable as a TREE after a one-time force relaunch.
+# Explicit recovery option for embedded Chromium. Its effect must be measured for
+# the selected app/version/operation; a flag is not proof of background coverage.
 _FORCE_AX_FLAG = "--force-renderer-accessibility"
-_forced_ax = set()   # bundle ids / names we've already relaunched this session (avoid re-quitting)
 
 
 def _proc_has_force_ax(pid):
@@ -162,16 +150,34 @@ def _norm_app_name(s):
     return s.strip().casefold()
 
 
+def _running_identity(pid):
+    """Fresh stable identity for a running app; display names are not unique."""
+    app = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+    if app is None:
+        return {}
+    url = app.bundleURL()
+    from .targets import bundle_metadata
+    return {
+        "pid": pid,
+        "started_at": str(app.launchDate() or ""),
+        "activation_policy": int(app.activationPolicy()),
+        "bundle_id": str(app.bundleIdentifier() or ""),
+        "path": str(url.path() if url else ""),
+        "name": str(app.localizedName() or ""),
+        **(bundle_metadata(str(url.path())) if url else {}),
+    }
+
+
 def _resolve_app(app_name):
-    """Find the running app matching a user-typed name, tolerant of invisible marks / case. Returns
-    {name, pid} or None. Exact (normalized) match wins; else a unique prefix/substring match."""
-    apps = ax.list_apps()
-    want = _norm_app_name(app_name)
-    exact = [a for a in apps if _norm_app_name(a["name"]) == want]
-    if exact:
-        return exact[0]
-    part = [a for a in apps if want and want in _norm_app_name(a["name"])]
-    return part[0] if len(part) == 1 else None
+    """Resolve a single process, preserving identity and refusing ambiguity."""
+    from .targets import select_running
+    if str(app_name).startswith("pid:"):
+        try:
+            return _running_identity(int(str(app_name)[4:])) or None
+        except ValueError:
+            return None
+    apps = [{**a, **_running_identity(a["pid"])} for a in ax.list_apps()]
+    return select_running(app_name, apps)
 
 
 def _pids_named(name):
@@ -186,50 +192,23 @@ def _pids_named(name):
         return []
 
 
+def _process_alive(pid):
+    """Fresh kernel liveness; NSRunningApplication termination state can be cached."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
 def _enable_manual_ax(ax_app):
-    """Ask a Chromium/Electron app to build its accessibility tree without VoiceOver. Chromium
-    honors AXManualAccessibility=true from a trusted AT; harmless on non-Chromium apps. On its own
-    this is not enough for BACKGROUND reads (the tree still tears down on deactivate) — the launch
-    flag is what makes it persist — but it's a cheap belt-and-suspenders and helps while frontmost."""
+    """Request manual accessibility. Coverage and persistence need separate observation."""
     try:
         AXUIElementSetAttributeValue(ax_app, "AXManualAccessibility", True)
     except Exception:
         pass
-
-
-def _window_node_count(ax_app, cap=60):
-    """Rough descendant count of the app's current window — used to tell a still-loading Chromium
-    tree (a bare window shell, a handful of nodes) from a built one. Cheap: stops early at `cap`."""
-    win = ax.get_window(ax_app)
-    if win is None:
-        return 0
-    seen = [0]
-    def walk(el):
-        if seen[0] >= cap:
-            return
-        seen[0] += 1
-        for k in (ax.get_attr(el, ax.kAXChildrenAttribute) or []):
-            if seen[0] >= cap:
-                return
-            walk(k)
-    walk(win)
-    return seen[0]
-
-
-def _wait_tree_ready(pid, timeout=18.0):
-    """After a --force-renderer-accessibility (re)launch, Chromium needs a few seconds to render and
-    build its web-content AX tree — read too early and you get just the window shell. Poll until the
-    window has real content (or timeout). Returns the built AXUIElement app ref."""
-    deadline = time.time() + timeout
-    ax_app = AXUIElementCreateApplication(pid)
-    _enable_manual_ax(ax_app)
-    while time.time() < deadline:
-        if _window_node_count(ax_app) >= 15:
-            return ax_app
-        time.sleep(0.6)
-        ax_app = AXUIElementCreateApplication(pid)
-        _enable_manual_ax(ax_app)
-    return ax_app
 
 
 # Deterministically alert the user whenever Hunch is about to bring an app to the front (a real
@@ -403,26 +382,24 @@ class MacSession:
         dismisses its open context menus/popups (which breaks right_click -> menu)."""
         if not self._pid:
             return False
+        if not self._validate_target():
+            return False
+        guard = getattr(self, "_shared_guard", None)
+        if guard and guard():
+            return False
         if _frontmost()[1] == self._pid:
             return True  # already active — no focus switch happens
         _announce_front(getattr(self, "_app_name", None) or "an app")  # deterministic focus warning
-        # `open -a` (LaunchServices) reliably fronts the app. NSRunningApplication.
-        # activateWithOptions_ is restricted on macOS 14+ (cooperative activation) and
-        # silently fails for a background process like this MCP — the cause of
-        # "target app not frontmost" refusals.
-        # macOS focus-stealing prevention suppresses an activation that comes right after
-        # another focus change (e.g. our own confirm dialog). A single `open -a` gives up
-        # too fast, so RE-ISSUE it over a few seconds to punch through the suppression window,
-        # polling for the app to actually reach the front.
-        name = getattr(self, "_app_name", None)
+        # Cooperative activation may be refused; address the exact process and
+        # verify the foreground PID before posting any shared input.
         deadline = time.time() + 4.0
         while time.time() < deadline:
-            if name:
-                subprocess.run(["open", "-a", name], check=False)
+            app = NSRunningApplication.runningApplicationWithProcessIdentifier_(self._pid)
+            if app:
+                if not app.activateWithOptions_(2):
+                    _activate_process(self._pid)
             else:
-                app = NSRunningApplication.runningApplicationWithProcessIdentifier_(self._pid)
-                if app:
-                    app.activateWithOptions_(2)
+                _activate_process(self._pid)
             settle = time.time() + 1.0
             while time.time() < settle:
                 if _frontmost()[1] == self._pid:
@@ -539,57 +516,47 @@ class MacSession:
     def _resolve_window(self, app_name):
         """Resolve app -> (window element, real app name, error). On failure the
         error is the (text, info) tuple snapshot()/find() should return as-is.
-        Side effects: sets self._pid/_app_name, handles the embedded-Chromium
-        force-accessibility relaunch dance."""
+        Observation never launches, quits, or activates an application."""
+        from .targets import TargetError, process_key
+        match = None
         if app_name is None:
             app_name, pid = _frontmost()
         else:
-            match = _resolve_app(app_name)
+            try:
+                match = _resolve_app(app_name)
+            except TargetError as error:
+                self._invalidate_refs()
+                return None, app_name, (str(error), {"refs": 0, "app": app_name})
             pid = match["pid"] if match else None
             if match:
                 app_name = match["name"]   # use the app's REAL name (with any invisible marks) downstream
         if pid is None:
+            self._invalidate_refs()
             return None, app_name, (f"(app {app_name!r} not found)",
                                     {"est_tokens": 20, "refs": 0, "app": app_name})
         self._pid = pid
         self._app_name = app_name  # used by activate() for reliable `open -a` fronting
-        # Reading is FOCUS-FREE: native (AppKit) apps expose their AX tree while backgrounded, so we
-        # never bring an app forward just to look. Embedded-Chromium apps (Electron/CEF) are the
-        # exception — Chromium tears down its web-content AX tree on deactivation, so a background read
-        # sees no window. The fix is NOT to steal focus or fall back to pixels: relaunch the app ONCE
-        # with --force-renderer-accessibility (focus-free, open -g), which keeps the full tree live in
-        # the background permanently. After that, this same app reads as a rich tree with no focus cost.
-        front = NSWorkspace.sharedWorkspace().frontmostApplication()
-        already_front = bool(front and front.processIdentifier() == pid)
+        identity = match or {"pid": pid, "name": app_name, **_running_identity(pid)}
+        if process_key(identity) != process_key(getattr(self, "_identity", {})):
+            self._invalidate_refs()
+        self._identity = identity
         ax_app = AXUIElementCreateApplication(pid)
-        if _embedded_chromium(pid):
+        if (AXIsProcessTrusted() and _embedded_chromium(pid)
+                and getattr(self, "_manual_ax_identity", None) != process_key(identity)):
             _enable_manual_ax(ax_app)
-            # In the background a Chromium app vends a bare window SHELL (a few nodes) until the flag
-            # forces the tree to persist — so "unbuilt" means a tiny node count, not a missing window.
-            built = _window_node_count(ax_app) >= 15
-            need_force = (not already_front) and (not built) and not _proc_has_force_ax(pid)
-            if need_force and app_name not in _forced_ax:
-                # One-time focus-free relaunch so the tree persists in the background. Discord et al.
-                # restore their exact prior view on relaunch, so this is a brief blink, not data loss.
-                _forced_ax.add(app_name)
-                launch_app(app_name, force_accessibility=True, background=True)
-                # re-resolve the new pid FRESH (pgrep) — ax.list_apps() is cached and would hand back
-                # the old, now-dead pid, so the read would target a corpse and come back empty.
-                flagged = [p for p in _pids_named(app_name) if _proc_has_force_ax(p)]
-                if flagged:
-                    pid = self._pid = flagged[0]
-                    ax_app = _wait_tree_ready(pid)
+            self._manual_ax_identity = process_key(identity)
         win = ax.get_window(ax_app)
+        selected = getattr(self, "_selected_window", None)
+        if selected:
+            observations, _ = ax.discover_windows(ax_app)
+            if selected[0] != process_key(identity) or not any(w[0] == selected[1] for w in observations):
+                self._invalidate_refs()
+                return None, app_name, ("selected window is stale; inspect targets again", {"refs": 0})
+            win = selected[1]
+        if win != getattr(self, "_window", None):
+            self._invalidate_refs()
+        self._window = win
         if win is None:
-            if _embedded_chromium(pid) and not already_front:
-                return None, app_name, (
-                    (f"“{app_name}” is an embedded-Chromium app whose accessibility tree isn't up "
-                     f"yet. Call launch_app(\"{app_name}\", force_accessibility=true) once — it "
-                     f"relaunches it FOCUS-FREE with the flag that keeps its full tree readable in "
-                     f"the background — then snapshot again. If the tree is STILL empty after that, "
-                     f"the app blocks AX entirely: use its AppleScript dictionary, or tell the user "
-                     f"it needs Screen Recording + pixel control."),
-                    {"est_tokens": 70, "refs": 0, "app": app_name, "embedded_chromium": True})
             if not AXIsProcessTrusted():
                 return None, app_name, (
                     (f"(no window for {app_name} — and this process is NOT trusted for "
@@ -599,10 +566,31 @@ class MacSession:
                      "restart the host. `hunch doctor` explains.)"),
                     {"est_tokens": 60, "refs": 0, "app": app_name})
             return None, app_name, (
-                (f"(no window for {app_name} — the app may have no open window; open one "
-                 "via launch_app or open_file, or check with the user, then retry)"),
+                (f"(no AX window found for {app_name}, PID {pid}, in the current state. "
+                 "This does not establish that the app has no accessibility support. "
+                 "Check the selected process and open windows; an existing CDP endpoint or "
+                 "an authorized accessibility/debugging relaunch may provide another surface.)"),
                 {"est_tokens": 40, "refs": 0, "app": app_name})
         return win, app_name, None
+
+    def _invalidate_refs(self):
+        self.registry.clear()
+        self._keymap.clear()
+        self._ref_keys.clear()
+
+    def _validate_target(self):
+        from .targets import process_key
+        identity = getattr(self, "_identity", None)
+        if identity and process_key(_running_identity(identity["pid"])) != process_key(identity):
+            self._invalidate_refs()
+            return False
+        window = getattr(self, "_window", None)
+        if identity and window is not None:
+            windows, _ = ax.discover_windows(AXUIElementCreateApplication(identity["pid"]))
+            if not any(item[0] == window for item in windows):
+                self._invalidate_refs()
+                return False
+        return True
 
     def _snapshot_scoped(self, ref, max_depth, max_nodes, compact, max_children=None):
         """Re-walk ONLY the subtree under a known ref, at generous depth. Does NOT
@@ -610,6 +598,7 @@ class MacSession:
         place (the persistent _keymap makes them identical to full-walk refs).
         The sibling cap defaults HIGHER here (_SCOPED_MAX_CHILDREN) so scoping into
         a big list's container pages in far more rows than the full-window walk."""
+        self._validate_target()
         el = self.registry.get(ref)
         key = self._ref_keys.get(ref)
         app = getattr(self, "_app_name", None) or "app"
@@ -768,6 +757,7 @@ class MacSession:
 
     # ── actions ─────────────────────────────────────────────────────────
     def _el(self, ref):
+        self._validate_target()
         el = self.registry.get(ref)
         if el is None:
             raise StaleRef(ref)
@@ -913,6 +903,16 @@ class MacSession:
         moves the shared cursor and lands on whichever window is frontmost."""
         el = self._el(ref)
         role = str(ax.get_attr(el, ax.kAXRoleAttribute) or "")
+        # A click on an editable text control means "put the insertion point here".
+        # Some native sheets advertise AXConfirm on the field itself (notably the
+        # Go to Folder sheet). Treating that as a button action leaves keyboard
+        # input aimed at the previous control while claiming the click worked.
+        # AXFocused is focus-free and, unlike AXConfirm, can be verified.
+        if role in ("AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"):
+            if AXUIElementSetAttributeValue(el, kAXFocusedAttribute, True) == 0:
+                time.sleep(0.1)
+                if ax.get_attr(el, kAXFocusedAttribute):
+                    return f"focused {ref}"
         # Sidebar/list rows are the main SwiftUI false-success surface: AXPress
         # returns 0 while the pane does not change. Capture the window title so
         # we can refuse to call that a navigation.
@@ -1019,7 +1019,9 @@ class MacSession:
                     f"CDP instead: web_open(app=\"{app}\") then web_act a 'type' action on the "
                     f"terminal — that injects real keystrokes into the PTY.")
         if AXUIElementSetAttributeValue(el, kAXValueAttribute, text) == 0:
-            return f"set text on {ref}"
+            if str(ax.get_attr(el, kAXValueAttribute)) == str(text):
+                return f"set text on {ref} (readback verified)"
+            return f"{ref}: AX accepted the write but readback did not match; result unverified"
         if not allow_keystrokes:
             return f"{ref}: field not AX-settable; typing would use the shared keyboard — skipped"
         if not self.activate():
@@ -1163,6 +1165,7 @@ def _type_text(text):
 
 
 _KEYCODES = {"return": 36, "enter": 36, "tab": 48, "space": 49, "delete": 51,
+             "backspace": 51,
              "escape": 53, "left": 123, "right": 124, "down": 125, "up": 126,
              # US-QWERTY letters/digits, so ⌘-shortcuts (⌘Q, ⌘C, ⌘W, ...) work
              "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7, "c": 8,
@@ -1237,142 +1240,110 @@ def list_running_apps():
     return ", ".join(sorted(a["name"] for a in ax.list_apps()))
 
 
-def launch_app(name, force_accessibility=False, background=False):
-    """Launch or focus an app. background=True launches it WITHOUT bringing it to
-    the front (open -g) — so it doesn't steal the user's view (for simultaneous use).
-    force_accessibility relaunches an Electron/Chromium app with the Chromium flag
-    that makes its accessibility tree visible to snapshot (otherwise it reads empty)."""
-    bg = ["-g"] if background else []  # -g: open in the background, don't foreground
+def launch_app(name, force_accessibility=False, background=False, debugging_port=None):
+    """Launch explicitly; a forced-accessibility restart must quit gracefully."""
+    bg = ["-g"] if background else []
+    match = _resolve_app(name)
+    identity = _running_identity(match["pid"]) if match else {}
+    target = identity.get("path") or name
+    profile_args = []
+    if (force_accessibility or debugging_port) and match and "--user-data-dir" in _proc_cmdline(match["pid"]):
+        from .cdp import _OWNED_ENDPOINTS
+        from .targets import process_key
+        owned = next((record for record in _OWNED_ENDPOINTS.values()
+                      if process_key(record["identity"]) == process_key(identity)), None)
+        if owned is None:
+            return "REFUSED: current custom profile is not owned/verified; attach to its endpoint without restarting"
+        profile_args = [f"--user-data-dir={owned['profile']}"]
+    if (force_accessibility or debugging_port) and match:
+        app = NSRunningApplication.runningApplicationWithProcessIdentifier_(match["pid"])
+        if app is None:
+            return f"REFUSED: selected process for {name} disappeared; resolve it again"
+        app.terminate()
+        deadline = time.monotonic() + 6
+        while _process_alive(match["pid"]) and time.monotonic() < deadline:
+            time.sleep(0.2)
+        if _process_alive(match["pid"]):
+            return f"REFUSED: {name} did not quit gracefully; resolve its save/confirmation prompt"
     if not background:
-        _announce_front(name)  # foreground launch fronts the app — warn deterministically
+        _announce_front(name)
+    args = ["open", *bg, "-a", target]
     if force_accessibility:
-        # Relaunch with the Chromium flag that keeps an embedded-Chromium app's accessibility tree
-        # live in the BACKGROUND (see _proc_has_force_ax / snapshot). All process checks here use
-        # _pids_named (fresh pgrep), NOT ax.list_apps() — that list is cached in a no-runloop process,
-        # so a killed app still shows as running and the relaunch never happens.
-        old_pids = set(_pids_named(name))
-        # CRITICAL: `open -a X --args` reuses a running instance and IGNORES the new args, so the flag
-        # would never take. The app must be FULLY GONE before we reopen. Quit gracefully first (clean,
-        # lets the app save state), then hard-kill if it won't go: some apps (Discord) IGNORE SIGTERM,
-        # so the reliable fallback is SIGKILL (pkill -9), which needs no Automation permission.
-        if old_pids:
-            subprocess.run(["osascript", "-e", f'tell application {as_str(name)} to quit'], check=False)
-            gone_by = time.time() + 4
-            while time.time() < gone_by and _pids_named(name):
-                time.sleep(0.3)
-            if _pids_named(name):
-                subprocess.run(["pkill", "-9", "-x", name], check=False)   # SIGTERM-ignoring apps
-                hard_by = time.time() + 5
-                while time.time() < hard_by and _pids_named(name):
-                    time.sleep(0.3)
-            time.sleep(1)
-        subprocess.run(["open", *bg, "-a", name, "--args", _FORCE_AX_FLAG], check=False)
-        # Wait for the NEW instance — a pid we didn't see before that actually carries the flag —
-        # before timing the tree build; polling the old/dying pid was why an early read came back empty.
-        new_pid, deadline = None, time.time() + 20
-        while time.time() < deadline and new_pid is None:
-            for p in _pids_named(name):
-                if p not in old_pids and _proc_has_force_ax(p):
-                    new_pid = p
-                    break
-            if new_pid is None:
-                time.sleep(0.4)
-        if new_pid:
-            _wait_tree_ready(new_pid)   # block until the a11y tree is built, not just the window shell
-        else:
-            time.sleep(6)
-    else:
-        subprocess.run(["open", *bg, "-a", name], check=False)
-        time.sleep(4)
-    return (f"launched {name}" + (" in background" if background else "")
-            + (" (accessibility forced)" if force_accessibility else ""))
+        args += ["--args", _FORCE_AX_FLAG, *profile_args]
+    elif debugging_port:
+        args += ["--args", f"--remote-debugging-port={int(debugging_port)}",
+                 "--remote-debugging-address=127.0.0.1", *profile_args]
+    result = subprocess.run(args, check=False, capture_output=True, text=True)
+    if result.returncode:
+        return f"failed to launch {name}: {result.stderr.strip() or result.returncode}"
+    if debugging_port:
+        from .cdp import _wait_for_port, verify_endpoint
+        _wait_for_port(debugging_port, timeout=15)
+        verify_endpoint(debugging_port, target)
+        return f"debugging endpoint verified for {target} on :{debugging_port}"
+    if force_accessibility:
+        deadline = time.monotonic() + 12
+        while time.monotonic() < deadline:
+            current = _resolve_app(target)
+            if current and _proc_has_force_ax(current["pid"]):
+                return f"launched {name} with accessibility flag; operation coverage remains unverified"
+            time.sleep(0.3)
+        return f"REFUSED: launch requested for {name}, but the accessibility flag was not verified"
+    return f"launch requested for {name}" + (" in background" if background else "")
+
+
+def _activate_process(pid):
+    """Exact-process fallback when cooperative AppKit activation is refused.
+
+    Callers must pass the shared-input gate first and verify foreground afterward.
+    """
+    try:
+        result = subprocess.run([
+            "osascript", "-e", 'tell application "System Events" to set frontmost of '
+            f'first application process whose unix id is {int(pid)} to true'],
+            capture_output=True, text=True, timeout=3)
+        return result.returncode == 0
+    except subprocess.TimeoutExpired:
+        return False
 
 
 def focus_app(name):
-    """Bring an app to the front (LaunchServices — more reliable than activating
-    from a background process)."""
-    _announce_front(name)  # this is an explicit focus switch — warn deterministically
-    subprocess.run(["open", "-a", name], check=False)
-    time.sleep(1.0)
-    return f"focused {name}"
+    """Activate the resolved process and verify the foreground PID."""
+    target = _resolve_app(name)
+    if target is None:
+        return f"REFUSED: {name} is not running; launch it explicitly first"
+    _announce_front(name)
+    app = NSRunningApplication.runningApplicationWithProcessIdentifier_(target["pid"])
+    if (app is None or not app.activateWithOptions_(2)) and not _activate_process(target["pid"]):
+        return f"REFUSED: activation request failed for {name}"
+    for _ in range(20):
+        if _frontmost()[1] == target["pid"]:
+            return f"focused {name} (pid {target['pid']})"
+        time.sleep(0.1)
+    return f"UNVERIFIED: activation requested for {name}, but foreground PID did not match"
 
 
 def quit_app(name):
     """Quit an app cleanly via the OS — reliable regardless of focus or tray
-    behavior, unlike ⌘Q. Polls until it's actually gone (a graceful quit can lag),
-    escalating to a force-quit if it lingers."""
-    r = next((a for a in ax.list_apps() if a["name"] == name), None)
+    behavior, unlike ⌘Q. Polls until it's actually gone; never force-quits."""
+    r = _resolve_app(name)
     if r is None:
         return f"{name} is not running"
     app = NSRunningApplication.runningApplicationWithProcessIdentifier_(r["pid"])
     app.terminate()
     # Poll the app object's own termination flag — the NSWorkspace running-apps
     # list lags behind an actual quit, so checking it gives false "still running".
-    for i in range(20):  # up to ~6s; escalate to force-quit partway
+    for i in range(20):  # up to ~6s; never force-quit implicitly
         time.sleep(0.3)
-        if app.isTerminated():
+        if not _process_alive(r["pid"]):
             return f"quit {name}"
-        if i == 8:
-            app.forceTerminate()
     return f"{name} still running (it may be showing a save/confirm prompt)"
 
 
 # ── LocalComputer: the tool-use adapter (same interface as Docker computer.py) ──
-TOOLS = [
-    {"name": "snapshot",
-     "description": ("Look at the screen. Returns the focused app's UI as an accessibility "
-                     "tree — one element per line tagged with a [ref] like [e12]. You act on "
-                     "elements by ref."),
-     "input_schema": {"type": "object", "properties": {}}},
-    {"name": "act",
-     "description": ("Execute one or more UI actions in order by element ref, then get the updated "
-                     "screen. Primitives: click (activate/press an element), right_click (open an "
-                     "element's context menu — e.g. to reach 'Leave Server'), select (select a list "
-                     "row/cell/item), type (type text; with a ref it sets that field's value), "
-                     "menu (invoke a menu-bar command by path, e.g. path=['File','Move to Trash'] — "
-                     "FOCUS-FREE, the preferred stand-in for keyboard shortcuts like ⌘⌫/⌘S/⌘W), "
-                     "key (press a key with optional modifiers — STEALS FOCUS, only when no menu/field "
-                     "equivalent exists), window (move/resize an app's MAIN window FOCUS-FREE via "
-                     "x/y/w/h — the right way to tile/position windows; targets the main window, not a "
-                     "sheet/dialog. Pass `app` to target a specific app's window; to tile TWO different "
-                     "apps side by side give each window action its own `app`, e.g. "
-                     "{action:window,app:'TextEdit',x:0,w:756,...} then {action:window,app:'Notes',x:756,w:756,...}), "
-                     "click_xy (pixel click — last-resort fallback, STEALS FOCUS). "
-                     "Prefer the focus-free primitives (click/select/right_click/type-into-ref/menu/window)."),
-     "input_schema": {"type": "object", "properties": {"actions": {"type": "array", "items": {
-         "type": "object", "properties": {
-             "action": {"type": "string",
-                        "enum": ["click", "right_click", "select", "type", "menu", "key",
-                                 "window", "drag", "click_xy"]},
-             "ref": {"type": "string"}, "text": {"type": "string"},
-             "path": {"type": "array", "items": {"type": "string"}},
-             "key": {"type": "string"}, "modifiers": {"type": "array", "items": {"type": "string"}},
-             "x": {"type": "integer"}, "y": {"type": "integer"},
-             "w": {"type": "integer"}, "h": {"type": "integer"},
-             "app": {"type": "string"},
-             "from_ref": {"type": "string"}, "to_ref": {"type": "string"},
-             "from_x": {"type": "integer"}, "from_y": {"type": "integer"},
-             "to_x": {"type": "integer"}, "to_y": {"type": "integer"}},
-         "required": ["action"]}}}, "required": ["actions"]}},
-    {"name": "screenshot", "description": "See the screen as an image.",
-     "input_schema": {"type": "object", "properties": {}}},
-    # ── App lifecycle (OS-backed, reliable) — manage apps, don't UI-drive them ──
-    {"name": "list_apps", "description": "List the running GUI apps you can target.",
-     "input_schema": {"type": "object", "properties": {}}},
-    {"name": "launch_app",
-     "description": ("Launch or focus an app (reliable OS call — use this instead of clicking Dock "
-                     "icons). Set force_accessibility=true for an embedded-Chromium app (Electron/CEF) "
-                     "whose tree reads empty — it relaunches the app so its accessibility tree may "
-                     "become visible to snapshot (some hardened apps still won't expose it)."),
-     "input_schema": {"type": "object", "properties": {
-         "name": {"type": "string"}, "force_accessibility": {"type": "boolean"}}, "required": ["name"]}},
-    {"name": "quit_app",
-     "description": ("Quit an app via the OS — reliable regardless of focus (use this instead of ⌘Q, "
-                     "which is unreliable on background apps)."),
-     "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}},
-    {"name": "focus_app", "description": "Bring an app to the front (reliable OS call).",
-     "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}},
-]
+from .tool_registry import BASE_TOOLS
+TOOLS = [tool for tool in BASE_TOOLS if tool["name"] in {
+    "snapshot", "act", "screenshot", "list_apps", "launch_app", "quit_app", "focus_app"}]
 
 
 _REF_LINE = re.compile(r"\[(e\d+)\]")
@@ -1496,7 +1467,9 @@ class LocalComputer:
                           '[{"action":"click","ref":"e12"}] — each item must be an object')
         return actions, None
 
-    def act(self, actions):
+    def act(self, actions, detailed=False, postcondition=None):
+        from .results import action_receipt, validate_postcondition
+        validate_postcondition(postcondition)
         actions, bad = self._coerce_actions(actions)
         if bad:
             return bad
@@ -1555,6 +1528,8 @@ class LocalComputer:
                     lines.append(f"clicked ({a['x']},{a['y']})")
                 else:
                     lines.append(f"unknown action {act}")
+                if lines and any(marker in lines[-1].lower() for marker in ("refused", "skipped", "unverified", "not selectable")):
+                    break
                 time.sleep(0.6)
             except StaleRef:
                 lines.append(f"ref {a.get('ref')} is stale — re-snapshot")
@@ -1565,6 +1540,18 @@ class LocalComputer:
         time.sleep(0.8)
         d = self.session.disturbances
         delta = {k: d[k] - _dist_before[k] for k in d if d[k] > _dist_before[k]}
+        outcome = None
+        if detailed or postcondition is not None:
+            def read(ref, field):
+                attributes = {"value": "AXValue", "title": "AXTitle", "enabled": "AXEnabled",
+                              "selected": "AXSelected", "expanded": "AXExpanded"}
+                element = self.session._el(ref)
+                error, value = ax.read_attr(element, attributes[field])
+                if error:
+                    raise ValueError(f"AX readback failed ({error})")
+                return value
+            outcome = action_receipt(lines, len(actions), "ax", getattr(self.session, "_identity", None),
+                                     delta, postcondition, read)
         receipt = ""
         if delta:
             used = ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in delta.items())
@@ -1577,6 +1564,8 @@ class LocalComputer:
         screen = ("Screen changes since your last view (~ changed, + new; unchanged lines "
                   "omitted — call snapshot for the full tree):\n" + diff
                   ) if diff is not None else "Screen now:\n" + shot
+        if outcome is not None:
+            return {**outcome, "observation": screen}
         return "Executed:\n" + "\n".join(lines) + receipt + "\n\n" + screen
 
     def handle(self, tool_use):
@@ -1590,7 +1579,8 @@ class LocalComputer:
             if name == "snapshot":
                 content = self.snapshot()
             elif name == "act":
-                content = self.act(args["actions"])
+                content = self.act(args["actions"], detailed=args.get("detailed", False),
+                                   postcondition=args.get("postcondition"))
             elif name == "list_apps":
                 content = list_running_apps()
             elif name == "launch_app":
