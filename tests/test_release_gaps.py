@@ -36,6 +36,11 @@ def test_activation_fallback_requires_foreground_readback(monkeypatch, front, ex
 
 
 def test_denied_activation_never_reaches_fallback(monkeypatch):
+    from hunch import gate, sdk
+    # CI can start with Finder foreground, which legitimately skips a focus gate.
+    # This case must request a real switch without reading or changing the desktop.
+    monkeypatch.setattr(gate, "_frontmost", lambda: ("Other app", 99))
+    monkeypatch.setattr(sdk, "_focus_app", lambda _: pytest.fail("denied native activation"))
     monkeypatch.setattr(local_mac, "_activate_process", lambda _: pytest.fail("denied activation"))
     with pytest.raises(ApprovalDenied):
         Hunch(check_permissions=False, background_only=True, confirm="off").focus_app("Finder")
