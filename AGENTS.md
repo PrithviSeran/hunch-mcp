@@ -15,7 +15,7 @@ the product. Most gotchas below exist to protect it.
 ```
 
 - Python ≥ 3.11. Depends on **pyobjc** (AppKit/ApplicationServices/Quartz) — macOS only.
-- `tests/test_smoke.py::test_tool_count` asserts **exactly 29 MCP tools**. Adding/removing a
+- `tests/test_smoke.py::test_tool_count` asserts **exactly 32 MCP tools**. Adding/removing a
   tool means updating that number in the same commit, on purpose.
 - Tests fake all AX/Quartz calls (`monkeypatch`), so they run headless with no UI and touch
   no Keychain. Keep new logic unit-testable this way: put the OS call behind a function you
@@ -27,7 +27,7 @@ The SDK is the product; everything else is an app built on it.
 
 - **`sdk.py`** — `Hunch`, the developer-facing SDK object (instance-owned policy, auth
   injection `ApiKey`/`OAuthToken`/`"none"`, `app_id` namespacing, notify handler).
-- **`server.py`** — the MCP server, **an app built ON the SDK** (the first one). 29
+- **`server.py`** — the MCP server, **an app built ON the SDK** (the first one). 32
   `@mcp.tool()` functions each call `_run(name, ...)` → `agent._dispatch_core`. Its only
   "personal machine" specialness is constructor args (`policy="personal"`, Hunch branding).
 - **`agent.py`** — the agent loop (`Agent.run`), two backends: **api** (`anthropic`, metered)
@@ -107,10 +107,9 @@ resort. Concretely:
   `AXMainWindow` (via `get_window`), **not `window 1` by index**. A modal **sheet** (save panel,
   a locked-note password prompt) can *be* window 1; index-based resize hits the sheet. It reads
   the geometry back and reports the actual result (windows clamp/refuse).
-- **Embedded Chromium/Electron** (Discord, Slack, VS Code, Spotify…) don't expose their web-content
-  AX tree in the background. `launch_app(force_accessibility=True)` relaunches with
-  `--force-renderer-accessibility` so the tree persists; `AXManualAccessibility` helps while
-  frontmost. Detected via bundled `Electron Framework`/`Chromium Embedded Framework`.
+- **Embedded Chromium/Electron** coverage depends on the process, operation, permissions,
+  and window state. Observation never restarts applications. Explicit recovery can enable AX
+  or request a graceful accessibility/debugging restart; verify the resulting operation.
 - **When the AX tree is genuinely empty** (a SwiftUI *custom canvas* like the Shortcuts editor:
   ~5 nodes, all placeholder text), there is **no lower level to read** — `AXUIElement` is the
   floor of the public API and reads what the app *published*. `AXEnhancedUserInterface` /

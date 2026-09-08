@@ -18,8 +18,10 @@ from hunch.errors import HunchError
 
 
 class _FakeHunch:
-    def __init__(self):
+    def __init__(self, confirm=None):
         self._app_id = None
+        if confirm is not None:
+            self._gate = types.SimpleNamespace(confirm=confirm)
 
 
 # ── provider registry ─────────────────────────────────────────────────────────
@@ -90,6 +92,44 @@ def test_codex_config_overrides_register_hunch_server():
     assert "mcp_servers.hunch.command=" in joined
     assert 'mcp_servers.hunch.args=["-m", "hunch", "serve"]' in joined
     assert "mcp_servers.hunch.env.HOME=" in joined and "mcp_servers.hunch.env.PATH=" in joined
+    assert "HUNCH_NO_INTERNAL_GATE" not in joined
+    assert "default_tools_approval_mode" not in joined
+
+
+def test_codex_unattended_instance_auto_approves_only_hunch_tools():
+    ov = CodexBackend(_FakeHunch(confirm="off"))._config_overrides()
+    joined = "\n".join(ov)
+    assert 'mcp_servers.hunch.env.HUNCH_NO_INTERNAL_GATE="1"' in joined
+    assert 'mcp_servers.hunch.default_tools_approval_mode="approve"' in joined
+    assert "approval_policy" not in joined
+
+
+def test_codex_explicit_gate_environment_reaches_private_server(monkeypatch):
+    monkeypatch.setenv("HUNCH_NO_INTERNAL_GATE", "1")
+    joined = "\n".join(CodexBackend(_FakeHunch())._config_overrides())
+    assert 'mcp_servers.hunch.env.HUNCH_NO_INTERNAL_GATE="1"' in joined
+    assert 'mcp_servers.hunch.default_tools_approval_mode="approve"' in joined
+
+
+def test_codex_dialog_instance_keeps_both_approval_layers():
+    ov = CodexBackend(_FakeHunch(confirm="dialog"))._config_overrides()
+    joined = "\n".join(ov)
+    assert "HUNCH_NO_INTERNAL_GATE" not in joined
+    assert "default_tools_approval_mode" not in joined
+
+
+def test_codex_can_trust_private_hunch_tools_without_disabling_hunch_gates():
+    h = _FakeHunch(confirm="dialog")
+    h._trust_private_hunch_tools = True
+    joined = "\n".join(CodexBackend(h)._config_overrides())
+    assert 'mcp_servers.hunch.default_tools_approval_mode="approve"' in joined
+    assert "HUNCH_NO_INTERNAL_GATE" not in joined
+
+
+
+
+
+
 
 
 def test_codex_instructions_carry_playbook():

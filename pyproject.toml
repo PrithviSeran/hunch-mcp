@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hunch-sdk"
-version = "0.6.3"
+version = "0.6.4"
 description = "Drive your Mac focus-free over MCP: OS APIs, AppleScript, CDP, and Accessibility."
 readme = "README.md"
 license = "Apache-2.0"
@@ -24,6 +24,7 @@ classifiers = [
 ]
 dependencies = [
   "mcp>=1.2,<2",
+  "jsonschema>=4.20",
   "websocket-client>=1.6",
   "pyobjc-framework-Cocoa>=10.0",
   "pyobjc-framework-ApplicationServices>=10.0",

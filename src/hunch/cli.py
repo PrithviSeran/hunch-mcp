@@ -129,7 +129,7 @@ def cmd_creds(args):
         for name in names:
             kind = creds.kind_of(name)
             domains = creds.domains_of(name)
-            bound = ", ".join(domains) if domains else "any site (unbound)"
+            bound = ", ".join(domains) if domains else "unbound (automated fills disabled)"
             print(f"  {name}  [{kind}]  domains: {bound}")
         return 0
 
@@ -139,6 +139,14 @@ def cmd_creds(args):
             return 1
         creds.delete_credential(args.service)
         print(f"removed '{args.service}' from the Keychain.")
+        return 0
+
+    if args.creds_action == "bind":
+        if not creds.has(args.service):
+            print(f"no saved credential named {args.service!r}", file=sys.stderr)
+            return 1
+        creds.set_domains(args.service, args.domain)
+        print(f"bound {args.service!r} to {', '.join(creds.domains_of(args.service))}")
         return 0
 
     # add
@@ -159,12 +167,12 @@ def cmd_creds(args):
     domains = list(args.domain or [])
     if not domains:
         raw = input("Bind to domain(s)? (recommended — comma-separated, e.g. google.com; "
-                    "blank = usable on any site): ").strip()
+                    "blank = automated fills disabled): ").strip()
         domains = [d for d in (x.strip() for x in raw.split(",")) if d]
     creds.set_domains(service, domains)
-    bound = ", ".join(creds.domains_of(service)) or "any site (unbound)"
+    bound = ", ".join(creds.domains_of(service)) or "unbound (automated fills disabled)"
     print(f"saved '{service}' to the macOS Keychain. Fillable on: {bound}\n"
-          "The value never enters the model's context — agents fill it via "
+          "Fill results omit the value; known filled strings are redacted. Agents use "
           f"web_fill_{'secret' if args.secret else 'login'}('{service}').")
     return 0
 
@@ -421,7 +429,23 @@ def cmd_setup(args):
     return 0
 
 
+# ── probe ──────────────────────────────────────────────────────────────────────
+
+
+
+
+# ── experiment ─────────────────────────────────────────────────────────────────
+
+
+
+
 # ── main ───────────────────────────────────────────────────────────────────────
+
+
+
+
+
+
 
 
 def main(argv=None):
@@ -463,6 +487,9 @@ def main(argv=None):
     pa.add_argument("--domain", action="append",
                     help="domain(s) this credential may be filled on (repeatable)")
     csub.add_parser("list", help="list saved services (names/kinds/domains — never values)")
+    pb = csub.add_parser("bind", help="bind an existing credential without reading its secret")
+    pb.add_argument("service")
+    pb.add_argument("--domain", action="append", required=True)
     pr = csub.add_parser("remove", help="delete a saved credential")
     pr.add_argument("service")
     p.set_defaults(func=cmd_creds)

@@ -93,6 +93,39 @@ def test_click_checkbox_failure_teaches_ax_path(monkeypatch):
     assert "val='0'" in out and "defaults write" in out
 
 
+def test_click_text_field_focuses_instead_of_confirming(monkeypatch):
+    """Native sheets may advertise AXConfirm on a text field. Clicking the ref
+    must focus the editor so a following Return reaches it."""
+    s = _bare_session()
+    s.registry = {"e3": "field"}
+    state = {"focused": False}
+    fired = []
+
+    def get_attr(el, attr):
+        if attr == ax.kAXRoleAttribute:
+            return "AXTextField"
+        if attr == lm.kAXFocusedAttribute:
+            return state["focused"]
+        return None
+
+    monkeypatch.setattr(ax, "get_attr", get_attr)
+    monkeypatch.setattr(
+        lm,
+        "AXUIElementSetAttributeValue",
+        lambda el, attr, value: state.update(focused=value) or 0,
+    )
+    monkeypatch.setattr(lm.MacSession, "_ax_activate", lambda self, el: fired.append(el))
+    monkeypatch.setattr(lm.time, "sleep", lambda seconds: None)
+
+    assert s.click("e3") == "focused e3"
+    assert state["focused"] is True
+    assert fired == []
+
+
+def test_backspace_is_a_key_alias_not_literal_text():
+    assert lm._KEYCODES["backspace"] == lm._KEYCODES["delete"] == 51
+
+
 def test_ax_fire_prefers_alternative_action_over_toggle(monkeypatch):
     monkeypatch.setattr(lm, "AXUIElementPerformAction",
                         lambda el, a: 0 if a == "AXOpen" else -25200)

@@ -14,9 +14,10 @@ Two architectural facts follow from Codex spawning its CLI runtime as a subproce
     identical, but caller-side live state (a simultaneous_mode toggle on THIS object)
     doesn't reach that process.
   • Host-owned permission routing (Agent(can_use_tool=...) / the app's Approve-Deny
-    popover) does NOT govern Codex's tool calls. The dangerous verbs are gated by the
-    hunch server's own click-to-approve dialogs instead. (Routing Codex's approval
-    protocol into the host callback is a future enhancement.)
+    popover) does NOT govern Codex's tool calls. Normally the dangerous verbs are gated
+    by the hunch server's own click-to-approve dialogs. An explicitly unattended Hunch
+    instance (confirm="off") propagates that choice to this private server and tells
+    Codex to approve its Hunch MCP tools without editing the user's global config.
 
 Auth is a `codex login` (ChatGPT/Codex subscription) session — set it up with
 hunch.provider("codex").login() or `codex login`. No API-key path is exposed.
@@ -94,9 +95,57 @@ class CodexBackend(Backend):
             "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
             "HOME": os.path.expanduser("~"),
         }
-        # deliberately DO NOT set HUNCH_NO_INTERNAL_GATE — we want the server to run its
-        # own click-to-approve dialogs, since host permission routing can't reach it here.
+        # The server is another process, so the caller's Gate object cannot reach it.
+        # Propagate only an explicit instance-level opt-out; normal sessions retain the
+        # server's click-to-approve gate and no persistent config is changed.
+        if self._unattended():
+            env["HUNCH_NO_INTERNAL_GATE"] = "1"
+        gate = getattr(self._h, "_gate", None)
+        if (self._permit is not None or callable(getattr(gate, "confirm", None))
+                or callable(getattr(gate, "_policy", None))
+                or getattr(self._h, "_notify_handler", None) is not None):
+            raise HunchError("Codex subprocess transport cannot preserve live host callbacks; "
+                             "use the in-process provider or serializable runtime policy")
+        computer = getattr(self._h, "_computer", None)
+        web = getattr(self._h, "web", None)
+        if computer is not None:
+            if getattr(self._h, "_secrets", None):
+                raise HunchError("Codex subprocess cannot inherit secret-output protection state; use the in-process provider")
+            if (getattr(computer.session, "_selected_window", None) is not None
+                    or getattr(web, "_computer", None) is not None):
+                raise HunchError("Codex subprocess cannot inherit a live native window/CDP session; "
+                                 "select it through the child tools or use the in-process provider")
+            env["HUNCH_RUNTIME_CONFIG"] = json.dumps({
+                "app": computer.app, "simultaneous": computer.simultaneous,
+                "background_only": self._h.background_only,
+                "allow_unrestricted_scripts": self._h.allow_unrestricted_scripts,
+                "allowed_web_origins": self._h.allowed_web_origins,
+                "app_id": self._h.app_id, "app_name": self._h.app_name,
+                "confirm": gate.confirm, "policy": gate._policy,
+                "cdp_port": None if getattr(web, "_auto_port", False) else web.port,
+                "cdp_profile": web.profile,
+                "snapshot_max_depth": computer.max_depth,
+                "snapshot_max_nodes": computer.max_nodes,
+                "notify": self._h._native_notifications,
+            })
         return sys.executable, ["-m", "hunch", "serve"], env
+
+    def _unattended(self):
+        """Whether this Hunch instance explicitly opted out of confirmations."""
+        return (getattr(getattr(self._h, "_gate", None), "confirm", None) == "off"
+                or bool(os.environ.get("HUNCH_NO_INTERNAL_GATE")))
+
+    def _trust_hunch_tools(self):
+        """Whether Codex may call this private Hunch server without per-call prompts.
+
+        The server's own content-aware gates remain active unless the whole Hunch
+        instance is explicitly unattended.  Learning sessions use this distinction so
+        read-only observations do not prompt repeatedly while shared-input and
+        destructive paths still require Hunch approval.
+        """
+        return self._unattended() or bool(
+            getattr(self._h, "_trust_private_hunch_tools", False)
+        )
 
     def _config_overrides(self):
         """Codex `-c key=value` config overrides registering the hunch MCP server, as the
@@ -107,13 +156,20 @@ class CodexBackend(Backend):
               f"mcp_servers.hunch.args={json.dumps(args)}"]
         for k, v in env.items():
             ov.append(f"mcp_servers.hunch.env.{k}={json.dumps(v)}")
+        if self._trust_hunch_tools():
+            # This governs Codex's own MCP approval UI. It is intentionally scoped to
+            # the private Hunch server rather than setting global approval_policy=never,
+            # which would also auto-approve unrelated shell and connector operations.
+            ov.append('mcp_servers.hunch.default_tools_approval_mode="approve"')
         return tuple(ov)
 
     # ── the playbook, delivered as Codex developer instructions ──────────────────
     def _instructions(self):
         from ..playbook import HUNCH_PLAYBOOK
         from ..agent import AGENT_ADDENDUM
-        return _PREAMBLE + HUNCH_PLAYBOOK + "\n" + AGENT_ADDENDUM
+        preamble = _PREAMBLE
+        summary = self._h.session_summary() if hasattr(self._h, "session_summary") else ""
+        return preamble + HUNCH_PLAYBOOK + "\n" + AGENT_ADDENDUM + "\n" + summary + "\n" + getattr(self, "_system_suffix", "")
 
     def _working_dir(self):
         """A private cwd for the Codex thread, so it never touches the user's project dir."""
@@ -164,7 +220,7 @@ class CodexBackend(Backend):
         if itype == "mcpToolCall":
             result = getattr(root, "result", None)
             if result is not None:
-                emit("tool_result", cls._result_text(result)[:200])
+                emit("tool_result", cls._result_text(result))
             return ""
         if itype == "agentMessage":
             text = (getattr(root, "text", "") or "").strip()
@@ -190,9 +246,16 @@ class CodexBackend(Backend):
         playbook as developer instructions. The one place the SDK's client surface is
         used; override in tests."""
         import openai_codex as oc
+        overrides = self._config_overrides()
+        if self._codex is not None and getattr(self, "_runtime_overrides", overrides) != overrides:
+            raise HunchError("runtime settings changed after Codex child creation; reset the agent first")
         if self._codex is None:
             # Relies on the user's `codex login` session (no API-key path).
-            self._codex = oc.Codex(config=oc.CodexConfig(config_overrides=self._config_overrides()))
+            config = {"config_overrides": overrides}
+            self._runtime_overrides = overrides
+            if os.environ.get("HUNCH_CODEX_BIN"):
+                config["codex_bin"] = os.environ["HUNCH_CODEX_BIN"]
+            self._codex = oc.Codex(config=oc.CodexConfig(**config))
         if self._thread is None:
             kwargs = dict(cwd=cwd, developer_instructions=self._instructions(),
                           sandbox=oc.Sandbox.workspace_write)
@@ -262,6 +325,9 @@ class CodexBackend(Backend):
         # from a `hunch.provider("codex").login()` / `codex login`. If nothing is authorized,
         # the SDK raises and we translate it into a login hint below.
         emit = on_event or (lambda kind, data: None)
+        if getattr(self, "_system_suffix", "") != system_suffix:
+            self._thread = None
+        self._system_suffix = system_suffix
         model = model or self.default_model
         cwd = self._working_dir()
 

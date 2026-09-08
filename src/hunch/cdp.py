@@ -1,11 +1,9 @@
 """Hunch CDP backend — drive Chromium browsers and Electron apps FOCUS-FREE.
 
-Chromium/Electron apps expose the Chrome DevTools Protocol: launch with
---remote-debugging-port and you can read the page's accessibility tree AND
-inject clicks/keys straight into the renderer — no OS cursor, no window focus.
-That's what makes true simultaneous use work for the whole Chromium/Electron
-category (Chrome, Arc, Discord, Slack, Spotify, VS Code, ...), unlike AX which
-needs the app frontmost.
+Supported Chromium/Electron launches expose the Chrome DevTools Protocol.
+A verified endpoint provides renderer accessibility semantics, DOM references,
+and renderer-local input without moving the OS cursor. Native AX can also work
+in the background; coverage depends on the operation and current app state.
 
 Same snapshot/act/handle contract as local_mac.LocalComputer, so it drops into
 the same agent loop.
@@ -174,8 +172,8 @@ def _title_matches(title, path):
 def _pick_workbench(pages, folder=None):
     """From an editor's page targets, choose the real editor window: a workbench.html target whose
     title is NOT a side panel (Cursor's 'Cursor Agents', etc.). Returns None if none qualify yet —
-    the workbench target can lag the side panel at startup, so callers poll on this (and fall back
-    to pages[0] only after the timeout).
+    the workbench target can lag the side panel at startup, so callers poll on this.
+    Ambiguous windows require explicit target selection.
 
     With `folder`, a window whose title names that folder WINS. One editor instance commonly has
     several windows open (and restores the previous session's on launch), so 'the first workbench'
@@ -186,8 +184,8 @@ def _pick_workbench(pages, folder=None):
     if folder:
         hit = [p for p in main if _title_matches(p.get("title"), folder)]
         if hit:
-            return hit[0]
-    return (main or [None])[0]
+            return hit[0] if len(hit) == 1 else None
+    return main[0] if len(main) == 1 else None
 
 
 def open_folder_in_editor(app, profile, folder, background=True):
@@ -208,96 +206,163 @@ def _wait_for_port(port, timeout=15):
     end = time.time() + timeout
     while time.time() < end:
         try:
-            urllib.request.urlopen(f"http://localhost:{port}/json/version", timeout=2).read()
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=2).read()
             return True
         except Exception:
             time.sleep(0.5)
     raise RuntimeError(f"debug port {port} did not open within {timeout}s")
 
 
-def _clear_singleton(data_dir):
-    """Remove stale Chrome Singleton* lock files that a hard-killed instance leaves behind —
-    they otherwise make a relaunch hand off to the dead lock-holder instead of binding the
-    debug port (the intermittent 'CDP port never opened' failure)."""
-    for f in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
-        try:
-            os.remove(os.path.join(data_dir, f))
-        except OSError:
-            pass
+_OWNED_ENDPOINTS = {}
+
+
+def _endpoint_listeners(port):
+    result = subprocess.run(["lsof", "-nP", "-FpdRn", f"-iTCP:{int(port)}", "-sTCP:LISTEN"],
+                            capture_output=True, text=True, timeout=3)
+    listeners = {}
+    current = None
+    for line in result.stdout.splitlines():
+        if line.startswith("p"):
+            current = listeners.setdefault(int(line[1:]), {"parent": None, "sockets": set()})
+        elif current is not None and line.startswith("R"):
+            current["parent"] = int(line[1:])
+        elif current is not None and line.startswith("d"):
+            current["sockets"].add(line[1:])
+    if result.returncode:
+        return {}
+    return listeners
+
+
+def _endpoint_owner(listeners):
+    if len(listeners) == 1:
+        return next(iter(listeners))
+    # A forked helper can retain the parent's listening FD. Accept only the same
+    # kernel socket and an unbroken ancestry chain among its holders; names and
+    # matching ports alone cannot distinguish independent listeners.
+    sockets = [entry["sockets"] for entry in listeners.values()]
+    if not sockets or len(sockets[0]) != 1 or any(s != sockets[0] for s in sockets):
+        return None
+    socket_id = next(iter(sockets[0]))
+    if not re.fullmatch(r"0x[0-9a-fA-F]+", socket_id) or int(socket_id, 16) == 0:
+        return None
+    roots = [pid for pid, entry in listeners.items() if entry["parent"] not in listeners]
+    if len(roots) != 1:
+        return None
+    root = roots[0]
+    for pid in listeners:
+        seen = set()
+        while pid != root:
+            if pid in seen or pid not in listeners:
+                return None
+            seen.add(pid)
+            pid = listeners[pid]["parent"]
+    return root
+
+
+def endpoint_identity(port):
+    """Resolve the listening application, including verified inherited sockets."""
+    from .local_mac import _running_identity
+    from .targets import process_key
+    listeners = _endpoint_listeners(port)
+    pid = _endpoint_owner(listeners)
+    if pid is None:
+        raise RuntimeError(f"cannot verify one owning process for CDP port {port}")
+    identity = _running_identity(pid)
+    if not identity:
+        raise RuntimeError(f"CDP port {port} owner has no application identity")
+    if len(listeners) > 1:
+        if (_endpoint_listeners(port) != listeners
+                or process_key(_running_identity(pid) or {}) != process_key(identity)):
+            raise RuntimeError(f"CDP port {port} ownership changed during verification; retry attachment")
+    return identity
+
+
+def _app_path(app):
+    from AppKit import NSWorkspace
+    if os.path.isabs(app):
+        return os.path.realpath(app)
+    path = NSWorkspace.sharedWorkspace().fullPathForApplication_(app)
+    if not path:
+        raise RuntimeError(f"cannot resolve installed application {app!r}")
+    return os.path.realpath(str(path))
+
+
+def verify_endpoint(port, app):
+    identity = endpoint_identity(port)
+    if os.path.realpath(identity.get("path", "")) != _app_path(_resolve_app(app)):
+        raise RuntimeError(f"CDP port {port} belongs to {identity.get('path')}, not {app}")
+    return identity
 
 
 def launch_chromium(app_name, port, url=None, background=True, isolated=False, profile=None,
-                    editor=False):
-    """Launch a Chromium/Electron app with CDP enabled.
-      isolated=True  -> a throwaway sandbox profile (no logins).
-      otherwise      -> a persistent, DEDICATED Hunch profile (HUNCH_PROFILE, or `profile`)
-                        that the user signs into once and Hunch reuses focus-free.
-    We never touch the app's real/default profile: Chrome 136+ won't open the debug port
-    there, so killing the user's real browser (the old behaviour) gained nothing and lost
-    their tabs. Verifies the port actually binds before returning."""
+                    editor=False, allowed_origins=(), owner=None):
+    """Launch a dedicated instance; reuse only a verified, compatible owned endpoint."""
+    from .targets import process_key
+    if url and not editor:
+        from .destinations import navigation_refusal
+        refusal = navigation_refusal(url, allowed_origins)
+        if refusal:
+            raise RuntimeError(refusal)
     app = _resolve_app(app_name)
-    # Already listening? Reuse it rather than spawning a duplicate that fights the profile lock.
     try:
-        urllib.request.urlopen(f"http://localhost:{port}/json/version", timeout=1).read()
-        return f"reusing CDP instance already on :{port}"
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=1).read()
+        listening = True
     except Exception:
-        pass
-    data_dir = tempfile.mkdtemp(prefix='hunch_cdp_') if isolated else (profile or HUNCH_PROFILE)
+        listening = False
+    if listening:
+        identity = verify_endpoint(port, app)
+        owned = _OWNED_ENDPOINTS.get(port)
+        if (not owned or owned.get("owner") is not owner or process_key(identity) != process_key(owned["identity"])
+                or isolated or owned["profile"] != os.path.realpath(profile or HUNCH_PROFILE)):
+            raise RuntimeError(f"CDP port {port} is already in use; explicitly attach or select a free port")
+        return f"reusing verified CDP instance on :{port}"
+    data_dir = tempfile.mkdtemp(prefix="hunch_cdp_", dir="/private/tmp") if isolated else os.path.realpath(profile or HUNCH_PROFILE)
+    # Leave room for the editor's versioned socket basename (macOS limit: 103 bytes).
+    if editor and len(os.fsencode(data_dir)) > 70:
+        raise RuntimeError("editor profile path is too long for macOS IPC; choose a shorter cdp_profile")
     os.makedirs(data_dir, exist_ok=True)
-    args = [f"--remote-debugging-port={port}", "--remote-allow-origins=*",
+    args = [f"--remote-debugging-port={port}", "--remote-debugging-address=127.0.0.1",
             f"--user-data-dir={data_dir}", "--no-first-run", "--no-default-browser-check",
-            # Hunch drives this window in the BACKGROUND (open -g). Without these, Chromium
-            # throttles hidden pages (timers clamped, rAF paused, occluded windows stop
-            # compositing) and JS-rendered sites never finish loading. Same trio Playwright/
-            # Puppeteer use; the window still stays behind everything.
-            "--disable-background-timer-throttling",
-            "--disable-backgrounding-occluded-windows",
+            "--disable-background-timer-throttling", "--disable-backgrounding-occluded-windows",
             "--disable-renderer-backgrounding"]
     if url:
         args.append(url)
-    cmd = ["open"] + (["-g"] if background else []) + ["-na", app, "--args"] + args
-
-    last_err = ""
-    for attempt in (1, 2):
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-        # `open` prints "Unable to find application named 'X'" and returns non-zero when the
-        # app name is wrong — surface THAT clearly instead of a misleading debug-port timeout.
-        if proc.returncode != 0 or "unable to find application" in (proc.stderr or "").lower():
-            if editor:
-                raise RuntimeError(
-                    f"no editor named {app_name!r} on this Mac ({(proc.stderr or '').strip() or 'not found'}). "
-                    f"Supported editors: Cursor, Visual Studio Code, VSCodium, Windsurf.")
-            raise RuntimeError(
-                f"no browser named {app_name!r} on this Mac ({(proc.stderr or '').strip() or 'not found'}). "
-                f"web_open drives a Chromium BROWSER (or Electron app) — pass a browser like "
-                f"'Google Chrome' and open a website (Gmail etc.) via the url argument, not as the app.")
-        try:
-            _wait_for_port(port, timeout=15)
-            return (f"launched {app} on :{port} (profile={'sandbox' if isolated else data_dir})"
-                    + (" background" if background else " foreground")
-                    + (" (self-healed)" if attempt == 2 else ""))
-        except RuntimeError as e:
-            last_err = str(e)
-            # SELF-HEAL: the profile is almost certainly held by a stale/locked instance (a
-            # prior hard-kill leaves Singleton locks, so the relaunch hands off to a dead
-            # holder and never binds the port). Quit that instance, clear the locks, retry
-            # ONCE — so callers never punt "please quit Chrome yourself" back to the user.
-            quit_cdp(port)
-            subprocess.run(["pkill", "-f", f"--user-data-dir={data_dir}"], check=False)
-            if not isolated:
-                _clear_singleton(data_dir)
-            time.sleep(2)
-    raise RuntimeError(
-        f"couldn't get {app} to expose its debug port on :{port} even after quitting and "
-        f"relaunching it fresh. {last_err}")
+    command = ["open"] + (["-g"] if background else []) + ["-na", app, "--args"] + args
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError(f"failed to launch {app}: {result.stderr.strip()}")
+    _wait_for_port(port, timeout=15)
+    identity = verify_endpoint(port, app)
+    from .local_mac import _proc_cmdline
+    command_line = _proc_cmdline(identity["pid"])
+    if f"--user-data-dir={data_dir}" not in command_line:
+        raise RuntimeError("launched endpoint did not preserve the requested profile; ownership unverified")
+    _OWNED_ENDPOINTS[port] = {"identity": identity, "profile": data_dir, "app": app,
+                              "isolated": isolated, "owner": owner}
+    return f"launched verified {app} on :{port} (profile={data_dir})"
 
 
-def quit_cdp(port):
-    """Quit ONLY the CDP-controlled browser instance — the one launched with this debug
-    port. The user's normal browser has no such flag, so it's never touched. Used to
-    recover from a stuck/blank page by relaunching fresh (same profile keeps the login)."""
-    subprocess.run(["pkill", "-f", f"remote-debugging-port={port}"], check=False)
-    time.sleep(2)
+def quit_cdp(port, *, owner=None):
+    """Gracefully quit a process this runtime launched, after rechecking ownership."""
+    from AppKit import NSRunningApplication
+    from .targets import process_key
+    from .local_mac import _process_alive
+    owned = _OWNED_ENDPOINTS.get(port)
+    if not owned or owned.get("owner") is not owner:
+        raise RuntimeError(f"cannot quit unowned CDP endpoint :{port}; attach or inspect it first")
+    identity = endpoint_identity(port)
+    if process_key(identity) != process_key(owned["identity"]):
+        raise RuntimeError("CDP ownership changed; refusing to quit")
+    app = NSRunningApplication.runningApplicationWithProcessIdentifier_(identity["pid"])
+    if app is None:
+        raise RuntimeError("CDP owning process disappeared")
+    app.terminate()
+    deadline = time.monotonic() + 6
+    while _process_alive(identity["pid"]) and time.monotonic() < deadline:
+        time.sleep(0.2)
+    if _process_alive(identity["pid"]):
+        raise RuntimeError("CDP application did not quit gracefully; resolve its save/confirmation prompt")
+    del _OWNED_ENDPOINTS[port]
     return f"quit CDP instance on :{port}"
 
 
@@ -316,24 +381,35 @@ class CDPSession:
         self._known_targets = set()  # target ids we've already seen (to detect NEW tabs)
         self.editor = False         # driving an Electron editor (multi-window) vs a browser
         self.pinned = None          # editor: the folder this session is deliberately bound to
+        self.pinned_app = False
+        self.allowed_origins = ()
 
     def _list_page_targets(self):
         """All page (tab/window) targets on this debug port. Chrome reports the most recently
         created/active page first."""
         try:
-            targets = json.load(urllib.request.urlopen(f"http://localhost:{self.port}/json", timeout=3))
+            targets = json.load(urllib.request.urlopen(f"http://127.0.0.1:{self.port}/json", timeout=3))
         except Exception:
             return []
         return [t for t in targets if t.get("type") == "page" and t.get("webSocketDebuggerUrl")]
 
     def _open_ws(self, page):
         """(Re)bind this session's websocket to a specific page target and enable its CDP domains."""
+        from urllib.parse import urlsplit
+        address = urlsplit(page["webSocketDebuggerUrl"])
+        if (address.scheme != "ws" or address.hostname not in ("127.0.0.1", "localhost", "::1")
+                or address.port != self.port or address.username or address.password):
+            raise RuntimeError("refusing CDP websocket outside the verified local endpoint")
         if self.ws:
             try:
                 self.ws.close()
             except Exception:
                 pass
-        self.ws = websocket.create_connection(page["webSocketDebuggerUrl"], timeout=15, max_size=None)
+        self.registry.clear()
+        self._observed_document = None
+        self._last_screenshot_scale = None
+        self.ws = websocket.create_connection(page["webSocketDebuggerUrl"], timeout=15,
+                                              max_size=None, suppress_origin=True)
         self.target_id = page.get("id")
         self._id = 0
         for d in ("DOM", "Accessibility", "Runtime", "Page"):
@@ -352,9 +428,9 @@ class CDPSession:
         end = time.time() + timeout
         pages = []
         self.editor = bool(editor)
-        while time.time() < end and not (pages if not editor else _pick_workbench(pages)):
+        while time.time() < end and not (pages if not editor else _pick_workbench(pages, folder)):
             pages = self._list_page_targets()
-            if not pages or (editor and not _pick_workbench(pages)):
+            if not pages or (editor and not _pick_workbench(pages, folder)):
                 time.sleep(0.5)
         if not pages:
             raise RuntimeError(f"no CDP page target on :{self.port} — is the app launched with --remote-debugging-port?")
@@ -362,7 +438,10 @@ class CDPSession:
         # editor window AND side panels like Cursor's "Agents" (title 'Cursor Agents'). They differ
         # only by title, so bind the editor window (has the tree + terminal), not a side panel —
         # and, when a folder was asked for, the window actually holding it.
-        target = _pick_workbench(pages, folder) or pages[0] if editor else pages[0]
+        target = _pick_workbench(pages, folder) if editor else (pages[0] if len(pages) == 1 else None)
+        if target is None:
+            raise RuntimeError("multiple or unmatched CDP targets; explicitly select a target ID: "
+                               + "; ".join(f"{p.get('id')}: {p.get('title')}" for p in pages))
         self._open_ws(target)
         self._known_targets = {p.get("id") for p in pages}
         return self
@@ -374,30 +453,37 @@ class CDPSession:
         multi-target handling; returns True if it switched."""
         pages = self._list_page_targets()
         if not pages:
-            return False
+            self.registry.clear()
+            self._last_screenshot_scale = None
+            raise RuntimeError("no CDP page targets available; inspect the endpoint again")
         ids = {p.get("id") for p in pages}
+        if self.pinned_app:
+            if self.target_id not in ids:
+                self.registry.clear()
+                raise RuntimeError("selected app renderer closed; explicitly select another target")
+            self._known_targets = ids
+            return False
         if self.editor:
             # An editor is MULTI-WINDOW: a new target is another window or a side panel the user
             # (or the editor itself) opened — never a page we navigated to. Auto-following one
             # would silently move the session off the workspace we were told to drive, which is
             # exactly how a read of "the hunch window" came back with someone else's project.
-            # Only re-bind if our own window is gone.
+            # A replacement with the same title is still a different target.
             self._known_targets = ids
             if self.target_id in ids:
                 return False
-            hit = _pick_workbench(pages, self.pinned)
-            if hit is None:
-                return False
-            self._open_ws(hit)
-            return True
-        new_pages = [p for p in pages if p.get("id") not in self._known_targets]
+            self.registry.clear()
+            self._last_screenshot_scale = None
+            raise RuntimeError("selected editor window closed; explicitly select another target")
+        new_pages = [p for p in pages if p.get("id") not in self._known_targets
+                     and p.get("openerId") == self.target_id]
         switched = False
-        if new_pages:
+        if len(new_pages) == 1:
             self._open_ws(new_pages[0])       # newest-first -> the tab that just opened
             switched = True
-        elif self.target_id not in ids:       # our tab was closed
-            self._open_ws(pages[0])
-            switched = True
+        elif self.target_id not in ids:
+            self.registry.clear()
+            raise RuntimeError("selected CDP target closed; explicitly select another target")
         self._known_targets = ids
         return switched
 
@@ -436,7 +522,7 @@ class CDPSession:
 
     def tabs(self):
         pages = self._list_page_targets()
-        return [{"index": i, "title": (p.get("title") or "")[:80], "url": (p.get("url") or "")[:120],
+        return [{"index": i, "id": p.get("id"), "title": (p.get("title") or "")[:80], "url": (p.get("url") or "")[:120],
                  "current": p.get("id") == self.target_id} for i, p in enumerate(pages)]
 
     def switch_tab(self, index):
@@ -460,7 +546,9 @@ class CDPSession:
                 if "error" in m:
                     raise RuntimeError(f"{method}: {m['error'].get('message')}")
                 return m.get("result", {})
-            # else: an event — ignore
+            if m.get("method") == "Page.frameNavigated" and not m.get("params", {}).get("frame", {}).get("parentId"):
+                self.registry.clear()
+                self._last_screenshot_scale = None
         raise RuntimeError(f"{method}: timed out")
 
     def _ref(self, backend_id):
@@ -468,6 +556,17 @@ class CDPSession:
         r = f"e{self._counter}"
         self.registry[r] = backend_id
         return r
+
+    def _document_identity(self):
+        frame = self._cmd("Page.getFrameTree").get("frameTree", {}).get("frame", {})
+        return self.target_id, frame.get("id"), frame.get("loaderId"), frame.get("url")
+
+    def validate_document(self):
+        expected = getattr(self, "_observed_document", None)
+        if expected is not None and self._document_identity() != expected:
+            self.registry.clear()
+            self._last_screenshot_scale = None
+            raise RuntimeError("CDP document changed; take a fresh snapshot before acting")
 
     def url(self):
         try:
@@ -484,8 +583,8 @@ class CDPSession:
     # ── perception ──────────────────────────────────────────────────────
     def snapshot(self, compact=True, max_nodes=1500):
         self._follow_new_tab()   # if a click/form opened a new tab, move onto it before reading
+        document = self._document_identity()
         self.registry = {}
-        self._counter = 0
         self.snapshot_count += 1
         nodes = self._cmd("Accessibility.getFullAXTree")["nodes"]
         by_id = {n["nodeId"]: n for n in nodes}
@@ -498,6 +597,10 @@ class CDPSession:
             lines.append(f"…tree truncated at {max_nodes} elements shown (+{budget['skipped']} "
                          "more) — interact/scroll to change the page, then web_snapshot again")
         text = "\n".join(lines)
+        if document != self._document_identity():
+            self.registry.clear()
+            raise RuntimeError("CDP document changed during observation; retry snapshot")
+        self._observed_document = document
         return text, {"est_tokens": round(len(text) / 3.5), "refs": len(self.registry), "url": self.url()}
 
     @staticmethod
@@ -738,6 +841,36 @@ class CDPSession:
                                                   "unmodifiedText": unmodified})
             self._cmd("Input.dispatchKeyEvent", {**base, "type": "keyUp"})
 
+    def fill_secret(self, ref, text, expected_url):
+        """Fill only a verified form input; never fall back to terminal/key events."""
+        from urllib.parse import urlsplit
+        parsed = urlsplit(expected_url)
+        expected_origin = f"{parsed.scheme}://{parsed.netloc}"
+        self.validate_document()
+        if ref:
+            backend = self.registry.get(ref)
+            if backend is None:
+                return False
+            obj = self._cmd("DOM.resolveNode", {"backendNodeId": backend}).get("object", {}).get("objectId")
+        else:
+            obj = self._cmd("Runtime.evaluate", {"expression": "document.activeElement"}).get("result", {}).get("objectId")
+        if not obj:
+            return False
+        result = self._cmd("Runtime.callFunctionOn", {
+            "objectId": obj, "arguments": [{"value": text}, {"value": expected_origin}],
+            "returnByValue": True,
+            "functionDeclaration": """function(value, origin) {
+              if (location.origin !== origin || !this.isConnected || this.disabled || this.readOnly
+                  || !this.matches('input,textarea') || this.closest('.xterm')
+                  || /^(file|checkbox|radio|button|submit|reset|image|hidden)$/.test(this.type)) return false;
+              const proto = this.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+              Object.getOwnPropertyDescriptor(proto, 'value').set.call(this, value);
+              this.dispatchEvent(new Event('input', {bubbles:true}));
+              this.dispatchEvent(new Event('change', {bubbles:true}));
+              return this.value === value;
+            }"""})
+        return result.get("result", {}).get("value") is True
+
     def type_text(self, ref, text):
         """Fill a field, REPLACING its content. Works for text inputs, textareas, and native
         <select> dropdowns (matches an option by visible text/value). An xterm.js TERMINAL
@@ -776,13 +909,18 @@ class CDPSession:
         self._cmd("Input.insertText", {"text": text})
         return f"typed into {ref} (replaced)"
 
-    def fill_login(self, username, password):
+    def fill_login(self, username, password, expected_url=""):
         """Fill the visible login form's username + password fields. The values go STRAIGHT into
         the page over CDP and are NEVER returned — the caller (and thus the agent/LLM) only learns
         which fields were filled. Handles two-step logins by filling whatever visible fields exist
         (call again after advancing to the password step). Returns {'username_filled','password_filled'}."""
+        from urllib.parse import urlsplit
+        parsed = urlsplit(expected_url)
+        expected_origin = f"{parsed.scheme}://{parsed.netloc}" if expected_url else ""
+        self.validate_document()
         js = (
-            "(function(u,p){"
+            "(function(u,p,origin){"
+            "if(!origin || location.origin!==origin) return JSON.stringify({user:false,pass:false});"
             "function vis(el){var r=el.getBoundingClientRect();return r.width>0&&r.height>0&&el.offsetParent!==null;}"
             "function setVal(el,val){var proto=el.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;"
             "var setter=Object.getOwnPropertyDescriptor(proto,'value').set;el.focus();setter.call(el,val);"
@@ -794,9 +932,9 @@ class CDPSession:
             "if(!user)user=[].slice.call(document.querySelectorAll("
             "'input[type=email],input[autocomplete=username],input[name*=email i],input[name*=user i],"
             "input[id*=email i],input[id*=user i],input[type=text],input[type=tel]')).filter(vis)[0]||null;"
-            "var du=false,dp=false;if(user&&u){setVal(user,u);du=true;}if(pass&&p){setVal(pass,p);dp=true;}"
+            "var du=false,dp=false;if(user&&u){setVal(user,u);du=user.value===u;}if(pass&&p){setVal(pass,p);dp=pass.value===p;}"
             "return JSON.stringify({user:du,pass:dp});})("
-            + json.dumps(username or "") + "," + json.dumps(password or "") + ")"
+            + json.dumps(username or "") + "," + json.dumps(password or "") + "," + json.dumps(expected_origin) + ")"
         )
         try:
             res = self._cmd("Runtime.evaluate", {"expression": js, "returnByValue": True})
@@ -860,24 +998,15 @@ class CDPSession:
         return ("accounts.google.com" in low) or ("/signin" in low) or ("sign in" in low)
 
     def navigate(self, url):
-        # SSRF + hallucination guards: block private/internal hosts before any fetch,
-        # then ensure the host actually resolves. Private check must come first – a
-        # private host *does* resolve (localhost -> 127.0.0.1) and would otherwise be fetched.
-        parsed = urllib.parse.urlparse(url)
-        host = parsed.hostname
-        if parsed.scheme and parsed.scheme.lower() not in ("http", "https"):
-            return (f"REFUSED: navigation to scheme '{parsed.scheme}' is blocked — only http/https "
-                    f"are allowed. If you need a file, use the filesystem tools.")
-        if host and _is_blocked_host(host):
-            return (f"REFUSED: navigation to private/internal host '{host}' is blocked (SSRF "
-                    f"protection). Navigate only to public http(s) hosts, or click a link by ref "
-                    f"instead of guessing a URL.")
-        if host and not _host_resolves(host):
-            return (f"'{url}' — host '{host}' does NOT resolve (DNS). If you constructed or guessed this "
-                    "URL, don't: go back to the page and CLICK the actual link (by ref) so its real "
-                    "href/redirect takes you there. Only navigate to URLs the user gave you or that you "
-                    "read from the page.")
-        self._cmd("Page.navigate", {"url": url})
+        from .destinations import navigation_refusal
+        refusal = navigation_refusal(url, self.allowed_origins)
+        if refusal:
+            return refusal
+        self.registry.clear()
+        self._last_screenshot_scale = None
+        result = self._cmd("Page.navigate", {"url": url})
+        if result.get("errorText"):
+            return f"REFUSED: navigation failed: {result['errorText']}"
         time.sleep(2)
         # A guessed PATH on a valid host (e.g. a16z.com/apply) resolves but often 404s. If the landed
         # page looks like a not-found, say so and steer back to exploring from the homepage.
@@ -942,31 +1071,9 @@ class CDPSession:
 
 
 # ── CDPComputer: the agent-facing wrapper (same tools/handle contract) ────────
-CDP_TOOLS = [
-    {"name": "snapshot",
-     "description": ("Look at the browser/Electron page as an accessibility tree — one element "
-                     "per line tagged [ref]. Act on elements by ref. All actions are focus-free "
-                     "(injected into the page), so they never disturb the user."),
-     "input_schema": {"type": "object", "properties": {}}},
-    {"name": "act",
-     "description": ("Execute one or more page actions in order, then get the updated tree. "
-                     "click (press an element by ref), click_xy/drag (act at coordinates from the "
-                     "latest screenshot, for canvas editors), type (fill a field by ref — REPLACES its "
-                     "content, fires real input/change events; also selects a native <select> "
-                     "dropdown option by its visible text, e.g. type 'January' into a month select), "
-                     "key (press a key like 'return'/'tab' with optional modifiers), navigate (go "
-                     "to a URL). Note: never try to click a native <select> and then its option — "
-                     "CDP can't open the OS dropdown; use type with the option text instead."),
-     "input_schema": {"type": "object", "properties": {"actions": {"type": "array", "items": {
-         "type": "object", "properties": {
-             "action": {"type": "string", "enum": ["click", "click_xy", "drag", "type", "key", "navigate"]},
-             "ref": {"type": "string"}, "text": {"type": "string"}, "key": {"type": "string"},
-             "modifiers": {"type": "array", "items": {"type": "string"}}, "url": {"type": "string"},
-             "x": {"type": "number"}, "y": {"type": "number"},
-             "from_x": {"type": "number"}, "from_y": {"type": "number"},
-             "to_x": {"type": "number"}, "to_y": {"type": "number"}},
-         "required": ["action"]}}}, "required": ["actions"]}},
-]
+from .tool_registry import BASE_TOOLS
+CDP_TOOLS = [{**tool, "name": tool["name"].removeprefix("web_")} for tool in BASE_TOOLS
+             if tool["name"] in {"web_snapshot", "web_act"}]
 
 
 class CDPComputer:
@@ -975,28 +1082,36 @@ class CDPComputer:
     but for the whole Chromium/Electron category, in the background."""
 
     def __init__(self, app, port=9333, url=None, isolated=False, background=True,
-                 connect=True, profile=None, editor=False):
+                 connect=True, profile=None, editor=False, allowed_origins=(), owner=None):
         self.app = app
         self.port = port
         self.editor = editor
         self.tools = CDP_TOOLS
         self.session = None
         self.launch_note = ""
+        self.identity = None
         if connect:
             self.launch_note = launch_chromium(app, port, url=url, background=background,
-                                               isolated=isolated, profile=profile, editor=editor)
+                                               isolated=isolated, profile=profile, editor=editor,
+                                               allowed_origins=allowed_origins, owner=owner)
             # editors expose several page targets — bind the workbench (holds the tree + terminal)
             self.session = CDPSession(port).connect(editor=editor,
                                                     folder=url if editor else None)
+            self.identity = _OWNED_ENDPOINTS[port]["identity"]
+            self.session.allowed_origins = allowed_origins
+            self.session.pinned_app = _resolve_app(app) not in _BROWSER_ALIASES.values()
 
     def snapshot(self):
         return self.session.snapshot()[0]
 
-    def act(self, actions):
+    def act(self, actions, detailed=False, postcondition=None):
+        from .results import action_receipt, validate_postcondition
+        validate_postcondition(postcondition)
         lines = []
         for a in actions:
             act = a.get("action")
             try:
+                self.session.validate_document()
                 if act == "click":
                     lines.append(self.session.click(a["ref"]))
                 elif act == "click_xy":
@@ -1010,13 +1125,37 @@ class CDPComputer:
                     lines.append(self.session.press_key(a["key"], a.get("modifiers")))
                 elif act == "navigate":
                     lines.append(self.session.navigate(a["url"]))
+                    break
                 else:
                     lines.append(f"unknown action {act}")
+                if lines and any(marker in lines[-1].lower() for marker in ("refused", "stale", "failed")):
+                    break
                 time.sleep(0.4)
             except Exception as e:  # noqa: BLE001
                 lines.append(f"error on {act}: {e}")
                 break
         time.sleep(0.6)
+        if detailed or postcondition is not None:
+            def read(ref, field):
+                self.session.validate_document()
+                backend = self.session.registry.get(ref)
+                if backend is None:
+                    raise ValueError("stale postcondition ref; observe the new document")
+                obj = self.session._cmd("DOM.resolveNode", {"backendNodeId": backend}).get("object", {}).get("objectId")
+                if not obj:
+                    raise ValueError("postcondition element unavailable")
+                expressions = {"value": "this.value", "title": "this.getAttribute('title')",
+                               "enabled": "!this.disabled", "selected": "this.selected ?? this.checked ?? this.getAttribute('aria-selected')",
+                               "expanded": "this.getAttribute('aria-expanded')"}
+                value = self.session._cmd("Runtime.callFunctionOn", {
+                    "objectId": obj, "functionDeclaration": "function(){ return " + expressions[field] + "; }",
+                    "returnByValue": True}).get("result", {})
+                if "value" not in value:
+                    raise ValueError("postcondition field unavailable")
+                return value["value"]
+            outcome = action_receipt(lines, len(actions), "cdp", {
+                "identity": self.identity, "renderer": self.session.target_id}, {}, postcondition, read)
+            return {**outcome, "observation": self.snapshot()}
         return "Executed:\n" + "\n".join(lines) + "\n\nScreen now:\n" + self.snapshot()
 
     def handle(self, tool_use):
@@ -1027,7 +1166,8 @@ class CDPComputer:
             if name == "snapshot":
                 content = self.snapshot()
             elif name == "act":
-                content = self.act(args["actions"])
+                content = self.act(args["actions"], detailed=args.get("detailed", False),
+                                   postcondition=args.get("postcondition"))
             else:
                 return {"type": "tool_result", "tool_use_id": tid, "content": f"unknown tool {name}", "is_error": True}
             return {"type": "tool_result", "tool_use_id": tid, "content": content}

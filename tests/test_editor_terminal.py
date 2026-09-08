@@ -124,10 +124,10 @@ def test_pick_workbench_prefers_the_requested_folder():
     # trailing slash, and a folder whose window is open with a file focused
     assert cdp._pick_workbench(pages, "/Users/me/hunch/")["id"] == "2"
     assert cdp._pick_workbench(pages, "/Users/me/C63")["id"] == "1"
-    # no window has it -> falls back to a real workbench, and the CALLER must not claim success
-    assert cdp._pick_workbench(pages, "/Users/me/absent")["id"] == "1"
+    # Several unmatched windows are ambiguous; never choose by list order.
+    assert cdp._pick_workbench(pages, "/Users/me/absent") is None
     # no folder asked for -> unchanged first-workbench behaviour
-    assert cdp._pick_workbench(pages)["id"] == "1"
+    assert cdp._pick_workbench(pages) is None
 
 
 def test_title_matching_is_dash_delimited_not_substring():
@@ -194,14 +194,16 @@ def test_editor_session_does_not_auto_follow_new_windows():
     assert s.target_id == "1"
 
 
-def test_editor_session_rebinds_when_its_own_window_closes():
+def test_editor_session_refuses_replacement_when_its_own_window_closes():
     s = _FakeTargets([_win(1, "README.md — hunch")])
     s.editor = True
     s.pinned = "/Users/me/hunch"
     s.target_id = "9"          # our window is gone
     s._known_targets = {"9"}
-    assert s._follow_new_tab() is True
-    assert s.target_id == "1"
+    import pytest
+    with pytest.raises(RuntimeError, match="explicitly select"):
+        s._follow_new_tab()
+    assert s.target_id == "9"
 
 
 # ── web.open(editor) must verify the workspace, never assert it ────────────────
@@ -242,6 +244,8 @@ def _web_with(session, monkeypatch):
     """A real Web object running the real _open_editor, with only the CDP launch stubbed."""
     from hunch import sdk
     web = object.__new__(sdk.Web)
+    from types import SimpleNamespace
+    web._h, web.profile = SimpleNamespace(app_id=None), None
     web.close = lambda: None
     monkeypatch.setattr(cdp, "CDPComputer", lambda *a, **k: _StubEditorComputer(session))
     return web

@@ -27,8 +27,9 @@ def test_runtime_version_matches_package_metadata():
 
 
 def test_tool_count():
-    assert len(server.mcp._tool_manager._tools) == 29
-    assert "find" in server.mcp._tool_manager._tools
+    from hunch.tool_registry import catalog
+    assert set(server.mcp._tool_manager._tools) == {t["name"] for t in catalog()}
+    assert len(server.mcp._tool_manager._tools) == 32
 
 
 def test_policy_defaults_all_on():
@@ -84,6 +85,7 @@ def test_user_attention_notifications_default_off(monkeypatch, tmp_path):
 def test_screen_approval_dedupe():
     import hunch.local_mac as local_mac
     # A fresh approval lets the front gate pass with NO dialog...
+    server._gate.bind_screen_target(("app", "SomeApp"))
     server._gate.mark_screen_approval()
     assert server._gate.screen_approved()
     assert server._gate.front_gate("SomeApp", "test") is None
@@ -140,13 +142,13 @@ def test_domain_mismatch_guard():
 
 
 # ── wrong-target guards ────────────────────────────────────────────────────────
-def test_applescript_empty_result_explains_electron_zero_windows():
-    """`count of windows` via System Events returns 0 for any Electron app, however many are
-    open. Without a reason the natural move is to retry the same script, which can never work."""
+def test_applescript_empty_result_does_not_classify_app_support():
+    """Zero windows is an observation, not an app-wide capability verdict."""
     from hunch import gate
     hint = gate.applescript_empty_hint(
         'tell application "System Events" to tell process "Cursor" to count of windows')
-    assert "Electron" in hint and "snapshot(app=" in hint
+    assert "uses accessibility" in hint and "snapshot(app=" in hint
+    assert "does not prove" in hint
     # unrelated scripts get no noise
     assert gate.applescript_empty_hint('tell application "Music" to play') == ""
     assert gate.applescript_empty_hint('tell application "System Events" to keystroke "a"') == ""
@@ -208,9 +210,9 @@ def test_playbook_covers_toggle_and_select_policy():
     pb = HUNCH_PLAYBOOK
     assert "val='0'" in pb and "val='1'" in pb
     assert "defaults write" in pb
-    assert "VISIBLE TEXT" in pb
-    assert "PERMISSION CLAIMS REQUIRE EXPLICIT EVIDENCE" in pb
-    assert "do not read `~/Library/Messages/chat.db`" in pb
+    assert "visible text" in pb
+    assert "explicit denial evidence" in pb
+    assert "Do not read ~/Library/Messages/chat.db" in pb
     assert "make at most one small native account probe" in pb
 
 

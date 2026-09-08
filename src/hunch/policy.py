@@ -22,11 +22,13 @@ DEFAULT_GATES = {
     "shell": True,                   # applescript() containing 'do shell script'
     "destructive_applescript": True, # delete / send / shut down / empty trash / ...
     "destructive_file": True,        # trash / file_op move / copy (destructive filesystem ops)
+    "app_data_mutation": True,        # generated adapters that rewrite an app's persisted data
 }
 
 CONFIG_KEYS = ["gates.focus_steal", "gates.app_to_front", "gates.shell",
                "gates.destructive_applescript", "gates.destructive_file",
-               "notifications.user_attention", "auto_approve_all"]
+               "gates.app_data_mutation", "notifications.user_attention",
+               "auto_approve_all"]
 
 
 def default_config() -> dict:

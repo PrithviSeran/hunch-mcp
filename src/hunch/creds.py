@@ -20,8 +20,9 @@ store (the MCP server / `hunch creds` CLI). A namespace string (an app's id, e.g
 "com.acme.mailbot") -> that app's OWN Keychain service and metadata files under
 ~/.hunch/apps/<ns>/ — two apps built on the SDK can never see or fill each other's credentials.
 
-Note: set_credential passes the secret as a `security` argv, briefly visible to local `ps`. That's a
-local-only exposure (never reaches the LLM); moving it to a stdin/pty feed is a future hardening.
+Writes use Security.framework directly, so secrets do not appear in subprocess arguments.
+Known filled values are redacted from Hunch tool output; transformed app-rendered disclosures
+are not universally preventable. Screenshots are blocked in a session after a secret fill.
 """
 import json
 import os
@@ -87,9 +88,7 @@ def _write_kinds(kinds, ns=None):
 
 
 def _store_blob(name, blob, kind, ns=None):
-    subprocess.run(["security", "add-generic-password", "-U",
-                    "-s", _service(ns), "-a", name, "-w", blob],
-                   check=True, capture_output=True, text=True)
+    _store_keychain_blob(_service(ns), name, blob)
     names = _read_index(ns)
     if name not in names:
         names.append(name)
@@ -98,6 +97,38 @@ def _store_blob(name, blob, kind, ns=None):
     if kinds.get(name) != kind:
         kinds[name] = kind
         _write_kinds(kinds, ns)
+
+
+def _security_framework():
+    import ctypes
+    import objc
+    framework = ctypes.CDLL("/System/Library/Frameworks/Security.framework/Security")
+    def constant(name):
+        return objc.objc_object(c_void_p=ctypes.c_void_p.in_dll(framework, name).value)
+    return framework, constant
+
+
+def _store_keychain_blob(service, account, blob):
+    """Use Security.framework directly so secret material never appears in argv."""
+    import ctypes
+    import objc
+    from Foundation import NSDictionary, NSData
+    framework, constant = _security_framework()
+    query = {constant("kSecClass"): constant("kSecClassGenericPassword"),
+             constant("kSecAttrService"): service, constant("kSecAttrAccount"): account}
+    encoded = blob.encode("utf-8")
+    values = {constant("kSecValueData"): NSData.dataWithBytes_length_(encoded, len(encoded))}
+    query_object, values_object = NSDictionary.dictionaryWithDictionary_(query), NSDictionary.dictionaryWithDictionary_(values)
+    update = framework.SecItemUpdate
+    update.argtypes, update.restype = [ctypes.c_void_p, ctypes.c_void_p], ctypes.c_int32
+    status = update(objc.pyobjc_id(query_object), objc.pyobjc_id(values_object))
+    if status == -25300:  # errSecItemNotFound
+        item = NSDictionary.dictionaryWithDictionary_({**query, **values})
+        add = framework.SecItemAdd
+        add.argtypes, add.restype = [ctypes.c_void_p, ctypes.c_void_p], ctypes.c_int32
+        status = add(objc.pyobjc_id(item), None)
+    if status:
+        raise RuntimeError(f"Keychain write failed (OSStatus {status})")
 
 
 def _read_blob(name, ns=None):

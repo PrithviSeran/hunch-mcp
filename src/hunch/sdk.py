@@ -48,9 +48,8 @@ __all__ = ["Hunch", "HunchError", "ApprovalDenied", "AccessibilityNotGranted",
 
 
 def _frontmost():
-    from AppKit import NSWorkspace
-    app = NSWorkspace.sharedWorkspace().frontmostApplication()
-    return app.localizedName() if app else "Finder"
+    from .local_mac import _frontmost as fresh_frontmost
+    return fresh_frontmost()[0] or "Finder"
 
 
 class Hunch:
@@ -60,7 +59,8 @@ class Hunch:
                  simultaneous=False, cdp_port=None,
                  snapshot_max_depth=None, snapshot_max_nodes=None,
                  provider="claude", auth=None, can_use_tool=None, app_name=None, policy=None,
-                 app_id=None, cdp_profile=None, notify=False):
+                 app_id=None, cdp_profile=None, notify=False, background_only=False,
+                 allow_unrestricted_scripts=False, allowed_web_origins=()):
         """provider: which LLM vendor drives the agent loop — 'claude' (Anthropic, on your
         Claude sign-in; the default) or 'codex' (OpenAI Codex, on a `codex login` session).
         Set once here; then mac.login() / mac.status() / mac.logout() and mac.agent all act
@@ -110,6 +110,10 @@ class Hunch:
         if not (notify is None or isinstance(notify, bool) or callable(notify)):
             raise HunchError("notify must be True, False, None, or a callable(message, title)")
         self.app_id = app_id
+        self._secrets = set()
+        self.background_only = bool(background_only)
+        self.allow_unrestricted_scripts = bool(allow_unrestricted_scripts)
+        self.allowed_web_origins = tuple(allowed_web_origins)
         self._app_id = app_id            # what Agent/_SubscriptionRunner read
         self._notify_handler = notify if callable(notify) else None
         self._native_notifications = notify is True
@@ -137,14 +141,18 @@ class Hunch:
         if check_permissions:
             self._check_accessibility()
         # ONE persistent computer per instance, so element [refs] survive snapshot -> act.
-        self._computer = LocalComputer(app=app, simultaneous=simultaneous,
+        self._computer = LocalComputer(app=app, simultaneous=simultaneous or background_only,
                                        max_depth=snapshot_max_depth,
                                        max_nodes=snapshot_max_nodes)
+        self._computer.session._shared_guard = self._authorize_shared_input
+        from .capabilities import Capabilities
+        self._capabilities = Capabilities(self)
         # Last app aim'd by focus_app / launch_app / snapshot(app=...). Empty
         # snapshot() prefers this over frontmost so a bare snapshot after
         # focus_app("System Settings") does not silently read Cursor.
         self._aimed_app = None
         # Namespaced defaults (names only — same semantics): derived CDP port + profile.
+        auto_cdp_port = cdp_port is None
         if app_id and cdp_port is None:
             import zlib
             cdp_port = 9400 + (zlib.crc32(app_id.encode()) % 500)
@@ -152,9 +160,44 @@ class Hunch:
             import os as _os
             cdp_profile = _os.path.expanduser(f"~/.hunch/apps/{app_id}/chrome-cdp")
         self.web = Web(self, cdp_port or CDP_PORT, profile=cdp_profile)
+        self.web._auto_port = auto_cdp_port
         self.files = Files(self)
         self.clipboard = Clipboard(self)
         self._agent = None   # the agent loop, created lazily so the LLM SDKs stay optional
+
+    # ── generated app operations ─────────────────────────────────────────────
+
+    def _redact(self, value):
+        if isinstance(value, str):
+            for secret in sorted(self._secrets, key=len, reverse=True):
+                value = value.replace(secret, "[REDACTED]")
+            return value
+        if isinstance(value, dict):
+            return {self._redact(k): self._redact(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [self._redact(v) for v in value]
+        return value
+
+
+
+    def session_summary(self):
+        """Compact reconnect context without element refs or page contents."""
+        import json
+        session = self._computer.session
+        web = self.web._computer
+        evidence = {"requested_app": self._computer.app,
+                    "background_only": self.background_only, "simultaneous": self.simultaneous,
+                    "last_observed_native_identity": getattr(session, "_identity", None),
+                    "cdp": {"app": web.app, "port": web.port,
+                            "renderer": getattr(web.session, "target_id", None)} if web else None,
+                    "recovery_history": self._capabilities.history[-4:],
+                    "instruction": "Revalidate targets before acting. Prior observations do not prove current operation coverage."}
+        return "Hunch session context: " + json.dumps(self._redact(evidence), default=str)
+
+
+
+
+
 
     @staticmethod
     def _check_accessibility():
@@ -181,10 +224,12 @@ class Hunch:
         never silent: capped output ends in an explicit …marker naming the ref to
         expand. max_children raises the per-node sibling cap to page a big list in."""
         if ref is not None:
-            return self._computer.snapshot(ref=ref, max_depth=max_depth, max_nodes=max_nodes,
-                                           max_children=max_children)
+            return self._redact(self._computer.snapshot(ref=ref, max_depth=max_depth, max_nodes=max_nodes,
+                                                        max_children=max_children))
         prev, prev_aimed = self._computer.app, self._aimed_app
         if app:
+            if app != self._computer.app:
+                self._computer.session._selected_window = None
             self._computer.app = app
             self._aimed_app = app
         else:
@@ -194,7 +239,7 @@ class Hunch:
         if isinstance(out, str) and out.startswith("(app '") and "not found" in out:
             # a failed target must not poison later calls
             self._computer.app, self._aimed_app = prev, prev_aimed
-        return out
+        return self._redact(out)
 
     def find(self, role=None, name_contains=None, app="", max_results=20):
         """Search an app's WHOLE accessibility tree (deeper than snapshot shows) and
@@ -203,6 +248,8 @@ class Hunch:
         name_contains matches title/description/value as a substring."""
         prev, prev_aimed = self._computer.app, self._aimed_app
         if app:
+            if app != self._computer.app:
+                self._computer.session._selected_window = None
             self._computer.app = app
             self._aimed_app = app
         elif self._aimed_app:
@@ -210,9 +257,9 @@ class Hunch:
         out = self._computer.find(role=role, name_contains=name_contains, max_results=max_results)
         if isinstance(out, str) and out.startswith("(app '") and "not found" in out:
             self._computer.app, self._aimed_app = prev, prev_aimed
-        return out
+        return self._redact(out)
 
-    def act(self, actions, reason="", confirm=False):
+    def act(self, actions, reason="", confirm=False, detailed=False, postcondition=None):
         """Run UI actions (same dicts as the MCP `act` tool: click/select/right_click/type/
         menu/key/click_xy by ref) and return the updated tree. Focus-stealing actions are
         gated; a user refusal raises ApprovalDenied. StaleRef means re-snapshot.
@@ -227,11 +274,27 @@ class Hunch:
                                          confirm=confirm, reason=reason)
         if blocked:
             raise ApprovalDenied(blocked)
-        return self._computer.act(actions)
+        self._action_approved = bool(confirm)
+        try:
+            if detailed or postcondition is not None:
+                return self._redact(self._computer.act(actions, detailed=detailed, postcondition=postcondition))
+            return self._redact(self._computer.act(actions))
+        finally:
+            self._action_approved = False
+
+    def _authorize_shared_input(self):
+        if self.background_only or self._computer.simultaneous:
+            return "REFUSED: shared input is disabled by the session's background constraint"
+        if getattr(self, "_action_approved", False):
+            return None
+        return gate.check_focus_steal(self._computer, [{"action": "click_xy"}], self._gate,
+                                     reason="the native action requires shared input")
 
     def screenshot(self):
         """The physical screen as PNG bytes (needs Screen Recording permission). Shows the
         FRONTMOST app — for a background CDP page use web.screenshot() instead."""
+        if self._secrets:
+            raise HunchError("screenshot blocked after secret fill; transformed visual disclosure cannot be excluded")
         return base64.b64decode(screenshot_b64())
 
     # ── app lifecycle ─────────────────────────────────────────────────────────
@@ -240,28 +303,52 @@ class Hunch:
         """Names of the running GUI apps you can snapshot()."""
         return list_running_apps()
 
+    def targets(self, app="", window="", select=False, inventory="running"):
+        return self._capabilities.targets(app, window, select, inventory)
+
+    def capabilities(self, app, operation="observe"):
+        return self._capabilities.inspect(app, operation)
+
+    def recover(self, plan_id, target_id=""):
+        return self._capabilities.recover(plan_id, target_id)
+
     def launch_app(self, name, force_accessibility=False, reason=""):
         """Launch or focus an app and target it for snapshots. force_accessibility=True
         relaunches an Electron/Chromium app so its tree becomes readable. A foreground
         launch is a real focus switch: gated — refusal raises ApprovalDenied."""
+        if force_accessibility and self._gate.enabled("app_to_front"):
+            if not self._gate.confirm_dialog(f"Restart {name} gracefully to enable accessibility?",
+                                             category="app_lifecycle", detail=name,
+                                             screen_approval=False):
+                raise ApprovalDenied("user did not approve the accessibility restart")
         if not self._computer.simultaneous:   # foreground launch = a real focus switch
             blocked = self._gate.front_gate(name, reason)
             if blocked:
                 raise ApprovalDenied(blocked)
         set_focus_reason(reason)
         msg = _launch_app(name, force_accessibility, background=self._computer.simultaneous)
+        if force_accessibility:
+            d = self._computer.session.disturbances
+            d["restart_requests"] = d.get("restart_requests", 0) + 1
+            msg += "; disturbance: accessibility restart requested"
+        if msg.startswith(("REFUSED:", "failed")):
+            return msg
         self._computer.app = name
         self._aimed_app = name
         refs = self._computer.snapshot().count("[e")
         return (f"{msg}; accessibility tree has {refs} elements"
-                + ("" if refs > 15 else
-                   " (still low — if it's an Electron app, retry with force_accessibility=True)"))
+                + "; verify the requested operation; node count does not establish coverage")
 
     def quit_app(self, name):
-        return _quit_app(name)
+        message = _quit_app(name)
+        d = self._computer.session.disturbances
+        d["quit_requests"] = d.get("quit_requests", 0) + 1
+        return message + "; disturbance: graceful quit requested"
 
     def focus_app(self, name, reason=""):
         """Bring an app to the front and target it. Gated — refusal raises ApprovalDenied."""
+        if self.background_only:
+            raise ApprovalDenied("host background constraint forbids foreground activation")
         blocked = self._gate.front_gate(name, reason)
         if blocked:
             raise ApprovalDenied(blocked)
@@ -279,6 +366,8 @@ class Hunch:
 
     @simultaneous.setter
     def simultaneous(self, on):
+        if self.background_only and not on:
+            raise ApprovalDenied("host background constraint cannot be disabled by a tool")
         self._computer.simultaneous = bool(on)
 
     # ── AppleScript / OS ──────────────────────────────────────────────────────
@@ -289,6 +378,8 @@ class Hunch:
         confirm=True skips the dialog (the user already approved out-of-band).
         System Settings toggles via defaults write / UI scripting are soft-refused with a
         teaching string — AX snapshot/act is the reliable path."""
+        if self.background_only and not self.allow_unrestricted_scripts:
+            return "REFUSED: arbitrary AppleScript has no enforceable background guarantee; use a typed operation"
         refusal = gate.applescript_settings_refusal(script)
         if refusal:
             return refusal
@@ -302,8 +393,8 @@ class Hunch:
                 raise ApprovalDenied("user did not approve the AppleScript")
         ok, out = os_ops.run_applescript(script)
         if ok:
-            hint = "" if out else gate.applescript_empty_hint(script)
-            return f"(no output){hint}" if hint else out
+            hint = gate.applescript_empty_hint(script) if out.strip() in ("", "0") else ""
+            return f"{out or '(no output)'}{hint}"
         return f"AppleScript error: {out[:600]}{gate.applescript_hint(out, script)}"
 
     def notify(self, message, title=None):
@@ -386,22 +477,72 @@ class Hunch:
 
 class Web:
     """Focus-free browser/Electron control over CDP, on a persistent profile. With no
-    app_id the port/profile are the shared personal ones (whichever process opened the
-    browser first is gracefully reused); with an app_id each app gets its OWN port and
-    profile, so restart()/login() recovery can only ever kill that app's browser."""
+    app_id the profile defaults to the personal Hunch profile; namespaced hosts get their
+    own profile. Default ports are allocated at launch. Only the launching SDK instance
+    owns lifecycle recovery; explicit attachment never grants ownership."""
 
     def __init__(self, hunch, port, profile=None):
         self._h = hunch
+        self._owner = object()
         self.port = port
         self.profile = profile      # None -> cdp.HUNCH_PROFILE (the personal default)
         self.force_sandbox = None   # True forces isolated profiles; None defers to
                                     #   the HUNCH_FORCE_SANDBOX env var (the app toggle)
         self._computer = None       # per-instance CDPComputer (the server's _cdp equivalent)
 
+    @property
+    def port(self):
+        return self._port
+
+    @port.setter
+    def port(self, value):
+        self._port = value
+        self._auto_port = False
+
+    def _launch_port(self):
+        if getattr(self, "_auto_port", False):
+            from .cdp import _OWNED_ENDPOINTS
+            if _OWNED_ENDPOINTS.get(self.port, {}).get("owner") is not self._owner:
+                import socket
+                with socket.socket() as listener:
+                    listener.bind(("127.0.0.1", 0))
+                    self._port = listener.getsockname()[1]
+        return self.port
+
     def _session(self):
         if self._computer is None:
             raise WebNotOpen("no web/Electron app open — call web_open / web.open() first")
+        identity = getattr(self._computer, "identity", None)
+        if identity:
+            from .cdp import endpoint_identity
+            from .targets import process_key
+            if process_key(endpoint_identity(self._computer.port)) != process_key(identity):
+                raise HunchError("CDP owning process changed; attach again")
         return self._computer.session
+
+    def attach(self, app, port, target_id="", *, expected_identity=None):
+        """Attach to an existing verified local endpoint without launching or quitting."""
+        from .cdp import CDPComputer, CDPSession, verify_endpoint
+        identity = verify_endpoint(port, app)
+        from .targets import process_key
+        if expected_identity is not None and process_key(identity) != process_key(expected_identity):
+            raise HunchError("CDP endpoint belongs to a different process; inspect capabilities again")
+        session = CDPSession(port)
+        pages = session._list_page_targets()
+        matches = [p for p in pages if p.get("id") == target_id] if target_id else pages
+        if len(matches) != 1:
+            return {"status": "blocked", "reason": "select a renderer target_id", "targets": [
+                {"id": p.get("id"), "title": p.get("title"), "url": p.get("url")} for p in pages]}
+        session._open_ws(matches[0])
+        session._known_targets = {p.get("id") for p in pages}
+        session.pinned_app = True
+        session.allowed_origins = self._h.allowed_web_origins
+        self.close()
+        computer = CDPComputer(app, port=port, connect=False)
+        computer.session, computer.identity = session, identity
+        self._computer = computer
+        return {"status": "verified", "scope": "endpoint attachment; requested UI effect unverified",
+                "target": identity, "renderer": session.target_id}
 
     def open(self, url="", app="Google Chrome", isolated=False):
         """Open a Chromium browser (or Electron app) for focus-free control. Uses the
@@ -416,6 +557,11 @@ class Web:
         from .cdp import _is_editor
         if _is_editor(app):
             return self._open_editor(folder=url, app=app)
+        if url:
+            from .destinations import navigation_refusal
+            refusal = navigation_refusal(url, self._h.allowed_web_origins)
+            if refusal:
+                return refusal
         import os as _os
         force = (self.force_sandbox if self.force_sandbox is not None
                  else _os.environ.get("HUNCH_FORCE_SANDBOX") == "1")
@@ -424,15 +570,18 @@ class Web:
         from .cdp import CDPComputer
         self.close()
         try:
-            self._computer = CDPComputer(app, port=self.port, url=url or None,
+            self._computer = CDPComputer(app, port=self._launch_port(), url=url or None,
                                          isolated=isolated, background=True,
-                                         profile=self.profile)
+                                         profile=self.profile, allowed_origins=self._h.allowed_web_origins,
+                                         owner=self._owner)
         except Exception as e:   # e.g. debug port never bound, or a page-less stale instance
             raise HunchError(f"couldn't open {app} over CDP: {e} — "
                              "web.restart() recovers a stale instance") from e
         s = self._computer.session
         if url:
-            s.navigate(url)
+            navigation = s.navigate(url)
+            if navigation and not navigation.startswith("navigated"):
+                return navigation
         s.wait_ready()
         if not isolated and s.signed_out():
             return (f"opened {app} over CDP, but the Hunch profile isn't signed in "
@@ -449,6 +598,10 @@ class Web:
         import os as _os
         from .cdp import CDPComputer, editor_target, open_folder_in_editor
         port, profile, real = editor_target(app)
+        if getattr(self, "_auto_port", False):
+            port = self._launch_port()
+        if self._h.app_id or self.profile:
+            port, profile = self.port, self.profile
         # Check the path BEFORE launching anything: a typo'd folder otherwise costs a launch plus
         # ~40s of polling for a window that can never appear, and ends in a vague failure.
         if folder and not _os.path.exists(_os.path.expanduser(folder)):
@@ -460,7 +613,7 @@ class Web:
         try:
             self._computer = CDPComputer(real, port=port, url=folder or None,
                                          isolated=False, background=True, profile=profile,
-                                         editor=True)
+                                         editor=True, owner=getattr(self, "_owner", None))
         except Exception as e:
             raise HunchError(f"couldn't open {real} over CDP: {e} — "
                              "web.restart() recovers a stale instance") from e
@@ -509,18 +662,29 @@ class Web:
         """Open a background, banner-tagged window for the HUMAN to sign in once (Hunch
         never sees the password). Uses the configured user-attention notification, if
         enabled; the login persists in the Hunch profile."""
-        from .cdp import CDPComputer, quit_cdp
-        self.close()
-        quit_cdp(self.port)  # fresh window, no stale-instance reuse
-        try:
-            self._computer = CDPComputer(app, port=self.port, url=url or None,
-                                         isolated=False, background=True,
-                                         profile=self.profile)
-        except Exception as e:
-            raise HunchError(f"couldn't open {app} for login: {e}") from e
-        s = self._computer.session
+        from .cdp import CDPComputer
         if url:
-            s.navigate(url)
+            from .destinations import navigation_refusal
+            refusal = navigation_refusal(url, self._h.allowed_web_origins)
+            if refusal:
+                return refusal
+        if self._computer is not None:
+            s = self._session()
+            if self._computer.editor and url:
+                return "REFUSED: editor login retains its workspace; use the editor's sign-in controls"
+        else:
+            try:
+                self._computer = CDPComputer(app, port=self._launch_port(), url=url or None,
+                                             isolated=False, background=True,
+                                             profile=self.profile, allowed_origins=self._h.allowed_web_origins,
+                                             owner=self._owner)
+            except Exception as e:
+                raise HunchError(f"couldn't open {app} for login: {e}") from e
+            s = self._computer.session
+        if url:
+            navigation = s.navigate(url)
+            if navigation and not navigation.startswith("navigated"):
+                return navigation
         s.wait_ready()
         s.mark()
         notified = self._h.notify(
@@ -532,19 +696,38 @@ class Web:
 
     def restart(self, url="", app="Google Chrome"):
         """Quit and reopen the CDP instance fresh (same persistent profile, login kept).
-        Last resort for a truly broken page — kills whatever holds the CDP port."""
+        Refuses to restart a process launched by another SDK instance."""
         from .cdp import CDPComputer, quit_cdp
+        current = self._computer
+        if current is None:
+            raise WebNotOpen("no owned CDP session to restart; use web.open or attach")
+        app, port = current.app, current.port
+        from .cdp import _OWNED_ENDPOINTS
+        owned = _OWNED_ENDPOINTS.get(port)
+        if not owned or owned.get("owner") is not self._owner:
+            raise HunchError("attached external session is not owned; use explicit app recovery")
+        profile = owned["profile"]
+        editor = current.editor
+        folder = getattr(current.session, "pinned", None)
+        if url and not editor:
+            from .destinations import navigation_refusal
+            refusal = navigation_refusal(url, self._h.allowed_web_origins)
+            if refusal:
+                return refusal
+        quit_cdp(port, owner=self._owner)
         self.close()
-        quit_cdp(self.port)
         try:
-            self._computer = CDPComputer(app, port=self.port, url=url or None,
-                                         isolated=False, background=True,
-                                         profile=self.profile)
+            self._computer = CDPComputer(app, port=port, url=folder if editor else url or None,
+                                         isolated=False, background=True, editor=editor,
+                                         profile=profile, allowed_origins=self._h.allowed_web_origins,
+                                         owner=self._owner)
         except Exception as e:
             raise HunchError(f"couldn't reopen {app} over CDP: {e}") from e
         s = self._computer.session
-        if url:
-            s.navigate(url)
+        if url and not editor:
+            navigation = s.navigate(url)
+            if navigation and not navigation.startswith("navigated"):
+                return navigation
         s.wait_ready()
         snap = self._computer.snapshot()
         return f"restarted {app} over CDP ({snap.count('[e')} elements)"
@@ -552,16 +735,20 @@ class Web:
     def snapshot(self):
         """The current page as a ref-annotated accessibility tree (focus-free)."""
         self._session()
-        return self._computer.snapshot()
+        return self._h._redact(self._computer.snapshot())
 
-    def act(self, actions):
+    def act(self, actions, detailed=False, postcondition=None):
         """Page actions: click by ref; click_xy/drag at web-screenshot coordinates; type
         (replaces a referenced field, or types at focus without a ref); key; navigate."""
         self._session()
-        return self._computer.act(actions)
+        if detailed or postcondition is not None:
+            return self._h._redact(self._computer.act(actions, detailed=detailed, postcondition=postcondition))
+        return self._h._redact(self._computer.act(actions))
 
     def screenshot(self):
         """The CDP page itself as PNG bytes (focus-free — works in the background)."""
+        if self._h._secrets:
+            raise HunchError("screenshot blocked after secret fill; text redaction does not protect pixels")
         data = self._session().capture_screenshot()
         if not data:
             raise HunchError("could not capture the page")
@@ -591,17 +778,19 @@ class Web:
 
     def fill_login(self, service):
         """Fill the current page's login form from the user's saved Keychain credential.
-        The values never enter your program: read here, typed into the page, deleted.
+        Values stay in the SDK process and destination page; outputs redact known values.
         Domain-bound credentials are refused on other sites (returns a REFUSED string)."""
         s = self._session()
         ns = self._h.app_id
-        from .creds import get_credential, has, kind_of
+        from .creds import get_credential, has, kind_of, domains_of
         if not has(service, ns):
             return (f"No saved credential for '{service}'. See list_credentials(), or add "
                     f"one with: hunch creds add {service}")
         if kind_of(service, ns) == "secret":
             return (f"'{service}' is a protected value (API key/token), not a login — use "
                     f"web.fill_secret('{service}', ref) instead.")
+        if not domains_of(service, ns):
+            return "REFUSED: credential has no destination binding; run hunch creds bind SERVICE --domain DOMAIN or use interactive login"
         blocked = gate.domain_mismatch(service, self._page_url(),
                                        app_name=self._h.app_name, namespace=ns)
         if blocked:
@@ -609,23 +798,32 @@ class Web:
         username, password = get_credential(service, ns)   # stays in this process; never returned
         if not (username or password):
             return f"Couldn't read the '{service}' credential from the Keychain."
-        r = s.fill_login(username, password)
+        self._h._secrets.update(v for v in (username, password) if v)
+        self._session()
+        blocked = gate.domain_mismatch(service, self._page_url(), app_name=self._h.app_name, namespace=ns)
+        if blocked:
+            return blocked
+        r = s.fill_login(username, password, expected_url=self._page_url())
         del username, password
+        if not (r["username_filled"] or r["password_filled"]):
+            return "UNVERIFIED: no login field was verified on the bound destination"
         return (f"filled '{service}': username={r['username_filled']}, "
                 f"password={r['password_filled']} (values not returned)")
 
     def fill_secret(self, service, ref=""):
         """Type the saved protected value (API key/token) for `service` into a field by ref
-        (or the focused element). The value never enters your program."""
+        (or the focused form input). Values stay in the SDK process and destination page."""
         s = self._session()
         ns = self._h.app_id
-        from .creds import has, kind_of, get_secret
+        from .creds import has, kind_of, get_secret, domains_of
         if not has(service, ns):
             return (f"No saved credential for '{service}'. See list_credentials(), or add "
                     f"one with: hunch creds add {service} --secret")
         if kind_of(service, ns) != "secret":
             return (f"'{service}' is a username+password login — use "
                     f"web.fill_login('{service}') instead.")
+        if not domains_of(service, ns):
+            return "REFUSED: credential has no destination binding; run hunch creds bind SERVICE --domain DOMAIN or use interactive login"
         blocked = gate.domain_mismatch(service, self._page_url(),
                                        app_name=self._h.app_name, namespace=ns)
         if blocked:
@@ -633,8 +831,15 @@ class Web:
         secret = get_secret(service, ns)   # stays in this process; never returned
         if not secret:
             return f"Couldn't read the '{service}' secret from the Keychain."
-        s.type_text(ref or None, secret)
+        self._h._secrets.add(secret)
+        self._session()
+        blocked = gate.domain_mismatch(service, self._page_url(), app_name=self._h.app_name, namespace=ns)
+        if blocked:
+            return blocked
+        result = s.fill_secret(ref or None, secret, self._page_url())
         del secret
+        if not result:
+            return "UNVERIFIED: secret fill did not verify a writable form input on the bound destination"
         return (f"filled the '{service}' secret into "
                 f"{('field ' + ref) if ref else 'the focused element'} (value not returned)")
 
@@ -727,7 +932,14 @@ class Files:
 
     def reveal(self, paths):
         """Reveal item(s) in Finder (this one does bring Finder forward)."""
-        return os_ops.reveal(paths)
+        if self._h.background_only or self._h.simultaneous:
+            raise ApprovalDenied("revealing files fronts Finder; background mode forbids it")
+        blocked = self._h._gate.front_gate("Finder", "reveal selected files")
+        if blocked:
+            raise ApprovalDenied(blocked)
+        result = os_ops.reveal(paths)
+        self._h._computer.session.disturbances["app_raises"] += 1
+        return result + "; disturbance: Finder reveal requested"
 
 
 class Clipboard:
@@ -738,4 +950,7 @@ class Clipboard:
         return os_ops.clipboard_read()
 
     def set(self, text):
-        return os_ops.clipboard_write(text)
+        result = os_ops.clipboard_write(text)
+        disturbances = self._h._computer.session.disturbances
+        disturbances["clipboard_changes"] = disturbances.get("clipboard_changes", 0) + 1
+        return result + "; disturbance: shared clipboard changed"
