@@ -486,8 +486,8 @@ class MacSession:
 
     def snapshot(self, app_name=None, compact=True, max_depth=None, activate_app=True,
                  ref=None, max_nodes=None, max_children=None):
-        """Compact tree of the target app's focused window (frontmost app by
-        default). Returns (text, info) and refreshes the ref registry.
+        """Compact tree of the selected window, else the app's focused window
+        (frontmost app by default). Returns (text, info) and refreshes refs.
         Pass ref='eNN' to re-walk ONLY that element's subtree (deeper defaults,
         does NOT clear other refs). max_depth/max_nodes/max_children=None ->
         defaults; when a cap truncates output, an explicit …marker line says what
@@ -502,7 +502,8 @@ class MacSession:
         win, app_name, err = self._resolve_window(app_name)
         if err is not None:
             return err
-        lines = [f"=== {app_name} — focused window (snapshot #{self.snapshot_count}) ==="]
+        scope = "selected window" if getattr(self, "_selected_window", None) else "focused window"
+        lines = [f"=== {app_name} — {scope} (snapshot #{self.snapshot_count}) ==="]
         warn = _twin_process_warning(app_name, getattr(self, "_pid", None))
         if warn:
             lines.append(warn)
@@ -547,6 +548,12 @@ class MacSession:
             self._manual_ax_identity = process_key(identity)
         win = ax.get_window(ax_app)
         selected = getattr(self, "_selected_window", None)
+        # Resolve aliases before deciding whether the caller switched apps. A
+        # name/bundle/path for the selected PID must not unpin its window just
+        # because app_target stored a pid:N selector. Failed resolution above
+        # leaves the binding intact; a reused PID still fails the identity check.
+        if selected and selected[0][0] != pid:
+            self._selected_window = selected = None
         if selected:
             observations, _ = ax.discover_windows(ax_app)
             if selected[0] != process_key(identity) or not any(w[0] == selected[1] for w in observations):

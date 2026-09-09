@@ -8,6 +8,8 @@ TARGETS AND CAPABILITIES
 - list_apps lists running apps. app_target inspects exact process identities and native windows;
   select=true binds a process/window without bringing it forward. Names and bundle IDs may be
   ambiguous: use the returned pid:N selector and window handle. Reinspect after a process restart.
+  Bind a window when the user is using another window of the same app. snapshot/find preserve
+  that binding across aliases for the same process and refuse a stale selected window.
 - snapshot/find read native AX. They never launch, quit, or restart an app. An empty/partial tree,
   zero AXWindows, or a System Events zero-window result does not prove an app lacks AX support.
 - app_capabilities(app, operation) reports current evidence and bounded recovery plans. It may
