@@ -217,7 +217,9 @@ class Hunch:
     # ── native apps: AX tree ──────────────────────────────────────────────────
 
     def snapshot(self, app="", ref=None, max_depth=None, max_nodes=None, max_children=None):
-        """The app's focused window as a ref-annotated accessibility tree (focus-free).
+        """The selected window, or app's focused window, as a focus-free AX tree.
+        targets(..., window=..., select=True) pins a window across reads, including
+        reads using another name/bundle/path selector for the same process.
         Empty `app` targets the last aimed app (focus_app / launch_app /
         snapshot(app=...)), else the frontmost app. Pass ref="e42" to expand ONLY
         that element's subtree at full depth (other refs stay valid). Truncation is
@@ -228,8 +230,6 @@ class Hunch:
                                                         max_children=max_children))
         prev, prev_aimed = self._computer.app, self._aimed_app
         if app:
-            if app != self._computer.app:
-                self._computer.session._selected_window = None
             self._computer.app = app
             self._aimed_app = app
         else:
@@ -248,8 +248,6 @@ class Hunch:
         name_contains matches title/description/value as a substring."""
         prev, prev_aimed = self._computer.app, self._aimed_app
         if app:
-            if app != self._computer.app:
-                self._computer.session._selected_window = None
             self._computer.app = app
             self._aimed_app = app
         elif self._aimed_app:
