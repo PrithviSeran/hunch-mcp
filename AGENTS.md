@@ -7,6 +7,23 @@ Hunch drives a real, logged-in Mac for an LLM **focus-free** — reading and act
 background apps without stealing the user's screen, cursor, or keyboard. That invariant is
 the product. Most gotchas below exist to protect it.
 
+## Branches and commits (atomic, decoupled)
+
+Every feature, bug fix, or patch belongs on **its own branch**, cut from current `main`.
+Do not pile unrelated work onto an existing branch, an in-progress PR, or a dirty
+working tree that already belongs to something else. If the task changes, start a new
+branch (a worktree is fine) instead of mixing it in.
+
+- **One concern per branch.** A Safari fix, a Learn feature, a site tweak, and a docs
+  change are four branches — even when they are all "small."
+- **Commits stay atomic.** Each commit is one reviewable change: no drive-by refactors,
+  no leftover files from another task, no "and also" in the same snapshot.
+- **Branches stay decoupled.** A branch must merge to `main` on its own. It must not
+  depend on uncommitted files, another in-progress branch, or a checkout that still
+  carries unrelated diffs.
+- Do not commit Learn / Safari / site / CI / packaging together unless they *are* the
+  same change. Discovering extra work is a signal to branch, not to widen the diff.
+
 ## Setup & tests
 
 ```bash

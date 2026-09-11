@@ -6,6 +6,7 @@ the vision path, plus packaging/release). It's the canonical guide for coding ag
 Claude Code loads it.
 
 Quick reminders:
+- One feature/bug/patch per branch; commits stay atomic. See AGENTS.md → Branches and commits.
 - Run tests: `.venv/bin/python -m pytest tests/`
 - Adding/removing a tool changes the count in `tests/test_smoke.py::test_tool_count` (now 29).
 - Never read the frontmost app with `NSWorkspace.frontmostApplication()` — use `_frontmost()`.
