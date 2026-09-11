@@ -213,6 +213,10 @@ Use **`_frontmost()`** (`local_mac.py`) — a fresh `lsappinfo` query per call. 
   and tags `vX.Y.Z` + cuts a GitHub release. So a release is just: bump `pyproject.toml` version,
   merge to `main`. Requires the one-time PyPI trusted-publisher config (project `hunch-sdk`, owner
   `PrithviSeran`, repo `hunch-mcp`, workflow `publish.yml`, environment `pypi`).
+- **Safari companion is notarized locally, then committed.** `scripts/release_safari_companion.sh`
+  signs, notarizes, staples, and copies `Hunch Safari.app` into `src/hunch/native/` so the Ubuntu
+  publish job can embed it without Apple credentials. Do not expect CI to notarize. The current
+  companion is arm64; Intel Macs keep using Chrome/CDP for web until a universal build exists.
 - **Publishing order:** merge the version bump so the workflow ships PyPI, then
   `mcp-publisher login github && mcp-publisher publish`. Footguns: `mcp-publisher publish --dry-run`
   actually PUBLISHES in the current CLI, and re-publishing the same version 400s ("duplicate

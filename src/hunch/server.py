@@ -235,12 +235,14 @@ def focus_app(name: str, reason: str = "") -> str:
 
 @mcp.tool()
 def web_open(app: str = "Google Chrome", url: str = "", isolated: bool = False) -> str:
-    """Open a Chromium BROWSER (or Electron app) for FOCUS-FREE control over CDP — read,
+    """Open Safari through the Hunch extension, or Chromium/Electron through CDP, for
+    FOCUS-FREE background control — read,
     click, and type in the BACKGROUND without stealing your cursor/keyboard or switching
     your view. This is the way to drive these apps simultaneously with the user (AX can't).
     Then use web_snapshot / web_act.
 
-    `app` is the BROWSER/app name — e.g. "Google Chrome" (the default), "Arc", "Brave",
+    `app` is the BROWSER/app name — "Safari" uses the user's existing tabs and login;
+    examples for CDP are "Google Chrome" (the default), "Arc", "Brave",
     "Microsoft Edge", or an Electron app like "Discord"/"Slack"/"Spotify". To open a WEBSITE
     (Gmail, etc.) DON'T pass the site as `app` — keep `app` as the browser and put the site
     in `url` (e.g. web_open("Google Chrome", "https://mail.google.com/...")).
@@ -277,7 +279,7 @@ def web_login(app: str = "Google Chrome", url: str = "") -> str:
 
 @mcp.tool()
 def web_snapshot() -> str:
-    """Look at the CDP-controlled browser/Electron page as an accessibility tree
+    """Look at the bound Safari or CDP browser/Electron page as an accessibility tree
     ([ref] per element). Call web_open first.
 
     If the tree shows only the NAV/SIDEBAR/header and the main content is missing, the page just
@@ -300,7 +302,7 @@ def web_screenshot() -> Image:
 
 @mcp.tool()
 def web_act(actions: list, detailed: bool = False, postcondition: dict | None = None) -> str | dict:
-    """Execute focus-free page actions on the CDP-controlled app, then return the updated tree.
+    """Execute focus-free page actions on the bound Safari or CDP app, then return the updated tree.
     Each: {"action":"click","ref":"e12"} | {"action":"type","ref":"e12","text":"hi"} |
     {"action":"click_xy","x":500,"y":250} | {"action":"drag","from_x":10,"from_y":20,
     "to_x":200,"to_y":220} |
@@ -338,7 +340,7 @@ def web_restart(app: str = "Google Chrome", url: str = "") -> str:
 
 @mcp.tool()
 def web_tabs() -> str:
-    """List the open browser tabs/windows in the CDP session — index, title, URL, and which is
+    """List the open browser tabs/windows in the bound Safari or CDP session — index, title, URL, and which is
     current (*). New tabs opened by a click or form are AUTO-FOLLOWED on the next web_snapshot;
     use web_switch_tab only to override that (go back to a prior tab, or pick a different one)."""
     return _run("web_tabs")

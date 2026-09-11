@@ -37,7 +37,13 @@ NATIVE OBSERVATION AND ACTION
   prerequisite and inspect again instead of continuing an action batch with invalid assumptions.
 
 CDP
-- web_open starts/reuses a verified dedicated instance. Its profile may differ from the user's
+- web_open(app="Safari", url=...) binds the user's exact existing Safari tab through the Hunch
+  extension, or opens that URL in an inactive tab. Safari commands are pinned to tab, URL, origin,
+  and document generation; after navigation, snapshot again before acting. Missing extension or
+  website access is a blocked permission state, not a reason to fall back to shared AX input.
+- Safari beta supports snapshot, ref click/type/check, tabs, and navigation. It refuses submit
+  controls, secrets, file inputs, screenshots, coordinates, and key events explicitly.
+- For Chromium/Electron, web_open starts/reuses a verified dedicated instance. Its profile may differ from the user's
   current app. An unrelated listening port is not permission to attach to or restart that process.
 - web_snapshot reads the selected renderer's accessibility semantics; CDP resolves refs to DOM nodes
   for action. web_screenshot captures that renderer, including while backgrounded. OS screenshot
