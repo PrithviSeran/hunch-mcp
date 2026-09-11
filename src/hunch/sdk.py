@@ -474,7 +474,7 @@ class Hunch:
 
 
 class Web:
-    """Focus-free browser/Electron control over CDP, on a persistent profile. With no
+    """Focus-free Safari, Chromium, and Electron control. With no
     app_id the profile defaults to the personal Hunch profile; namespaced hosts get their
     own profile. Default ports are allocated at launch. Only the launching SDK instance
     owns lifecycle recovery; explicit attachment never grants ownership."""
@@ -552,6 +552,15 @@ class Web:
         to open, and Hunch drives a DEDICATED editor window (its own profile+port, separate
         from your own editor). Its integrated terminal is then typeable focus-free via act()
         — the AX tree can't write xterm.js, but CDP injects real keystrokes into the PTY."""
+        from .safari import SafariComputer, is_safari
+        if is_safari(app):
+            if isolated:
+                return ("REFUSED: Safari uses the user's existing profile; isolated Safari "
+                        "sessions are not supported. Use Google Chrome with isolated=true.")
+            self.close()
+            self._computer = SafariComputer(allowed_origins=self._h.allowed_web_origins)
+            return self._computer.open(url)
+
         from .cdp import _is_editor
         if _is_editor(app):
             return self._open_editor(folder=url, app=app)
@@ -660,6 +669,14 @@ class Web:
         """Open a background, banner-tagged window for the HUMAN to sign in once (Hunch
         never sees the password). Uses the configured user-attention notification, if
         enabled; the login persists in the Hunch profile."""
+        from .safari import is_safari
+        if is_safari(app):
+            result = self.open(url=url, app="Safari")
+            if isinstance(result, str) and result.startswith(("REFUSED", "BLOCKED")):
+                return result
+            return (result + "; Safari uses the user's existing login. If the page still asks "
+                    "for authentication, the user must complete it in Safari once.")
+
         from .cdp import CDPComputer
         if url:
             from .destinations import navigation_refusal
@@ -699,6 +716,8 @@ class Web:
         current = self._computer
         if current is None:
             raise WebNotOpen("no owned CDP session to restart; use web.open or attach")
+        if getattr(current, "backend", "") == "safari":
+            return self.open(url=url or current.url(), app="Safari")
         app, port = current.app, current.port
         from .cdp import _OWNED_ENDPOINTS
         owned = _OWNED_ENDPOINTS.get(port)
@@ -739,12 +758,21 @@ class Web:
         """Page actions: click by ref; click_xy/drag at web-screenshot coordinates; type
         (replaces a referenced field, or types at focus without a ref); key; navigate."""
         self._session()
+        if getattr(self._computer, "backend", "") == "safari":
+            from .destinations import navigation_refusal
+            for action in actions:
+                if action.get("action") == "navigate":
+                    refusal = navigation_refusal(action.get("url", ""), self._h.allowed_web_origins)
+                    if refusal:
+                        return refusal
         if detailed or postcondition is not None:
             return self._h._redact(self._computer.act(actions, detailed=detailed, postcondition=postcondition))
         return self._h._redact(self._computer.act(actions))
 
     def screenshot(self):
         """The CDP page itself as PNG bytes (focus-free — works in the background)."""
+        if getattr(self._computer, "backend", "") == "safari":
+            raise HunchError("Safari page screenshots are not supported in the MCP beta; use web_snapshot")
         if self._h._secrets:
             raise HunchError("screenshot blocked after secret fill; text redaction does not protect pixels")
         data = self._session().capture_screenshot()
@@ -766,6 +794,9 @@ class Web:
                                 + (f"   [workspace: {w['workspace']}]" if w['workspace'] else "")
                                 for w in wins))
         tabs = s.tabs()
+        if isinstance(tabs, dict):
+            return f"{tabs.get('status', 'blocked').upper()}: " \
+                   f"{tabs.get('reason') or tabs.get('detail') or 'Safari tabs unavailable'}"
         if not tabs:
             return "no open tabs"
         return "\n".join(f"[{t['index']}]{'*' if t['current'] else ' '} {t['title']} — {t['url']}"
@@ -779,6 +810,8 @@ class Web:
         Values stay in the SDK process and destination page; outputs redact known values.
         Domain-bound credentials are refused on other sites (returns a REFUSED string)."""
         s = self._session()
+        if getattr(self._computer, "backend", "") == "safari":
+            return "UNSUPPORTED: saved-login filling is not available in the Safari MCP beta"
         ns = self._h.app_id
         from .creds import get_credential, has, kind_of, domains_of
         if not has(service, ns):
@@ -812,6 +845,8 @@ class Web:
         """Type the saved protected value (API key/token) for `service` into a field by ref
         (or the focused form input). Values stay in the SDK process and destination page."""
         s = self._session()
+        if getattr(self._computer, "backend", "") == "safari":
+            return "UNSUPPORTED: protected-value filling is not available in the Safari MCP beta"
         ns = self._h.app_id
         from .creds import has, kind_of, get_secret, domains_of
         if not has(service, ns):

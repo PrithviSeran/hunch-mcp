@@ -87,9 +87,10 @@ BASE_TOOLS = [
                      "always pass `reason` (one short sentence for why)."),
      "input_schema": _obj({"name": {"type": "string"}, "reason": {"type": "string"}}, ["name"])},
     {"name": "web_open",
-     "description": ("Open a Chromium browser or Electron app for FOCUS-FREE control over CDP — "
-                     "the way to drive web/Electron apps in the background. `app` is the browser "
-                     "(default 'Google Chrome'); put a website in `url`. Uses the persistent Hunch "
+     "description": ("Open Safari through the Hunch extension, or a Chromium/Electron app over "
+                     "CDP, for FOCUS-FREE background control. `app` is the browser (default "
+                     "'Google Chrome'; use 'Safari' for the user's existing Safari session); "
+                     "put a website in `url`. Chromium uses the persistent Hunch "
                      "profile; call web_login once if it isn't signed in. CODE EDITORS: app="
                      "'Cursor'/'Visual Studio Code'/'VSCodium'/'Windsurf' with the FOLDER/FILE in "
                      "`url` opens a dedicated background editor window whose integrated TERMINAL you "
@@ -103,7 +104,7 @@ BASE_TOOLS = [
                      "user-attention notification when enabled."),
      "input_schema": _obj({"app": {"type": "string"}, "url": {"type": "string"}})},
     {"name": "web_snapshot",
-     "description": "Read the CDP-controlled page as an accessibility tree. Call web_open first.",
+     "description": "Read the bound Safari or CDP page as an accessibility tree. Call web_open first.",
      "input_schema": _obj()},
     {"name": "web_screenshot",
      "description": ("PNG of the CDP page itself (focus-free) — for visual web content the tree "
@@ -120,7 +121,7 @@ BASE_TOOLS = [
                      "Last resort — don't restart a merely-slow page; wait and re-snapshot first."),
      "input_schema": _obj({"app": {"type": "string"}, "url": {"type": "string"}})},
     {"name": "web_tabs",
-     "description": "List the open CDP tabs (index, title, URL, which is current).",
+     "description": "List the open tabs in the bound Safari or CDP session.",
      "input_schema": _obj()},
     {"name": "web_switch_tab",
      "description": "Switch the CDP session to a tab by index (see web_tabs), then web_snapshot.",

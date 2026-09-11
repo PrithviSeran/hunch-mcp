@@ -51,6 +51,16 @@ def _fail(msg):
 
 
 def cmd_serve(args):
+    # Release wheels carry the signed Safari containing app. Staging is idempotent and
+    # deliberately has no separate setup command; Safari's enable/access decisions remain
+    # Apple's UI. Editable/source installs simply have no bundled app to stage.
+    try:
+        from .safari import prepare_bundled_companion
+        prepare_bundled_companion()
+    except OSError:
+        # Safari is an optional backend. A read-only home directory must not take down the
+        # MCP server or its existing native/CDP capabilities.
+        pass
     try:
         from . import server
     except ImportError as e:
@@ -305,6 +315,34 @@ def cmd_doctor(args):
     except Exception:
         _warn("could not check Screen Recording (macOS < 10.15?)")
 
+    print("\nSafari (bundled Web Extension)")
+    try:
+        from .safari import (_bundled_companion, default_install_dir, COMPANION_BUNDLE,
+                             SafariBridgeClient)
+        bundled = _bundled_companion()
+        staged = default_install_dir() / COMPANION_BUNDLE
+        if bundled:
+            _ok("this install includes the signed Safari companion")
+        else:
+            _warn("this install has no bundled Safari companion — source/editable checkouts "
+                  "and unsigned wheels fall back to Chrome/CDP until a notarized app is packaged")
+        if staged.is_dir():
+            _ok(f"companion staged at {staged}")
+        elif bundled:
+            _warn("companion is in the package but not staged yet — start `hunch serve` once")
+        try:
+            status = SafariBridgeClient(timeout=2.0).request("status")
+            if status.get("status") == "verified":
+                _ok("Hunch Safari extension is enabled")
+            else:
+                _warn(status.get("reason") or "enable Hunch in Safari → Settings → Extensions")
+        except Exception:
+            if staged.is_dir() or bundled:
+                _warn("Safari extension not reachable — quit/reopen Safari, enable Hunch, "
+                      "and allow website access")
+    except Exception as e:
+        _warn(f"Safari companion check skipped: {e}")
+
     print("\nWeb layer (CDP)")
     chrome = "/Applications/Google Chrome.app"
     if os.path.exists(chrome):
@@ -418,7 +456,16 @@ def cmd_setup(args):
         input("   -> sign into the sites you want Hunch to use, then press Enter here... ")
         print("   done — Hunch reuses this profile in the background from now on.")
 
-    print("\n5) Default gate policy")
+    print("\n5) Safari (the user's real Safari session, via a bundled extension)")
+    print("   `hunch serve` installs Hunch Safari.app into /Applications or ~/Applications.")
+    print("   You still have to enable it once — Apple does not allow silent activation.")
+    if input("   Open Safari's Extensions settings now? [Y/n] ").strip().lower() != "n":
+        subprocess.run(["open", "-a", "Safari"], check=False)
+        subprocess.run(["open", "x-apple.systempreferences:com.apple.Safari-Settings.extension"],
+                       check=False)
+        print("   -> enable “Hunch”, then allow website access (every website is the fewest prompts).")
+
+    print("\n6) Default gate policy")
     if os.path.exists(policy.CONFIG_PATH):
         print(f"   {policy.CONFIG_PATH} already exists — leaving it as-is.")
     else:

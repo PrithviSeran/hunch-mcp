@@ -25,7 +25,7 @@ never touches your screen:
 |---|---|---|
 | **OS-API** | `trash` `file_op` `open_file` `clipboard_*` `launch_app` … | files, clipboard, app lifecycle, via direct API calls |
 | **AppleScript** | `applescript` | scriptable apps: Mail, Messages, Notes, Calendar, Music, Finder, Safari … |
-| **Web / CDP** | `web_open` `web_snapshot` `web_act` `web_login` … | any browser page or Electron app, driven in the background |
+| **Web** | `web_open` `web_snapshot` `web_act` `web_login` … | Safari through the bundled extension, or Chromium/Electron through CDP, driven in the background |
 | **Accessibility** | `snapshot` `act` | any native app's UI: read the tree, click/select/type by reference |
 
 A gated last resort (`screenshot` + coordinate clicks/keystrokes) exists for apps whose
@@ -39,10 +39,11 @@ MCP host (Claude Desktop, Cursor, …) spawns as a **child process** and talks t
 Hunch listens on, no daemon, and no telemetry. When your host quits, Hunch is gone.
 
 The tools are direct macOS API calls in-process: the Accessibility framework via pyobjc,
-`osascript` for AppleScript, OS APIs for files/clipboard, and, for the web layer, a local
-WebSocket to Chrome's DevTools port on `127.0.0.1`. The only thing that ever touches the
-network is Chrome itself, doing ordinary browsing. What the model sees is whatever the tools
-return through your host; nothing else leaves the machine.
+`osascript` for AppleScript, OS APIs for files/clipboard, a local WebSocket to Chromium's
+DevTools port, and the signed local Safari extension bridge. The optional Safari companion
+uses an authenticated loopback connection solely to relay typed commands to Apple's sandboxed
+extension. Browsing traffic still comes from the selected browser. What the model sees is
+whatever the tools return through your host; nothing else leaves the machine.
 
 ## Benchmarks
 
@@ -117,6 +118,7 @@ mac = Hunch()                              # your machine, your logged-in apps
 print(mac.snapshot("Mail"))                # accessibility tree, focus-free
 mac.act([{"action": "click", "ref": "e12"}])
 mac.web.open(url="https://github.com")     # real persistent Chrome profile over CDP
+mac.web.open(url="https://github.com", app="Safari")  # user's Safari session via extension
 print(mac.web.snapshot())
 mac.files.trash(["~/Downloads/old.zip"])   # reversible delete, no Finder
 mac.applescript('tell application "Music" to play')
@@ -359,6 +361,12 @@ Verify the resulting operation; an empty tree does not establish that an app lac
 Hunch drives its own Chrome (a separate data dir at `~/.hunch/chrome-cdp`), not your everyday one.
 Sign that profile into your Google account once (via `hunch setup` or `web_login`) and Chrome Sync
 brings your logins with it; from then on it's already signed in.
+
+For Safari, the first `hunch serve` installs the signed companion and prompts once to enable
+**Hunch** under Safari → Settings → Extensions and grant website access. Choose access to every
+website for the fewest prompts; Hunch still binds every action to the exact tab, URL, origin,
+and document generation. Hunch cannot grant these Apple-owned permissions itself. `hunch setup`
+and `hunch doctor` cover the same step.
 
 **My host shows the server instructions truncated.** Cosmetic: some host UIs shorten the playbook
 in their server-info display; the model receives it in full.

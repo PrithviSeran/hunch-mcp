@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tryhunch.ca/schemas/safari-bridge-v1.schema.json",
+  "title": "Hunch Safari bridge protocol v1",
+  "$defs": {
+    "binding": {
+      "type": "object",
+      "required": ["tabId", "expectedUrl", "expectedOrigin", "generation"],
+      "properties": {
+        "tabId": { "type": "integer" },
+        "expectedUrl": { "type": "string", "format": "uri", "pattern": "^https?://" },
+        "expectedOrigin": { "type": "string", "format": "uri", "pattern": "^https?://" },
+        "generation": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": true
+    },
+    "action": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["action", "ref"],
+          "properties": {
+            "action": { "const": "click" },
+            "ref": { "type": "string", "pattern": "^e[1-9][0-9]*$" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["action", "ref", "text"],
+          "properties": {
+            "action": { "const": "type" },
+            "ref": { "type": "string", "pattern": "^e[1-9][0-9]*$" },
+            "text": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["action", "ref", "checked"],
+          "properties": {
+            "action": { "const": "check" },
+            "ref": { "type": "string", "pattern": "^e[1-9][0-9]*$" },
+            "checked": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "type": "object",
+  "required": ["protocol", "id", "token", "operation", "payload"],
+  "properties": {
+    "protocol": { "const": 1 },
+    "id": { "type": "string", "format": "uuid" },
+    "token": { "type": "string", "minLength": 32 },
+    "operation": {
+      "enum": ["status", "open", "tabs", "switch_tab", "snapshot", "act"]
+    },
+    "payload": {
+      "type": "object",
+      "properties": {
+        "url": { "type": "string", "format": "uri" },
+        "index": { "type": "integer", "minimum": 0 },
+        "tabId": { "type": "integer" },
+        "expectedUrl": { "type": "string", "format": "uri" },
+        "expectedOrigin": { "type": "string", "format": "uri" },
+        "generation": { "type": "string" },
+        "actions": { "type": "array", "items": { "$ref": "#/$defs/action" }, "maxItems": 50 }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -10,3 +10,6 @@ build/
 .pytest_cache/
 *.backup
 .claude/
+# Local Safari rebuilds. The notarized app that PyPI ships lives in src/hunch/native/.
+native/dist/
+native/safari/.build/
