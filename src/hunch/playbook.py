@@ -36,7 +36,13 @@ NATIVE OBSERVATION AND ACTION
 - act returns a delta where possible; snapshot returns the full bounded view. Stop after a failed
   prerequisite and inspect again instead of continuing an action batch with invalid assumptions.
 
-CDP
+WEB EXTENSION AND CDP
+- Safari exposes both web extension tools and native Mac tools. Prefer web_snapshot/web_act
+  for page content and web_screenshot for the selected bound tab; use native snapshot/act
+  for browser chrome, dialogs, or operations the extension cannot perform. Opening Safari
+  through web_open does not disable either tool set. Keep their refs and targets separate.
+  A transport timeout is not evidence of disabled extensions or denied website access;
+  report the actual error and use web_tabs to inspect before retrying a possible mutation.
 - web_open(app="Safari") binds the currently selected Safari tab without navigation. Supplying an
   exact url binds that tab or opens it inactive. new_window=True requests a dedicated unfocused
   window, but Safari may refuse if the OS would change focus. Commands are pinned to

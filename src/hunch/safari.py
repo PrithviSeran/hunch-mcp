@@ -206,7 +206,7 @@ class SafariBridgeClient:
     """One-request-per-connection JSON transport to the signed companion."""
 
     def __init__(self, endpoint_path=DEFAULT_ENDPOINT, token_path=DEFAULT_TOKEN,
-                 timeout=8.0, transport=None):
+                 timeout=15.0, transport=None):
         self.endpoint_path = Path(endpoint_path)
         self.token_path = Path(token_path)
         self.timeout = timeout
@@ -273,9 +273,16 @@ class SafariBridgeClient:
             raise
         except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError,
                 ConnectionRefusedError, socket.timeout, OSError) as exc:
+            if isinstance(exc, socket.timeout):
+                raise WebNotOpen(
+                    "Safari bridge timed out waiting for a response. Extension enablement "
+                    "and website permission are unknown; this is not evidence they are disabled. "
+                    "Inspect web_tabs before retrying an action, since it may have completed."
+                ) from exc
             raise WebNotOpen(
-                "Safari companion is not reachable. Enable the Hunch extension in Safari "
-                "Settings > Extensions, allow website access, then retry web_open(app='Safari')."
+                f"Safari companion transport failed ({type(exc).__name__}: {exc}). "
+                "This does not establish that the extension is disabled. Check the companion "
+                "connection; native Safari tools remain available under the session policy."
             ) from (last_error or exc)
         try:
             return json.loads(bytes(chunks).split(b"\n", 1)[0])

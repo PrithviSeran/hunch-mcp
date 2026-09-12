@@ -215,14 +215,26 @@ def test_open_prompts_when_safari_extension_is_not_enabled(tmp_path, monkeypatch
     assert (tmp_path / "offered").exists()
 
 
-def test_socket_failure_has_single_actionable_onboarding_message(tmp_path):
+def test_socket_failure_does_not_claim_extension_permission_is_missing(tmp_path):
     client = SafariBridgeClient(endpoint_path=tmp_path / "missing.json",
                                 token_path=tmp_path / "token", timeout=0.01)
     with pytest.raises(WebNotOpen) as exc:
         client.request("status")
     message = str(exc.value)
-    assert "Safari Settings > Extensions" in message
-    assert "website access" in message
+    assert "FileNotFoundError" in message
+    assert "does not establish that the extension is disabled" in message
+
+
+def test_socket_timeout_preserves_uncertain_action_outcome(tmp_path, monkeypatch):
+    import socket
+    endpoint = tmp_path / "endpoint.json"
+    endpoint.write_text('{"port": 12345}')
+    def timeout(*args, **kwargs):
+        raise socket.timeout("timed out")
+    monkeypatch.setattr(socket, "create_connection", timeout)
+    client = SafariBridgeClient(endpoint_path=endpoint, token_path=tmp_path / "token", timeout=0)
+    with pytest.raises(WebNotOpen, match="may have completed"):
+        client.request("act", {})
 
 
 def test_sdk_routes_safari_without_changing_the_public_web_tools(monkeypatch):

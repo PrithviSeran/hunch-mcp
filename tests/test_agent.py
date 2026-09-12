@@ -272,26 +272,13 @@ def test_dispatch_core_screenshot_bytes():
     assert r["content"][0]["source"]["media_type"] == "image/png"
 
 
-def test_dispatch_core_keeps_safari_on_extension_surface():
+def test_safari_session_keeps_native_tools_available():
     h = _FakeHunch()
     h.web = types.SimpleNamespace(_computer=types.SimpleNamespace(backend="safari"))
-
-    for name, args in (
-        ("snapshot", {}),
-        ("snapshot", {"app": "Safari"}),
-        ("act", {"actions": []}),
-        ("screenshot", {}),
-        ("app_target", {"app": "Safari"}),
-        ("focus_app", {"name": "Safari", "reason": "fallback"}),
-    ):
-        value, is_error = agent_mod._dispatch_core(h, name, args)
-        assert value.startswith("WRONG SURFACE:")
-        assert "web_snapshot" in value
-        assert is_error is False
-
-    value, is_error = agent_mod._dispatch_core(h, "snapshot", {"app": "Finder"})
-    assert value == "tree of Finder"
-    assert is_error is False
+    assert agent_mod._dispatch_core(h, "snapshot", {"app": "Safari"}) == ("tree of Safari", False)
+    assert agent_mod._dispatch_core(h, "act", {"actions": []}) == ("acted", False)
+    value, error = agent_mod._dispatch_core(h, "screenshot", {})
+    assert isinstance(value, bytes) and not error
 
 
 def test_mcp_image_shape():
