@@ -206,7 +206,7 @@ class SafariBridgeClient:
     """One-request-per-connection JSON transport to the signed companion."""
 
     def __init__(self, endpoint_path=DEFAULT_ENDPOINT, token_path=DEFAULT_TOKEN,
-                 timeout=5.0, transport=None):
+                 timeout=8.0, transport=None):
         self.endpoint_path = Path(endpoint_path)
         self.token_path = Path(token_path)
         self.timeout = timeout
@@ -328,7 +328,7 @@ class SafariComputer:
             return f"{response.get('status', 'blocked').upper()}: {self._reason(response)}"
         self._bind(response)
         installed = "" if install.state == "ready" else f"; companion {install.state}"
-        surface = "background window" if response.get("ownedWindow") else "tab"
+        surface = "background window" if response.get("ownedWindow") else "selected tab" if not url else "tab"
         return f"opened Safari {surface} focus-free ({response.get('elementCount', 0)} elements{installed})"
 
     def _bind(self, response):

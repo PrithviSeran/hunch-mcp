@@ -191,12 +191,12 @@
       return reply(request, "verified", { tabs: await allTabs() });
     }
     if (request.operation === "open") {
-      if (!payload.url) {
-        return reply(request, "blocked", { reason: "Safari web_open requires an exact URL" });
-      }
       let tab;
       try {
         if (payload.newWindow) {
+          if (!payload.url) {
+            return reply(request, "blocked", { reason: "opening a new Safari window requires an exact URL" });
+          }
           if (!browser.windows?.create) {
             return reply(request, "refused", { code: "ACTION_UNSUPPORTED", reason: "this Safari version cannot create extension windows" });
           }
@@ -216,7 +216,7 @@
             { name: "snapshot" }, true
           );
           return { ...response, windowId: created.id, windowLease: lease, ownedWindow: true };
-        } else {
+        } else if (payload.url) {
           const matches = (await browser.tabs.query({})).filter(
             (candidate) => candidate.url && normalized(candidate.url) === normalized(payload.url)
           );
@@ -226,6 +226,18 @@
             });
           }
           tab = matches[0] || await browser.tabs.create({ url: payload.url, active: false });
+        } else {
+          const tabs = await browser.tabs.query({});
+          const focused = await focusedWindowId();
+          const selected = tabs.filter((candidate) => candidate.active
+            && (focused === null || candidate.windowId === focused));
+          if (selected.length !== 1) {
+            return reply(request, "blocked", {
+              code: "SELECTED_TAB_AMBIGUOUS",
+              reason: "could not identify one selected Safari tab; pass its exact URL"
+            });
+          }
+          [tab] = selected;
         }
       } catch (error) {
         return reply(request, "failed", { reason: String(error) });
@@ -262,15 +274,11 @@
       const tabs = await browser.tabs.query({});
       const tab = tabs.find((candidate) => candidate.id === payload.tabId);
       if (!tab) return reply(request, "blocked", { code: "BOUND_TAB_CLOSED", reason: "bound Safari tab no longer exists" });
-      const owner = ownership(tab, payload);
-      if (!owner.ownedWindow) {
-        return reply(request, "refused", {
-          code: "BACKGROUND_WINDOW_REQUIRED",
-          reason: "Safari screenshots require a Hunch-owned background window; reopen with new_window=true"
-        });
-      }
       if (!tab.active) {
-        return reply(request, "blocked", { code: "BOUND_TAB_INACTIVE", reason: "bound Safari tab is not active in its background window" });
+        return reply(request, "blocked", {
+          code: "BOUND_TAB_INACTIVE",
+          reason: "Safari can screenshot only the selected tab in a window; select it or bind the currently selected tab"
+        });
       }
       try {
         const view = await sendToBoundTab(request, { name: "snapshot" });
@@ -323,16 +331,6 @@
         });
       }
       lastCaptures.delete(payload.tabId);
-      if (mapped.some((action) => ["click_xy", "drag"].includes(action.action))) {
-        const tabs = await browser.tabs.query({});
-        const tab = tabs.find((candidate) => candidate.id === payload.tabId);
-        if (!tab || !ownership(tab, payload).ownedWindow) {
-          return reply(request, "refused", {
-            code: "BACKGROUND_WINDOW_REQUIRED",
-            reason: "Safari coordinate actions require a Hunch-owned background window"
-          });
-        }
-      }
       const beforeTabs = await browser.tabs.query({});
       const result = await sendToBoundTab(request, {
         name: "act", actions: mapped, postcondition: payload.postcondition || null

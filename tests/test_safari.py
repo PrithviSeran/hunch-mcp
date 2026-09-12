@@ -133,7 +133,8 @@ class FakeBridge:
             return {"status": "verified", "extensionEnabled": True}
         if operation == "open":
             return {"protocol": 1, "id": "ignored", "status": "verified", "tabId": 41,
-                    "windowId": 8, "windowLease": "lease-1", "ownedWindow": True,
+                    "windowId": 8, "windowLease": "lease-1",
+                    "ownedWindow": bool(payload and payload.get("newWindow")),
                     "url": "https://example.com/form", "generation": "doc-1", "elementCount": 2}
         if operation == "snapshot":
             return {"status": "verified", "tabId": 41, "url": "https://example.com/form",
@@ -170,6 +171,16 @@ def test_safari_computer_pins_every_mutation_to_tab_url_origin_and_generation(mo
     assert payload["expectedUrl"] == "https://example.com/form"
     assert payload["expectedOrigin"] == "https://example.com"
     assert payload["generation"] == "doc-1"
+    assert computer.capture_screenshot() == "aGVsbG8="
+
+
+def test_safari_computer_can_bind_selected_tab_without_url(monkeypatch):
+    bridge = FakeBridge()
+    computer = SafariComputer(client=bridge)
+    monkeypatch.setattr("hunch.safari.prepare_bundled_companion",
+                        lambda: type("Install", (), {"state": "ready"})())
+    assert "selected tab" in computer.open("")
+    assert bridge.calls[-1] == ("open", {"url": "", "newWindow": False})
     assert computer.capture_screenshot() == "aGVsbG8="
 
 

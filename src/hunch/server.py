@@ -242,7 +242,9 @@ def web_open(app: str = "Google Chrome", url: str = "", isolated: bool = False,
     your view. This is the way to drive these apps simultaneously with the user (AX can't).
     Then use web_snapshot / web_act.
 
-    `app` is the BROWSER/app name — "Safari" uses the user's existing tabs and login;
+    `app` is the BROWSER/app name — "Safari" uses the user's existing tabs and login. Omit `url`
+    to bind the currently selected Safari tab without navigating it; pass an exact URL to bind or
+    open that page;
     examples for CDP are "Google Chrome" (the default), "Arc", "Brave",
     "Microsoft Edge", or an Electron app like "Discord"/"Slack"/"Spotify". To open a WEBSITE
     (Gmail, etc.) DON'T pass the site as `app` — keep `app` as the browser and put the site
@@ -260,8 +262,9 @@ def web_open(app: str = "Google Chrome", url: str = "", isolated: bool = False,
     `[eN] tab "Terminal"` element (a trailing "\\n" runs the command); key ctrl+` opens a terminal
     if none is shown.
 
-    `new_window=True` asks Safari to create a dedicated unfocused window. It is required for
-    Safari web_screenshot and coordinate actions so the user's selected Safari tab is untouched."""
+    `new_window=True` asks Safari to create a dedicated unfocused window. Safari may refuse when
+    the OS cannot create that window without changing focus. A selected bound tab supports
+    web_screenshot and coordinate actions without shared cursor or keyboard input."""
     return _run("web_open", app=app, url=url, isolated=isolated, new_window=new_window)
 
 
@@ -297,7 +300,7 @@ def web_snapshot() -> str:
 
 @mcp.tool()
 def web_screenshot() -> Image:
-    """PNG of the CDP-controlled page or Hunch-owned Safari background window (focus-free) — for genuinely visual web
+    """PNG of the CDP-controlled page or selected Safari tab (focus-free) — for genuinely visual web
     content the tree can't convey (a chart, canvas, image, rendered PDF). Use THIS, never the OS
     `screenshot` tool, for anything in the background browser: the OS one grabs the physical screen
     and would capture the user's own foreground window instead of this page. Call web_open first."""

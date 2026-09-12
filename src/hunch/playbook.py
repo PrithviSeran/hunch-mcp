@@ -37,13 +37,13 @@ NATIVE OBSERVATION AND ACTION
   prerequisite and inspect again instead of continuing an action batch with invalid assumptions.
 
 CDP
-- web_open(app="Safari", url=..., new_window=True) creates a dedicated unfocused Safari window;
-  use it when the user wants their current Safari window left alone or when visual control is needed.
-  Without new_window it binds an exact existing tab or opens an inactive tab. Commands are pinned to
+- web_open(app="Safari") binds the currently selected Safari tab without navigation. Supplying an
+  exact url binds that tab or opens it inactive. new_window=True requests a dedicated unfocused
+  window, but Safari may refuse if the OS would change focus. Commands are pinned to
   window, tab, URL, origin, and document generation. Missing extension or website access is a blocked
   permission state, not a reason to fall back to shared AX input.
-- Safari supports snapshot, ref click/type/check, submit, tabs, navigation, and—in a Hunch-owned
-  background window—web_screenshot plus click_xy/drag. Coordinate actions use page-side DOM/pointer
+- Safari supports snapshot, ref click/type/check, submit, tabs, navigation, and—when the bound tab
+  is selected in its window—web_screenshot plus click_xy/drag. Coordinate actions use page-side DOM/pointer
   events and may be unverified on canvas controls; they never use the shared cursor or keyboard.
 - For Chromium/Electron, web_open starts/reuses a verified dedicated instance. Its profile may differ from the user's
   current app. An unrelated listening port is not permission to attach to or restart that process.

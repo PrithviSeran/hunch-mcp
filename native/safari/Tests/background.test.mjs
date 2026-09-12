@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import test from "node:test";
 
 let tabs = [
+  { id: 6, windowId: 1, title: "Selected", url: "https://example.com/current", active: true },
   { id: 7, windowId: 2, title: "Job", url: "https://job-boards.greenhouse.io/embed/job_app?token=8168315&for=coinbase", active: false }
 ];
 let windows = [{ id: 1, focused: true }, { id: 2, focused: false }];
@@ -56,11 +57,25 @@ test("unwraps Safari native-message envelopes", () => {
 });
 
 test("reuses exactly one existing Safari tab without activating it", async () => {
-  const request = { protocol: 1, id: "request-1", operation: "open", payload: { url: tabs[0].url } };
+  const request = { protocol: 1, id: "request-1", operation: "open", payload: { url: tabs[1].url } };
   const result = await handle(request);
   assert.equal(result.status, "verified");
   assert.equal(result.tabId, 7);
   assert.equal(result.generation, "doc-1");
+});
+
+test("binds and screenshots the selected Safari tab without navigation", async () => {
+  const result = await handle({ protocol: 1, id: "request-selected", operation: "open", payload: {} });
+  assert.equal(result.status, "verified");
+  assert.equal(result.tabId, 6);
+  assert.equal(result.ownedWindow, false);
+
+  const shot = await handle({ protocol: 1, id: "request-selected-shot", operation: "act",
+    payload: { tabId: result.tabId, windowId: result.windowId,
+      expectedUrl: result.url, expectedOrigin: "https://example.com", generation: result.generation,
+      captureScreenshot: true } });
+  assert.equal(shot.status, "verified");
+  assert.equal(shot.mimeType, "image/png");
 });
 
 test("creates and owns an unfocused Safari window", async () => {
@@ -101,8 +116,8 @@ test("maps screenshot pixels into CSS viewport coordinates", () => {
 });
 
 test("refuses an ambiguous exact URL", async () => {
-  tabs = [...tabs, { ...tabs[0], id: 8 }];
-  const request = { protocol: 1, id: "request-2", operation: "open", payload: { url: tabs[0].url } };
+  tabs = [...tabs, { ...tabs[1], id: 8 }];
+  const request = { protocol: 1, id: "request-2", operation: "open", payload: { url: tabs[1].url } };
   const result = await handle(request);
   assert.equal(result.status, "blocked");
   assert.match(result.reason, /found 2/);

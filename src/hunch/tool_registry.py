@@ -89,10 +89,11 @@ BASE_TOOLS = [
     {"name": "web_open",
      "description": ("Open Safari through the Hunch extension, or a Chromium/Electron app over "
                      "CDP, for FOCUS-FREE background control. `app` is the browser (default "
-                     "'Google Chrome'; use 'Safari' for the user's existing Safari session); "
-                     "put a website in `url`. Chromium uses the persistent Hunch "
-                     "profile; call web_login once if it isn't signed in. For Safari, new_window=true "
-                     "creates the dedicated unfocused window required by web_screenshot/click_xy. CODE EDITORS: app="
+                     "'Google Chrome'; use 'Safari' for the user's existing Safari session). "
+                     "For Safari, omit `url` to bind the currently selected tab, or pass an exact "
+                     "URL to bind/open it; web_screenshot works when the bound tab is selected in "
+                     "its window. Chromium uses the persistent Hunch profile; call web_login once "
+                     "if it isn't signed in. CODE EDITORS: app="
                      "'Cursor'/'Visual Studio Code'/'VSCodium'/'Windsurf' with the FOLDER/FILE in "
                      "`url` opens a dedicated background editor window whose integrated TERMINAL you "
                      "can type into (AX can't write it) — snapshot, then web_act 'type' on the "
@@ -108,7 +109,7 @@ BASE_TOOLS = [
      "description": "Read the bound Safari or CDP page as an accessibility tree. Call web_open first.",
      "input_schema": _obj()},
     {"name": "web_screenshot",
-     "description": ("PNG of the bound CDP page or Hunch-owned Safari background window "
+     "description": ("PNG of the bound CDP page or selected Safari tab "
                      "(focus-free) — for visual web content the tree can't convey. Use this, never "
                      "the OS screenshot, for the background browser."),
      "input_schema": _obj()},
