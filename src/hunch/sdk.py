@@ -542,7 +542,7 @@ class Web:
         return {"status": "verified", "scope": "endpoint attachment; requested UI effect unverified",
                 "target": identity, "renderer": session.target_id}
 
-    def open(self, url="", app="Google Chrome", isolated=False):
+    def open(self, url="", app="Google Chrome", isolated=False, new_window=False):
         """Open a Chromium browser (or Electron app) for focus-free control. Uses the
         persistent, dedicated Hunch profile (isolated=True: throwaway sandbox profile).
         If the profile isn't signed into the site, the returned string says so — call
@@ -559,7 +559,7 @@ class Web:
                         "sessions are not supported. Use Google Chrome with isolated=true.")
             self.close()
             self._computer = SafariComputer(allowed_origins=self._h.allowed_web_origins)
-            return self._computer.open(url)
+            return self._computer.open(url, new_window=new_window)
 
         from .cdp import _is_editor
         if _is_editor(app):
@@ -770,9 +770,7 @@ class Web:
         return self._h._redact(self._computer.act(actions))
 
     def screenshot(self):
-        """The CDP page itself as PNG bytes (focus-free — works in the background)."""
-        if getattr(self._computer, "backend", "") == "safari":
-            raise HunchError("Safari page screenshots are not supported in the MCP beta; use web_snapshot")
+        """The bound web page as PNG bytes without bringing its window forward."""
         if self._h._secrets:
             raise HunchError("screenshot blocked after secret fill; text redaction does not protect pixels")
         data = self._session().capture_screenshot()
@@ -800,6 +798,7 @@ class Web:
         if not tabs:
             return "no open tabs"
         return "\n".join(f"[{t['index']}]{'*' if t['current'] else ' '} {t['title']} — {t['url']}"
+                         + (f"   [window: {t['windowId']}]" if t.get("windowId") is not None else "")
                          for t in tabs)
 
     def switch_tab(self, index):

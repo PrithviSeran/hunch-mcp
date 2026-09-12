@@ -32,7 +32,16 @@ def test_client_authenticates_and_validates_receipt(tmp_path):
     assert seen[0]["operation"] == "status"
     assert seen[0]["token"] == (tmp_path / "token").read_text().strip()
     schema_path = Path(__file__).resolve().parents[1] / "schemas/safari-bridge-v1.schema.json"
-    Draft202012Validator(json.loads(schema_path.read_text()), format_checker=FormatChecker()).validate(seen[0])
+    validator = Draft202012Validator(json.loads(schema_path.read_text()), format_checker=FormatChecker())
+    validator.validate(seen[0])
+    client.request("open", {"url": "https://example.com", "newWindow": True})
+    validator.validate(seen[-1])
+    client.request("act", {
+        "tabId": 41, "windowId": 8, "windowLease": "lease-1",
+        "expectedUrl": "https://example.com", "expectedOrigin": "https://example.com",
+        "generation": "doc-1", "captureScreenshot": True,
+    })
+    validator.validate(seen[-1])
 
     bad = SafariBridgeClient(token_path=tmp_path / "other",
                              transport=lambda request: {"protocol": 99, "id": request["id"]})
@@ -123,12 +132,18 @@ class FakeBridge:
             return {"status": "verified", "extensionEnabled": True}
         if operation == "open":
             return {"protocol": 1, "id": "ignored", "status": "verified", "tabId": 41,
+                    "windowId": 8, "windowLease": "lease-1", "ownedWindow": True,
                     "url": "https://example.com/form", "generation": "doc-1", "elementCount": 2}
         if operation == "snapshot":
             return {"status": "verified", "tabId": 41, "url": "https://example.com/form",
                     "generation": "doc-1", "tree": "[e1] textbox name=\"Name\""}
+        if operation == "act" and payload.get("captureScreenshot"):
+            return {"status": "verified", "tabId": 41, "windowId": 8,
+                    "windowLease": "lease-1", "ownedWindow": True, "url": "https://example.com/form",
+                    "generation": "doc-1", "mimeType": "image/png", "data": "aGVsbG8="}
         if operation == "act":
-            return {"status": "verified", "tabId": 41, "url": "https://example.com/form",
+            return {"status": "verified", "tabId": 41, "windowId": 8,
+                    "windowLease": "lease-1", "ownedWindow": True, "url": "https://example.com/form",
                     "generation": "doc-1", "tree": "[e1] textbox filled=true",
                     "receipts": [{"status": "verified"}]}
         if operation == "tabs":
@@ -142,15 +157,19 @@ def test_safari_computer_pins_every_mutation_to_tab_url_origin_and_generation(mo
     computer = SafariComputer(client=bridge, allowed_origins=("https://example.com",))
     monkeypatch.setattr("hunch.safari.prepare_bundled_companion",
                         lambda: type("Install", (), {"state": "ready"})())
-    assert "focus-free" in computer.open("https://example.com/form")
+    assert "background window" in computer.open("https://example.com/form", new_window=True)
+    assert bridge.calls[-1] == ("open", {"url": "https://example.com/form", "newWindow": True})
     assert computer.snapshot().startswith("[e1]")
     assert "filled=true" in computer.act([{"action": "type", "ref": "e1", "text": "Ada"}])
     operation, payload = bridge.calls[-1]
     assert operation == "act"
     assert payload["tabId"] == 41
+    assert payload["windowId"] == 8
+    assert payload["windowLease"] == "lease-1"
     assert payload["expectedUrl"] == "https://example.com/form"
     assert payload["expectedOrigin"] == "https://example.com"
     assert payload["generation"] == "doc-1"
+    assert computer.capture_screenshot() == "aGVsbG8="
 
 
 def test_open_prompts_when_safari_extension_is_not_enabled(tmp_path, monkeypatch):
@@ -208,7 +227,7 @@ def test_sdk_routes_safari_without_changing_the_public_web_tools(monkeypatch):
             self.session = self
             self.target_id = 2
 
-        def open(self, url):
+        def open(self, url, new_window=False):
             return f"safari:{url}"
 
         def close(self):

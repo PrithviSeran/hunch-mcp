@@ -7,7 +7,7 @@ output_root="${HUNCH_SAFARI_OUTPUT_DIR:-$repo_root/native/dist}"
 app="$output_root/Hunch Safari.app"
 extension="$app/Contents/PlugIns/Hunch.appex"
 version="${HUNCH_SAFARI_VERSION:-0.1.0}"
-build="${HUNCH_SAFARI_BUILD:-6}"
+build="${HUNCH_SAFARI_BUILD:-7}"
 
 cd "$safari_root"
 swift build -c release --product HunchSafariApp

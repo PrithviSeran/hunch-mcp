@@ -25,6 +25,8 @@ from .gate import HunchError, WebNotOpen
 
 
 PROTOCOL_VERSION = 1
+MAX_REQUEST_BYTES = 4 * 1024 * 1024
+MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 COMPANION_BUNDLE = "Hunch Safari.app"
 DEFAULT_STATE_DIR = Path(os.path.expanduser(
     "~/Library/Containers/com.tryhunch.safari/Data/Library/Application Support/Hunch"
@@ -222,7 +224,7 @@ class SafariBridgeClient:
             "operation": operation,
             "payload": payload or {},
         }
-        if len(json.dumps(request).encode()) > 4 * 1024 * 1024:
+        if len(json.dumps(request).encode()) > MAX_REQUEST_BYTES:
             raise HunchError("Safari bridge request exceeded 4 MiB")
         response = self._transport(request)
         if not isinstance(response, dict):
@@ -256,8 +258,8 @@ class SafariBridgeClient:
                             if not part:
                                 break
                             chunks.extend(part)
-                            if len(chunks) > 4 * 1024 * 1024:
-                                raise HunchError("Safari companion response exceeded 4 MiB")
+                            if len(chunks) > MAX_RESPONSE_BYTES:
+                                raise HunchError("Safari companion response exceeded 16 MiB")
                     break
                 except HunchError:
                     raise
@@ -294,6 +296,9 @@ class SafariComputer:
         self.allowed_origins = tuple(allowed_origins)
         self.session = self
         self.target_id = None
+        self.window_id = None
+        self.window_lease = ""
+        self.owned_window = False
         self._url = ""
         self._generation = ""
 
@@ -310,7 +315,7 @@ class SafariComputer:
             raise HunchError("Safari companion returned an unknown receipt status")
         return response
 
-    def open(self, url):
+    def open(self, url, new_window=False):
         from .destinations import navigation_refusal
         refusal = navigation_refusal(url, self.allowed_origins) if url else ""
         if refusal:
@@ -318,22 +323,27 @@ class SafariComputer:
         install = prepare_bundled_companion()
         if install.state != "unavailable":
             offer_safari_onboarding(client=self.client)
-        response = self._call("open", {"url": url})
+        response = self._call("open", {"url": url, "newWindow": bool(new_window)})
         if response.get("status") != "verified":
             return f"{response.get('status', 'blocked').upper()}: {self._reason(response)}"
         self._bind(response)
         installed = "" if install.state == "ready" else f"; companion {install.state}"
-        return f"opened Safari tab focus-free ({response.get('elementCount', 0)} elements{installed})"
+        surface = "background window" if response.get("ownedWindow") else "tab"
+        return f"opened Safari {surface} focus-free ({response.get('elementCount', 0)} elements{installed})"
 
     def _bind(self, response):
         self.target_id = response.get("tabId")
+        self.window_id = response.get("windowId", self.window_id)
+        self.window_lease = response.get("windowLease", self.window_lease)
+        self.owned_window = response.get("ownedWindow", self.owned_window)
         self._url = response.get("url", self._url)
         self._generation = response.get("generation", self._generation)
 
     def _binding(self):
         if self.target_id is None or not self._url or not self._generation:
             raise WebNotOpen("no bound Safari tab — call web_open(app='Safari', url=...) first")
-        return {"tabId": self.target_id, "expectedUrl": self._url,
+        return {"tabId": self.target_id, "windowId": self.window_id,
+                "windowLease": self.window_lease, "expectedUrl": self._url,
                 "expectedOrigin": _origin(self._url), "generation": self._generation}
 
     def snapshot(self):
@@ -346,7 +356,7 @@ class SafariComputer:
     def act(self, actions, detailed=False, postcondition=None):
         if len(actions) > 50:
             return "REFUSED: Safari actions are limited to 50 per call"
-        supported = {"click", "check", "type", "navigate"}
+        supported = {"click", "check", "type", "navigate", "click_xy", "drag", "key"}
         unknown = [action.get("action") for action in actions if action.get("action") not in supported]
         if unknown:
             return "UNSUPPORTED: Safari MCP beta does not support action " + repr(unknown[0])
@@ -364,12 +374,23 @@ class SafariComputer:
         prefix = "PERFORMED_UNVERIFIED:\n" if response.get("status") == "performed_unverified" else ""
         return prefix + response.get("tree", response.get("summary", "verified"))
 
+    def capture_screenshot(self):
+        response = self._call("act", {**self._binding(), "captureScreenshot": True})
+        if response.get("status") != "verified":
+            raise HunchError(f"{response.get('status', 'failed').upper()}: {self._reason(response)}")
+        self._bind(response)
+        data = response.get("data", "")
+        if not data:
+            raise HunchError("Safari companion returned an empty screenshot")
+        return data
+
     def tabs(self):
         response = self._call("tabs")
         return response.get("tabs", []) if response.get("status") == "verified" else response
 
     def switch_tab(self, index):
-        response = self._call("switch_tab", {"index": index})
+        response = self._call("switch_tab", {"index": index, "windowId": self.window_id,
+                                               "windowLease": self.window_lease})
         if response.get("status") != "verified":
             return f"{response.get('status', 'blocked').upper()}: {self._reason(response)}"
         self._bind(response)

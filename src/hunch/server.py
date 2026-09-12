@@ -234,7 +234,8 @@ def focus_app(name: str, reason: str = "") -> str:
 
 
 @mcp.tool()
-def web_open(app: str = "Google Chrome", url: str = "", isolated: bool = False) -> str:
+def web_open(app: str = "Google Chrome", url: str = "", isolated: bool = False,
+             new_window: bool = False) -> str:
     """Open Safari through the Hunch extension, or Chromium/Electron through CDP, for
     FOCUS-FREE background control — read,
     click, and type in the BACKGROUND without stealing your cursor/keyboard or switching
@@ -257,8 +258,11 @@ def web_open(app: str = "Google Chrome", url: str = "", isolated: bool = False) 
     (separate from the user's own editor), letting you type into its integrated TERMINAL — which
     the AX tree can read but never write. After opening: web_snapshot, then web_act a 'type' on the
     `[eN] tab "Terminal"` element (a trailing "\\n" runs the command); key ctrl+` opens a terminal
-    if none is shown."""
-    return _run("web_open", app=app, url=url, isolated=isolated)
+    if none is shown.
+
+    `new_window=True` asks Safari to create a dedicated unfocused window. It is required for
+    Safari web_screenshot and coordinate actions so the user's selected Safari tab is untouched."""
+    return _run("web_open", app=app, url=url, isolated=isolated, new_window=new_window)
 
 
 @mcp.tool()
@@ -284,7 +288,7 @@ def web_snapshot() -> str:
 
     If the tree shows only the NAV/SIDEBAR/header and the main content is missing, the page just
     hasn't rendered it into view yet (lazy-loaded / below the fold / still hydrating). SCROLL and
-    re-read: web_act [{"action":"key","key":"PageDown"}] (focus-free via CDP), or wait and
+    re-read: web_act [{"action":"key","key":"PageDown"}] (focus-free), or wait and
     web_snapshot again. NEVER use the OS `screenshot` tool to see a web page — it captures the
     physical frontmost screen, which for a BACKGROUND CDP window is the user's OWN window, not this
     page. To see the page as pixels focus-free, use `web_screenshot`."""
@@ -293,7 +297,7 @@ def web_snapshot() -> str:
 
 @mcp.tool()
 def web_screenshot() -> Image:
-    """PNG of the CDP-controlled page ITSELF (focus-free, via CDP) — for genuinely visual web
+    """PNG of the CDP-controlled page or Hunch-owned Safari background window (focus-free) — for genuinely visual web
     content the tree can't convey (a chart, canvas, image, rendered PDF). Use THIS, never the OS
     `screenshot` tool, for anything in the background browser: the OS one grabs the physical screen
     and would capture the user's own foreground window instead of this page. Call web_open first."""
@@ -348,7 +352,7 @@ def web_tabs() -> str:
 
 @mcp.tool()
 def web_switch_tab(index: int) -> str:
-    """Switch the CDP session to a specific browser tab by index (see web_tabs), then web_snapshot
+    """Switch the bound Safari or CDP session to a specific browser tab by index (see web_tabs), then web_snapshot
     to read it. Use when auto-follow landed on the wrong tab, or to return to an earlier one."""
     return _run("web_switch_tab", index=index)
 
