@@ -26,7 +26,7 @@ class _FakeHunch:
 
 # ── provider registry ─────────────────────────────────────────────────────────
 def test_provider_registry():
-    assert set(PROVIDERS) == {"claude", "codex"}
+    assert set(PROVIDERS) == {"claude", "codex", "ollama"}
     assert isinstance(provider("claude"), ClaudeProvider)
     assert isinstance(provider("codex"), CodexProvider)
 
