@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import plistlib
 import shutil
 import stat
 
@@ -241,9 +242,17 @@ def test_sdk_routes_safari_without_changing_the_public_web_tools(monkeypatch):
     assert hunch.web.open("https://example.com/form", app="Safari", isolated=True).startswith("REFUSED")
 
 
-def test_release_wheel_source_includes_notarized_companion():
+def test_release_wheel_source_includes_current_notarized_companion():
     from hunch.safari import _bundled_companion
     bundled = _bundled_companion()
     assert bundled is not None
-    info = bundled.joinpath("Contents", "Info.plist").read_text()
-    assert "com.tryhunch.safari" in info
+    with bundled.joinpath("Contents", "Info.plist").open("rb") as stream:
+        info = plistlib.load(stream)
+    assert info["CFBundleIdentifier"] == "com.tryhunch.safari"
+    assert info["CFBundleVersion"] == "7"
+
+    root = Path(__file__).resolve().parents[1]
+    packaged_resources = bundled / "Contents/PlugIns/Hunch.appex/Contents/Resources"
+    source_resources = root / "native/safari/Extension/Resources"
+    for name in ("background.js", "content.js", "manifest.json"):
+        assert packaged_resources.joinpath(name).read_bytes() == source_resources.joinpath(name).read_bytes()
