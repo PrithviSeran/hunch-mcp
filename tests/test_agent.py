@@ -272,6 +272,28 @@ def test_dispatch_core_screenshot_bytes():
     assert r["content"][0]["source"]["media_type"] == "image/png"
 
 
+def test_dispatch_core_keeps_safari_on_extension_surface():
+    h = _FakeHunch()
+    h.web = types.SimpleNamespace(_computer=types.SimpleNamespace(backend="safari"))
+
+    for name, args in (
+        ("snapshot", {}),
+        ("snapshot", {"app": "Safari"}),
+        ("act", {"actions": []}),
+        ("screenshot", {}),
+        ("app_target", {"app": "Safari"}),
+        ("focus_app", {"name": "Safari", "reason": "fallback"}),
+    ):
+        value, is_error = agent_mod._dispatch_core(h, name, args)
+        assert value.startswith("WRONG SURFACE:")
+        assert "web_snapshot" in value
+        assert is_error is False
+
+    value, is_error = agent_mod._dispatch_core(h, "snapshot", {"app": "Finder"})
+    assert value == "tree of Finder"
+    assert is_error is False
+
+
 def test_mcp_image_shape():
     """The subscription formatter uses the MCP shape (data/mimeType — NOT anthropic's
     source dict)."""

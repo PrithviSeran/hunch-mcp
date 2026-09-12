@@ -165,6 +165,30 @@ def _dispatch_core(mac, name, args):
     fn = _DISPATCH.get(name)
     if fn is None:
         return f"unknown tool {name}", True
+    # Once Safari has been opened through the extension, native AX/vision is the
+    # wrong surface: it sees browser chrome or the physical foreground, not the
+    # bound page.  Models occasionally "recover" from a perfectly good web_open
+    # by targeting Safari with snapshot/act/screenshot; refuse that silent layer
+    # downgrade so they stay on web_snapshot/web_act/web_screenshot.
+    web = getattr(mac, "web", None)
+    web_computer = getattr(web, "_computer", None)
+    if getattr(web_computer, "backend", None) == "safari":
+        requested_app = str((args or {}).get("app", "")).strip().lower()
+        requested_name = str((args or {}).get("name", "")).strip().lower()
+        safari_names = {"safari", "apple safari"}
+        wrong_surface = (
+            name in {"act", "screenshot"}
+            or (name in {"snapshot", "find"} and (not requested_app or requested_app in safari_names))
+            or (name in {"app_target", "app_capabilities"} and requested_app in safari_names)
+            or (name in {"focus_app", "launch_app"} and requested_name in safari_names)
+        )
+        if wrong_surface:
+            return (
+                "WRONG SURFACE: Safari is connected through the Hunch extension. "
+                "Use web_snapshot, web_act, or web_screenshot on the bound page; do not "
+                "fall back to native snapshot, act, screenshot, app targeting, or focus.",
+                False,
+            )
     redact = getattr(mac, "_redact", lambda value: value)
     try:
         from .tool_registry import validate_arguments
