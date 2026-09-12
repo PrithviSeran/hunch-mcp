@@ -89,15 +89,17 @@ BASE_TOOLS = [
     {"name": "web_open",
      "description": ("Open Safari through the Hunch extension, or a Chromium/Electron app over "
                      "CDP, for FOCUS-FREE background control. `app` is the browser (default "
-                     "'Google Chrome'; use 'Safari' for the user's existing Safari session); "
-                     "put a website in `url`. Chromium uses the persistent Hunch "
-                     "profile; call web_login once if it isn't signed in. CODE EDITORS: app="
+                     "'Google Chrome'; use 'Safari' for the user's existing Safari session). "
+                     "For Safari, omit `url` to bind the currently selected tab, or pass an exact "
+                     "URL to bind/open it; web_screenshot works when the bound tab is selected in "
+                     "its window. Chromium uses the persistent Hunch profile; call web_login once "
+                     "if it isn't signed in. CODE EDITORS: app="
                      "'Cursor'/'Visual Studio Code'/'VSCodium'/'Windsurf' with the FOLDER/FILE in "
                      "`url` opens a dedicated background editor window whose integrated TERMINAL you "
                      "can type into (AX can't write it) — snapshot, then web_act 'type' on the "
                      "'Terminal' tab (trailing newline runs the command); key ctrl+` opens one."),
      "input_schema": _obj({"app": {"type": "string"}, "url": {"type": "string"},
-                           "isolated": {"type": "boolean"}})},
+                           "isolated": {"type": "boolean"}, "new_window": {"type": "boolean"}})},
     {"name": "web_login",
      "description": ("Open a background, banner-tagged window for the HUMAN to sign in once (Hunch "
                      "never sees the password); the login then persists. Uses the configured "
@@ -107,8 +109,9 @@ BASE_TOOLS = [
      "description": "Read the bound Safari or CDP page as an accessibility tree. Call web_open first.",
      "input_schema": _obj()},
     {"name": "web_screenshot",
-     "description": ("PNG of the CDP page itself (focus-free) — for visual web content the tree "
-                     "can't convey. Use this, never the OS screenshot, for the background browser."),
+     "description": ("PNG of the bound CDP page or selected Safari tab "
+                     "(focus-free) — for visual web content the tree can't convey. Use this, never "
+                     "the OS screenshot, for the background browser."),
      "input_schema": _obj()},
     {"name": "web_act",
      "description": ("Run focus-free page actions, then get the updated tree. Verbs: click (by ref), "
@@ -121,10 +124,10 @@ BASE_TOOLS = [
                      "Last resort — don't restart a merely-slow page; wait and re-snapshot first."),
      "input_schema": _obj({"app": {"type": "string"}, "url": {"type": "string"}})},
     {"name": "web_tabs",
-     "description": "List the open tabs in the bound Safari or CDP session.",
+     "description": "List open tabs in the bound Safari or CDP session, including Safari window identity.",
      "input_schema": _obj()},
     {"name": "web_switch_tab",
-     "description": "Switch the CDP session to a tab by index (see web_tabs), then web_snapshot.",
+     "description": "Switch the bound Safari or CDP session to a tab by index, then web_snapshot.",
      "input_schema": _obj({"index": {"type": "integer"}}, ["index"])},
     {"name": "list_credentials",
      "description": ("List the service NAMES the user saved credentials for (names + kind only, "

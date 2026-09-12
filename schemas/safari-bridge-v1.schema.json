@@ -8,6 +8,8 @@
       "required": ["tabId", "expectedUrl", "expectedOrigin", "generation"],
       "properties": {
         "tabId": { "type": "integer" },
+        "windowId": { "type": ["integer", "null"] },
+        "windowLease": { "type": "string" },
         "expectedUrl": { "type": "string", "format": "uri", "pattern": "^https?://" },
         "expectedOrigin": { "type": "string", "format": "uri", "pattern": "^https?://" },
         "generation": { "type": "string", "minLength": 1 }
@@ -27,7 +29,7 @@
         },
         {
           "type": "object",
-          "required": ["action", "ref", "text"],
+          "required": ["action", "text"],
           "properties": {
             "action": { "const": "type" },
             "ref": { "type": "string", "pattern": "^e[1-9][0-9]*$" },
@@ -42,6 +44,48 @@
             "action": { "const": "check" },
             "ref": { "type": "string", "pattern": "^e[1-9][0-9]*$" },
             "checked": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["action", "url"],
+          "properties": {
+            "action": { "const": "navigate" },
+            "url": { "type": "string", "format": "uri" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["action", "x", "y"],
+          "properties": {
+            "action": { "const": "click_xy" },
+            "x": { "type": "number" },
+            "y": { "type": "number" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["action", "from_x", "from_y", "to_x", "to_y"],
+          "properties": {
+            "action": { "const": "drag" },
+            "from_x": { "type": "number" },
+            "from_y": { "type": "number" },
+            "to_x": { "type": "number" },
+            "to_y": { "type": "number" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["action", "key"],
+          "properties": {
+            "action": { "const": "key" },
+            "ref": { "type": "string", "pattern": "^e[1-9][0-9]*$" },
+            "key": { "type": "string" },
+            "modifiers": { "type": "array", "items": { "type": "string" } }
           },
           "additionalProperties": false
         }
@@ -63,10 +107,25 @@
         "url": { "type": "string", "format": "uri" },
         "index": { "type": "integer", "minimum": 0 },
         "tabId": { "type": "integer" },
+        "windowId": { "type": ["integer", "null"] },
+        "windowLease": { "type": "string" },
+        "newWindow": { "type": "boolean" },
+        "captureScreenshot": { "type": "boolean" },
         "expectedUrl": { "type": "string", "format": "uri" },
         "expectedOrigin": { "type": "string", "format": "uri" },
         "generation": { "type": "string" },
-        "actions": { "type": "array", "items": { "$ref": "#/$defs/action" }, "maxItems": 50 }
+        "actions": { "type": "array", "items": { "$ref": "#/$defs/action" }, "maxItems": 50 },
+        "detailed": { "type": "boolean" },
+        "postcondition": {
+          "type": ["object", "null"],
+          "properties": {
+            "ref": { "type": "string", "pattern": "^e[1-9][0-9]*$" },
+            "field": { "enum": ["value", "title", "enabled", "selected", "expanded"] },
+            "equals": {}
+          },
+          "required": ["ref", "field", "equals"],
+          "additionalProperties": false
+        }
       },
       "additionalProperties": false
     }

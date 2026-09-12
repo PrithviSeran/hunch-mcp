@@ -36,13 +36,21 @@ NATIVE OBSERVATION AND ACTION
 - act returns a delta where possible; snapshot returns the full bounded view. Stop after a failed
   prerequisite and inspect again instead of continuing an action batch with invalid assumptions.
 
-CDP
-- web_open(app="Safari", url=...) binds the user's exact existing Safari tab through the Hunch
-  extension, or opens that URL in an inactive tab. Safari commands are pinned to tab, URL, origin,
-  and document generation; after navigation, snapshot again before acting. Missing extension or
-  website access is a blocked permission state, not a reason to fall back to shared AX input.
-- Safari beta supports snapshot, ref click/type/check, tabs, and navigation. It refuses submit
-  controls, secrets, file inputs, screenshots, coordinates, and key events explicitly.
+WEB EXTENSION AND CDP
+- Safari exposes both web extension tools and native Mac tools. Prefer web_snapshot/web_act
+  for page content and web_screenshot for the selected bound tab; use native snapshot/act
+  for browser chrome, dialogs, or operations the extension cannot perform. Opening Safari
+  through web_open does not disable either tool set. Keep their refs and targets separate.
+  A transport timeout is not evidence of disabled extensions or denied website access;
+  report the actual error and use web_tabs to inspect before retrying a possible mutation.
+- web_open(app="Safari") binds the currently selected Safari tab without navigation. Supplying an
+  exact url binds that tab or opens it inactive. new_window=True requests a dedicated unfocused
+  window, but Safari may refuse if the OS would change focus. Commands are pinned to
+  window, tab, URL, origin, and document generation. Missing extension or website access is a blocked
+  permission state, not a reason to fall back to shared AX input.
+- Safari supports snapshot, ref click/type/check, submit, tabs, navigation, and—when the bound tab
+  is selected in its window—web_screenshot plus click_xy/drag. Coordinate actions use page-side DOM/pointer
+  events and may be unverified on canvas controls; they never use the shared cursor or keyboard.
 - For Chromium/Electron, web_open starts/reuses a verified dedicated instance. Its profile may differ from the user's
   current app. An unrelated listening port is not permission to attach to or restart that process.
 - web_snapshot reads the selected renderer's accessibility semantics; CDP resolves refs to DOM nodes

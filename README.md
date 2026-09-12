@@ -31,6 +31,12 @@ never touches your screen:
 A gated last resort (`screenshot` + coordinate clicks/keystrokes) exists for apps whose
 accessibility tree is truly empty. It steals focus, so it asks you first.
 
+For focus-free visual work in Safari, open a dedicated extension-owned window with
+`web_open(..., app="Safari", new_window=True)`. `web_screenshot` captures that background
+window, and `web_act` can use the returned pixel coordinates without moving the shared mouse,
+keyboard, or foreground window. The extension remains necessary: it owns the isolated Safari
+window and dispatches renderer-local actions that a physical screen capture cannot.
+
 ## How it works (no server, no cloud)
 
 "MCP server" undersells how local this is. `hunch serve` is a plain Python process that your

@@ -4,7 +4,7 @@ import test from "node:test";
 
 globalThis.browser = undefined;
 const require = createRequire(import.meta.url);
-const { isSubmit, normalized, validateBinding } = require("../Extension/Resources/content.js");
+const { click, isSubmit, normalized, validateBinding } = require("../Extension/Resources/content.js");
 
 test("requires exact URL, origin, and generation before mutation", () => {
   const url = "https://job-boards.greenhouse.io/embed/job_app?token=8168315&for=coinbase";
@@ -16,11 +16,15 @@ test("requires exact URL, origin, and generation before mutation", () => {
   assert.equal(normalized(`${url}#apply`), url);
 });
 
-test("submission controls are refused by classification", () => {
+test("submission controls are identified and clicked", () => {
   const input = { matches: (selector) => selector.includes('input[type="submit"]'), tagName: "INPUT" };
   assert.equal(isSubmit(input), true);
-  const button = { matches: () => false, tagName: "BUTTON", type: "" };
+  let clicks = 0;
+  const button = { matches: () => false, tagName: "BUTTON", type: "", isConnected: true,
+    disabled: false, click: () => { clicks += 1; } };
   assert.equal(isSubmit(button), true);
+  assert.deepEqual(click(button), { status: "performed_unverified", effect: "submit" });
+  assert.equal(clicks, 1);
   const ordinary = { matches: () => false, tagName: "BUTTON", type: "button" };
   assert.equal(isSubmit(ordinary), false);
 });
