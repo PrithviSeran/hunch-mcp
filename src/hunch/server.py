@@ -147,8 +147,11 @@ def act(actions: list, reason: str = "", detailed: bool = False, postcondition: 
     Prefer the focus-free primitives. For a keyboard shortcut (⌘⌫ move-to-trash, ⌘S save,
     ⌘W close, ⌘N new, ⌘F find …) use a `menu` action with the menu-bar path instead of `key`
     — it runs the SAME command focus-free. Reserve `key` for things with no menu/field
-    equivalent (typing into a canvas, arrow-keys in a game). Use click_xy only when an element
-    isn't in the tree.
+    equivalent (typing into a native canvas, arrow-keys in a game). Use click_xy only when an
+    element isn't in the tree. These native no-ref actions use shared input and are refused in
+    simultaneous mode. For Safari page or canvas content, keep simultaneous mode ON and use
+    web_open → web_snapshot, then web_screenshot → web_act for anything absent from the tree;
+    Safari web_act coordinate/keyboard actions are window-routed and do not use shared input.
     NEVER reach for these keystrokes — each has a focus-free tree equivalent, and the keystroke
     just gets auto-refused in the background anyway:
       • SUBMIT / SEND / CONFIRM (Return, Enter, ⌘Return) → `click` the button by ref (Send, Open,
@@ -211,8 +214,10 @@ def simultaneous_mode(on: bool = True) -> str:
     """Turn simultaneous mode on/off. When ON, Hunch never steals your cursor/keyboard
     or switches your view: it reads apps WITHOUT bringing them forward, launches apps in
     the background, runs only the focus-free actions (click/select/set-a-field by ref),
-    and REFUSES shared-input actions (typed keystrokes, key combos, pixel clicks) that
-    would disrupt you. Background AX coverage is operation- and state-dependent,
+    and REFUSES only native `act` shared-input actions (typed keystrokes, key combos, pixel
+    clicks) that would disrupt you. Safari `web_screenshot` and window-routed `web_act`
+    canvas actions remain available: they target the bound background window without using
+    the shared cursor or keyboard. Background AX coverage is operation- and state-dependent,
     including in Electron apps. Turn OFF to let Hunch bring apps forward and use the
     full input set (for when you're away from the machine)."""
     return _run("simultaneous_mode", on=on)
@@ -305,7 +310,8 @@ def web_screenshot() -> Image:
     `screenshot` tool, for anything in the background browser: the OS one grabs the physical screen
     and would capture the user's own foreground window instead of this page.
     Safari captures include browser chrome and live canvas layers via ScreenCaptureKit.
-    Use coordinates from this exact image. Call web_open first."""
+    This is the final focus-free fallback for tree-invisible Safari canvas content and remains
+    available in simultaneous mode. Use coordinates from this exact image. Call web_open first."""
     return _run("web_screenshot")
 
 
@@ -321,7 +327,8 @@ def web_act(actions: list, detailed: bool = False, postcondition: dict | None = 
     native dropdown and hunt for the option; CDP can't open the OS popup, so use `type`.
     For a visual editor whose canvas has no element ref (Google Docs/Slides, drawing tools), call
     web_screenshot, click_xy at a screenshot coordinate, then `type` WITHOUT a ref to type at the
-    established focus. These renderer-local actions remain background/focus-free.
+    established focus. On Safari these are native window-routed actions, not generic native `act`;
+    they remain background/focus-free and available in simultaneous mode.
     To follow a link, CLICK it by ref — do NOT `navigate` to a guessed/constructed URL; only
     navigate to a URL the user gave you or that you read from the page (navigate refuses a host
     that doesn't resolve)."""

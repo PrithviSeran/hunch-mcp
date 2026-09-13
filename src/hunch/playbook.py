@@ -1,8 +1,19 @@
 """Model-facing runtime contract shared by MCP and provider backends."""
 
-HUNCH_PLAYBOOK = """Hunch controls a real, logged-in Mac. Prefer the most direct usable interface:
-OS APIs, declared application operations/Apple Events, CDP, native AX, then explicitly gated
-shared-screen input. Respect the user's chosen app/account and the host's background constraints.
+HUNCH_PLAYBOOK = """Hunch controls a real, logged-in Mac. Respect the user's chosen app/account
+and the host's background constraints.
+
+ACTION HIERARCHY — TRY IN THIS ORDER
+1. OS APIs and declared application operations/AppleScript.
+2. Native accessibility trees: snapshot/find, then ref-based act.
+3. Web semantic trees: Safari web extension or CDP via web_open, web_snapshot, and ref-based web_act.
+4. Native background vision/input for tree-invisible web canvases: web_screenshot, then web_act
+   click_xy/drag/key/type without a ref. On Safari these actions are routed to the bound window;
+   they do not use the shared cursor or keyboard and remain available in simultaneous mode.
+Do not treat a native act refusal as a web_act refusal. In particular, never ask to disable
+simultaneous mode for a Safari canvas before trying step 4. Physical-screen screenshot and native
+shared keyboard/mouse input are a separate gated foreground last resort; they are refused when
+simultaneous or host-enforced background mode is on.
 
 TARGETS AND CAPABILITIES
 - list_apps lists running apps. app_target inspects exact process identities and native windows;
@@ -27,7 +38,7 @@ NATIVE OBSERVATION AND ACTION
 - act supports click/select/right_click/type with a ref, menu paths, and window geometry.
   AX press/value writes can be accepted without taking effect. Verify value readback or changed
   panel/content before reporting task completion. A successful dispatch alone is unverified.
-- Native key, click_xy, drag, and type without a ref use the shared keyboard/cursor. An AX fallback
+- Native `act` key, click_xy, drag, and type without a ref use the shared keyboard/cursor. An AX fallback
   may also need shared input. These require execution-time authorization and are refused in
   background mode. A host-enforced background constraint cannot be weakened by simultaneous_mode.
 - Prefer open_file(path, app=...) to navigating Open/Save panels. Prefer menu paths to keyboard
@@ -37,9 +48,9 @@ NATIVE OBSERVATION AND ACTION
   prerequisite and inspect again instead of continuing an action batch with invalid assumptions.
 
 WEB EXTENSION AND CDP
-- Safari exposes both web extension tools and native Mac tools. Prefer web_snapshot/web_act
-  for page content and web_screenshot for the selected bound tab; use native snapshot/act
-  for browser chrome, dialogs, or operations the extension cannot perform. Opening Safari
+- Safari exposes both web extension tools and native Mac tools. Follow the action hierarchy:
+  try native AX for browser chrome and dialogs, then web_snapshot/ref-based web_act for page
+  content, then web_screenshot/window-routed web_act for tree-invisible canvases. Opening Safari
   through web_open does not disable either tool set. Keep their refs and targets separate.
   A transport timeout is not evidence of disabled extensions or denied website access;
   report the actual error and use web_tabs to inspect before retrying a possible mutation.

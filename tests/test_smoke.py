@@ -216,6 +216,21 @@ def test_playbook_covers_toggle_and_select_policy():
     assert "make at most one small native account probe" in pb
 
 
+def test_playbook_routes_actions_in_order_and_preserves_safari_background_input():
+    from hunch.playbook import HUNCH_PLAYBOOK
+    pb = HUNCH_PLAYBOOK
+    ordered = [
+        "1. OS APIs and declared application operations/AppleScript.",
+        "2. Native accessibility trees",
+        "3. Web semantic trees",
+        "4. Native background vision/input",
+    ]
+    positions = [pb.index(item) for item in ordered]
+    assert positions == sorted(positions)
+    assert "never ask to disable\nsimultaneous mode for a Safari canvas before trying step 4" in pb
+    assert "Do not treat a native act refusal as a web_act refusal" in pb
+
+
 def test_twin_process_warning_names_which_copy_the_tree_is(monkeypatch):
     """Hunch's CDP-driven Cursor and the user's own are two processes with one name: the AX
     tools can read one while web_* drives the other, both looking perfectly valid."""
