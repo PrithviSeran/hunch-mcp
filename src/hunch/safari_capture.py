@@ -9,6 +9,12 @@ import sys
 import time
 
 
+class CaptureError(RuntimeError):
+    def __init__(self, message, *, stage, domain=None, code=None):
+        super().__init__(message)
+        self.stage, self.domain, self.code = stage, domain, code
+
+
 def capture(window_id, pid):
     # Quartz must register CGImage with PyObjC BEFORE the ScreenCaptureKit callback.
     import Quartz
@@ -23,10 +29,12 @@ def capture(window_id, pid):
             Foundation.NSRunLoop.currentRunLoop().runUntilDate_(
                 Foundation.NSDate.dateWithTimeIntervalSinceNow_(.02))
         if key not in state:
-            raise RuntimeError('ScreenCaptureKit timed out')
+            raise CaptureError('ScreenCaptureKit timed out', stage=key)
         if state.get('error') is not None:
             error = state['error']
-            raise RuntimeError(f'ScreenCaptureKit {error.domain()} code {error.code()}: {error.localizedDescription()}')
+            raise CaptureError(
+                f'ScreenCaptureKit {error.domain()} code {error.code()}: {error.localizedDescription()}',
+                stage=key, domain=error.domain(), code=error.code())
     def content_done(content, error):
         state.update(content=content, error=error)
     SC.SCShareableContent.getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler_(
@@ -62,5 +70,6 @@ if __name__ == '__main__':
     try:
         print(json.dumps(capture(int(sys.argv[1]), int(sys.argv[2]))))
     except Exception as exc:
-        print(json.dumps({'error':str(exc)}))
+        print(json.dumps({'error':str(exc), 'stage':getattr(exc, 'stage', 'worker'),
+                          'domain':getattr(exc, 'domain', None), 'code':getattr(exc, 'code', None)}))
         sys.exit(1)

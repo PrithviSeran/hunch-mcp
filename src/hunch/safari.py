@@ -439,6 +439,9 @@ class SafariComputer:
 
     def capture_screenshot(self):
         from .safari_input import SafariInput
+        # An attempted refresh invalidates the old coordinate authorization even when
+        # the bridge or native capture fails. Never act using a pre-failure image.
+        self._capture = None
         response = self._call('snapshot', self._binding())
         if response.get("status") != "verified":
             raise HunchError(f"{response.get('status', 'failed').upper()}: {self._reason(response)}")

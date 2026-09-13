@@ -131,15 +131,39 @@ class SafariInput:
         self.guard()
 
     def screenshot(self):
-        self.guard(target=True)
-        result = subprocess.run([sys.executable, '-m', 'hunch.safari_capture',
-                                 str(self.window), str(self.pid)], capture_output=True, text=True, timeout=25)
-        try:
-            capture = json.loads(result.stdout)
-        except ValueError as exc:
-            raise HunchError('Safari capture worker failed; check Screen Recording permission') from exc
-        if result.returncode or capture.get('error'):
-            raise HunchError(capture.get('error', 'Safari capture worker failed'))
+        # Only a capture-start failure is retried. Each attempt uses a fresh worker and
+        # rechecks the target; permission failures and changed windows are not retried.
+        for attempt in range(2):
+            self.guard(target=True)
+            try:
+                result = subprocess.run([sys.executable, '-m', 'hunch.safari_capture',
+                                         str(self.window), str(self.pid)],
+                                        capture_output=True, text=True, timeout=25)
+            except subprocess.TimeoutExpired as exc:
+                raise HunchError('Safari capture worker timed out after 25 seconds; '
+                                 'no fresh screenshot is available') from exc
+            try:
+                capture = json.loads(result.stdout)
+            except ValueError as exc:
+                raise HunchError(f'Safari capture worker returned invalid output '
+                                 f'(exit {result.returncode}); no fresh screenshot is available. '
+                                 'This does not establish a Screen Recording permission denial.') from exc
+            if not isinstance(capture, dict):
+                raise HunchError('Safari capture worker returned an invalid response; '
+                                 'no fresh screenshot is available')
+            if not result.returncode and not capture.get('error'):
+                break
+            if (attempt == 0 and capture.get('stage') == 'image'
+                    and capture.get('domain') == 'com.apple.ScreenCaptureKit.SCStreamErrorDomain'
+                    and capture.get('code') == -3811):
+                time.sleep(.25)
+                continue
+            raise HunchError(capture.get('error') or
+                             f'Safari capture worker failed (exit {result.returncode})')
+        if (not capture.get('data') or not isinstance(capture.get('pixelWidth'), int)
+                or not isinstance(capture.get('pixelHeight'), int)
+                or capture['pixelWidth'] <= 0 or capture['pixelHeight'] <= 0):
+            raise HunchError('Safari capture worker returned an empty or invalid image')
         if capture.get('nativeBounds') != dict(self.bounds):
             raise HunchError('Safari window moved during capture; take a new screenshot')
         self.guard(target=True)
