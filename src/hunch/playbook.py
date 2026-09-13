@@ -1,4 +1,5 @@
 """Model-facing runtime contract shared by MCP and provider backends."""
+from .app_skills import document_editing_skill
 
 HUNCH_PLAYBOOK = """Hunch controls a real, logged-in Mac. Respect the user's chosen app/account
 and the host's background constraints.
@@ -114,3 +115,6 @@ CREDENTIALS AND RESULTS
 - Respect denied actions and existing authorization. Obtain intent for consequential outward
   actions (send, submit, purchase) when the user has not already authorized them.
 """
+
+# Shared, task-conditional guidance also reaches native and unfamiliar editors.
+HUNCH_PLAYBOOK += '\n\nBUNDLED SKILL — APPLY TO DOCUMENT EDITING TASKS\n' + document_editing_skill()
