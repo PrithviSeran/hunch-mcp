@@ -300,10 +300,12 @@ def web_snapshot() -> str:
 
 @mcp.tool()
 def web_screenshot() -> Image:
-    """PNG of the CDP-controlled page or selected Safari tab (focus-free) — for genuinely visual web
+    """PNG of the CDP-controlled page or bound Safari window (focus-free) — for genuinely visual web
     content the tree can't convey (a chart, canvas, image, rendered PDF). Use THIS, never the OS
     `screenshot` tool, for anything in the background browser: the OS one grabs the physical screen
-    and would capture the user's own foreground window instead of this page. Call web_open first."""
+    and would capture the user's own foreground window instead of this page.
+    Safari captures include browser chrome and live canvas layers via ScreenCaptureKit.
+    Use coordinates from this exact image. Call web_open first."""
     return _run("web_screenshot")
 
 

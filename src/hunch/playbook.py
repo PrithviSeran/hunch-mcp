@@ -48,9 +48,20 @@ WEB EXTENSION AND CDP
   window, but Safari may refuse if the OS would change focus. Commands are pinned to
   window, tab, URL, origin, and document generation. Missing extension or website access is a blocked
   permission state, not a reason to fall back to shared AX input.
-- Safari supports snapshot, ref click/type/check, submit, tabs, navigation, and—when the bound tab
-  is selected in its window—web_screenshot plus click_xy/drag. Coordinate actions use page-side DOM/pointer
-  events and may be unverified on canvas controls; they never use the shared cursor or keyboard.
+- Safari canvas editing uses web_screenshot → web_act click_xy → type without a ref, plus key
+  and drag. These use native window-routed events, not DOM KeyboardEvent dispatch, and do not
+  move the shared cursor or type into the foreground app. A new screenshot is required before
+  each coordinate action. Safari captures the entire bound window with ScreenCaptureKit, including
+  browser chrome and live canvas layers. Legacy native/page captures can omit those layers when
+  occluded. Use image-pixel coordinates from this screenshot; window/Retina mapping is automatic.
+  Ref-based type still replaces DOM fields; no-ref type inserts at the caret.
+  Requires Accessibility and Screen Recording permission, one unique matching URL selected in its Safari window,
+  and another app in front. Duplicate URLs, hidden tabs, changed targets and foreground changes
+  fail closed. Do not respond to a canvas/thin tree by claiming Safari needs foreground focus.
+  Supplementary Unicode (such as many emoji) is currently refused before typing because Safari's
+  native key-event path can drop it; never silently omit characters or use a clipboard fallback.
+  Dispatch is PERFORMED_UNVERIFIED: inspect document content and save state before claiming success.
+  On a partial failure inspect first; never replay a whole edit batch blindly.
 - For Chromium/Electron, web_open starts/reuses a verified dedicated instance. Its profile may differ from the user's
   current app. An unrelated listening port is not permission to attach to or restart that process.
 - web_snapshot reads the selected renderer's accessibility semantics; CDP resolves refs to DOM nodes

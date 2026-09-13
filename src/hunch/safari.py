@@ -308,6 +308,7 @@ class SafariComputer:
         self.owned_window = False
         self._url = ""
         self._generation = ""
+        self._capture = None
 
     @staticmethod
     def _reason(response):
@@ -369,6 +370,9 @@ class SafariComputer:
             return "UNSUPPORTED: Safari MCP beta does not support action " + repr(unknown[0])
         if any(action.get("action") == "navigate" for action in actions) and len(actions) != 1:
             return "REFUSED: Safari navigation must be the only action in its call"
+        if any(self._native_action(a) for a in actions):
+            return self._native_act(actions, detailed, postcondition)
+        self._capture = None
         payload = {**self._binding(), "actions": actions, "detailed": bool(detailed)}
         if postcondition is not None:
             payload["postcondition"] = postcondition
@@ -381,14 +385,70 @@ class SafariComputer:
         prefix = "PERFORMED_UNVERIFIED:\n" if response.get("status") == "performed_unverified" else ""
         return prefix + response.get("tree", response.get("summary", "verified"))
 
+    @staticmethod
+    def _native_action(action):
+        return action.get('action') in {'click_xy', 'drag', 'key'} or (
+            action.get('action') == 'type' and not action.get('ref'))
+
+    def _native_act(self, actions, detailed, postcondition):
+        from .safari_input import SafariInput
+        completed = 0
+        try:
+            for action in actions:
+                if not self._native_action(action):
+                    result = self.act([action], detailed=True)
+                    if not isinstance(result, dict) or result.get('status') not in {'verified', 'performed_unverified'}:
+                        raise HunchError(str(result))
+                    completed += 1
+                    continue
+                # Extension revalidates the bound tab, URL, origin and generation first.
+                response = self._call('snapshot', self._binding())
+                if response.get('status') != 'verified':
+                    raise HunchError(self._reason(response))
+                if response.get('generation') != self._generation or response.get('tabId') != self.target_id:
+                    raise HunchError('Safari document reloaded or target changed; call web_snapshot before editing')
+                target = SafariInput(self._url)
+                kind = action['action']
+                if action.get('ref'):
+                    raise HunchError('Native background input targets the current caret; click the ref first, then omit ref')
+                if kind in {'click_xy', 'drag'}:
+                    capture = self._capture
+                    if not capture or capture['binding'] != self._binding() or time.monotonic()-capture['time'] > 30:
+                        raise HunchError('Call web_screenshot again before a background coordinate action')
+                    target.pointer(action, capture)
+                elif kind == 'type':
+                    target.type(action.get('text', action.get('value', '')))
+                else:
+                    target.key(action.get('key', ''), action.get('modifiers', []))
+                self._capture = None
+                completed += 1
+            tree = self.snapshot()
+            result = {'status':'performed_unverified', 'completedActions':completed,
+                      'transport':'safari-window-input', 'tree':tree,
+                      'summary':'Native input sent to the bound Safari window without shared keyboard/mouse input. '
+                                'Verify the document content and save state; dispatch is not proof of an edit.'}
+            if postcondition is not None:
+                result['summary'] += ' Requested postcondition has not been evaluated for native input.'
+        except (HunchError, OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:
+            self._capture = None
+            result = {'status':'blocked', 'completedActions':completed,
+                      'reason':str(exc) + ' Earlier actions may have applied; inspect before retrying.'}
+        if detailed:
+            return result
+        return result['status'].upper()+': '+result.get('reason',result.get('summary',''))+'\n'+result.get('tree','')
+
     def capture_screenshot(self):
-        response = self._call("act", {**self._binding(), "captureScreenshot": True})
+        from .safari_input import SafariInput
+        response = self._call('snapshot', self._binding())
         if response.get("status") != "verified":
             raise HunchError(f"{response.get('status', 'failed').upper()}: {self._reason(response)}")
         self._bind(response)
+        # ScreenCaptureKit includes the live canvas layers omitted by legacy captures.
+        response = SafariInput(self._url).screenshot()
         data = response.get("data", "")
         if not data:
             raise HunchError("Safari companion returned an empty screenshot")
+        self._capture = {**response, 'binding': self._binding(), 'time': time.monotonic()}
         return data
 
     def tabs(self):
@@ -396,6 +456,7 @@ class SafariComputer:
         return response.get("tabs", []) if response.get("status") == "verified" else response
 
     def switch_tab(self, index):
+        self._capture = None
         response = self._call("switch_tab", {"index": index, "windowId": self.window_id,
                                                "windowLease": self.window_lease})
         if response.get("status") != "verified":

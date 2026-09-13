@@ -155,6 +155,8 @@ class FakeBridge:
 
 
 def test_safari_computer_pins_every_mutation_to_tab_url_origin_and_generation(monkeypatch):
+    monkeypatch.setattr('hunch.safari_input.SafariInput', lambda url: type('Native', (), {
+        'screenshot': lambda self: {'data':'aGVsbG8=', 'pixelWidth':800, 'pixelHeight':600}})())
     bridge = FakeBridge()
     computer = SafariComputer(client=bridge, allowed_origins=("https://example.com",))
     monkeypatch.setattr("hunch.safari.prepare_bundled_companion",
@@ -175,6 +177,8 @@ def test_safari_computer_pins_every_mutation_to_tab_url_origin_and_generation(mo
 
 
 def test_safari_computer_can_bind_selected_tab_without_url(monkeypatch):
+    monkeypatch.setattr('hunch.safari_input.SafariInput', lambda url: type('Native', (), {
+        'screenshot': lambda self: {'data':'aGVsbG8=', 'pixelWidth':800, 'pixelHeight':600}})())
     bridge = FakeBridge()
     computer = SafariComputer(client=bridge)
     monkeypatch.setattr("hunch.safari.prepare_bundled_companion",
