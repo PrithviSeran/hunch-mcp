@@ -18,27 +18,55 @@ from .gate import HunchError
 
 def _window_for_url(url):
     # Safari extension IDs and AppleScript window IDs are different namespaces.
-    # An exact, unique URL is the join; never use Safari's front window implicitly.
-    script = '''tell application "Safari"
+    # The content script's binding strips fragments. Compare the same document URL
+    # here, counting ALL matching tabs so fragment variants cannot pick a wrong window.
+    script = '''on documentURL(value)
+if value is missing value then return ""
+set value to value as text
+set fragmentOffset to offset of "#" in value
+if fragmentOffset is 1 then return ""
+if fragmentOffset > 1 then return text 1 thru (fragmentOffset - 1) of value
+return value
+end documentURL
+on run argv
+set expectedURL to my documentURL(item 1 of argv)
+tell application "Safari"
 set matches to 0
 set targetWindow to 0
 repeat with w in windows
 repeat with t in tabs of w
-if URL of t is %s then
+considering case
+if my documentURL(URL of t) is expectedURL then
 set matches to matches + 1
-if URL of current tab of w is %s then set targetWindow to id of w
+if my documentURL(URL of current tab of w) is expectedURL then set targetWindow to id of w
 end if
+end considering
 end repeat
 end repeat
-if matches is not 1 or targetWindow is 0 then error "Target must be a unique URL in a selected Safari tab"
-return targetWindow
-end tell''' % (json.dumps(url), json.dumps(url))
-    result = subprocess.run(['/usr/bin/osascript', '-e', script], capture_output=True,
-                            text=True, timeout=5)
+return (matches as text) & "," & (targetWindow as text)
+end tell
+end run'''
+    try:
+        result = subprocess.run(['/usr/bin/osascript', '-e', script, url], capture_output=True,
+                                text=True, timeout=5)
+    except subprocess.TimeoutExpired as exc:
+        raise HunchError('Safari window lookup timed out; no input was sent') from exc
     if result.returncode:
-        raise HunchError('Background input requires one uniquely matching, selected Safari tab; '
-                         'duplicate URLs or hidden tabs are refused. No input was sent.')
-    return int(result.stdout.strip())
+        raise HunchError(f'Safari window lookup failed (osascript exit {result.returncode}): '
+                         f'{result.stderr.strip()[:500]}. No input was sent.')
+    try:
+        matches, window = (int(part) for part in result.stdout.strip().split(','))
+    except ValueError as exc:
+        raise HunchError('Safari window lookup returned an invalid response; no input was sent') from exc
+    if matches == 0:
+        raise HunchError('No Safari tab matches the bound document URL; rebind with web_open. '
+                         'No input was sent.')
+    if matches != 1:
+        raise HunchError('Multiple Safari tabs match the bound document URL (ignoring fragments); '
+                         'the native window is ambiguous. No input was sent.')
+    if window <= 0:
+        raise HunchError('The bound Safari tab is not selected in its window. No input was sent.')
+    return window
 
 
 def focus_records(window):
