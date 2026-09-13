@@ -48,6 +48,9 @@ NATIVE OBSERVATION AND ACTION
   prerequisite and inspect again instead of continuing an action batch with invalid assumptions.
 
 WEB EXTENSION AND CDP
+- Google Docs web_snapshot responses include the bundled google-docs-editing skill. Use its
+  in-document navigation, selection, local editing, and verification workflow for existing Docs.
+  A thin canvas tree is not a reason to replace the whole document through copy/edit/paste.
 - Safari exposes both web extension tools and native Mac tools. Follow the action hierarchy:
   try native AX for browser chrome and dialogs, then web_snapshot/ref-based web_act for page
   content, then web_screenshot/window-routed web_act for tree-invisible canvases. Opening Safari

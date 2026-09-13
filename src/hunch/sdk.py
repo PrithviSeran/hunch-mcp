@@ -751,8 +751,12 @@ class Web:
 
     def snapshot(self):
         """The current page as a ref-annotated accessibility tree (focus-free)."""
-        self._session()
-        return self._h._redact(self._computer.snapshot())
+        session = self._session()
+        tree = self._computer.snapshot()
+        from .app_skills import page_skill
+        url = getattr(session, 'url', lambda: '')()
+        guidance = '' if tree.startswith(('BLOCKED:', 'REFUSED:', 'FAILED:')) else page_skill(url)
+        return self._h._redact(tree) + guidance
 
     def act(self, actions, detailed=False, postcondition=None):
         """Page actions: click by ref; click_xy/drag at web-screenshot coordinates; type
