@@ -131,3 +131,101 @@ def test_capture_uses_isolated_screen_capture_kit_worker(monkeypatch):
     result=target.screenshot()
     assert calls[0][-4:]==['-m','hunch.safari_capture','42','123']
     assert result['nativeWindowId']==42 and result['nativeWindow'] is True
+
+
+@pytest.mark.parametrize('failure', ['bridge', 'native'])
+def test_failed_capture_refresh_invalidates_previous_coordinates(bound, monkeypatch, failure):
+    computer, bridge, calls = bound
+    computer.capture_screenshot()
+    if failure == 'bridge':
+        bridge.block = True
+    else:
+        def fail(self):
+            raise HunchError('capture failed')
+        monkeypatch.setattr('hunch.safari_input.SafariInput.screenshot', fail)
+    with pytest.raises(HunchError):
+        computer.capture_screenshot()
+    bridge.block = False
+    result = computer.act([{'action':'click_xy','x':1,'y':2}], detailed=True)
+    assert result['status'] == 'blocked'
+    assert not any(c[0] == 'pointer' for c in calls)
+
+
+@pytest.fixture
+def capture_target(monkeypatch):
+    target = SafariInput.__new__(SafariInput)
+    target.bounds = {'X':0,'Y':0,'Width':100,'Height':100}
+    target.window, target.pid = 42, 123
+    target.guard = lambda **kw: None
+    monkeypatch.setattr('hunch.safari_input.time.sleep', lambda _: None)
+    return target
+
+
+@pytest.mark.parametrize('code,stage', [(-3811,'start'), (-3801,'start'), (-3811,'content')])
+def test_capture_failure_is_not_retried(capture_target, monkeypatch, code, stage):
+    import json
+    import subprocess
+    calls = []
+    def run(argv, **kw):
+        calls.append(argv)
+        if len(calls) == 1:
+            response = {'error':'capture failed', 'stage':stage, 'code':code,
+                        'domain':'com.apple.ScreenCaptureKit.SCStreamErrorDomain'}
+            return subprocess.CompletedProcess(argv, 1, json.dumps(response), '')
+        return subprocess.CompletedProcess(argv, 0, json.dumps({
+            'data':'png','pixelWidth':100,'pixelHeight':100,'nativeBounds':capture_target.bounds}), '')
+    monkeypatch.setattr('hunch.safari_input.subprocess.run', run)
+    with pytest.raises(HunchError, match='capture failed'):
+        capture_target.screenshot()
+    assert len(calls) == 1
+
+
+def test_capture_rejects_image_when_target_changes(capture_target, monkeypatch):
+    import json
+    import subprocess
+    calls = []
+    def guard(**kw):
+        if calls:
+            raise HunchError('Safari target changed')
+    capture_target.guard = guard
+    def run(argv, **kw):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, json.dumps({
+            'data':'png','pixelWidth':100,'pixelHeight':100,
+            'nativeBounds':capture_target.bounds}), '')
+    monkeypatch.setattr('hunch.safari_input.subprocess.run', run)
+    with pytest.raises(HunchError, match='target changed'):
+        capture_target.screenshot()
+    assert len(calls) == 1
+
+
+def test_worker_invalid_output_does_not_claim_permission_denial(capture_target, monkeypatch):
+    import subprocess
+    monkeypatch.setattr('hunch.safari_input.subprocess.run', lambda *a, **k:
+                        subprocess.CompletedProcess(a, 1, '', ''))
+    with pytest.raises(HunchError, match='does not establish a Screen Recording permission denial'):
+        capture_target.screenshot()
+
+
+def test_persistent_capture_start_failure_stops_without_retry(capture_target, monkeypatch):
+    import json
+    import subprocess
+    calls = []
+    def run(argv, **kw):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 1, json.dumps({
+            'error':'ScreenCaptureKit code -3811','stage':'image','code':-3811,
+            'domain':'com.apple.ScreenCaptureKit.SCStreamErrorDomain'}), '')
+    monkeypatch.setattr('hunch.safari_input.subprocess.run', run)
+    with pytest.raises(HunchError, match='-3811'):
+        capture_target.screenshot()
+    assert len(calls) == 1
+
+
+def test_capture_worker_timeout_is_a_capture_error(capture_target, monkeypatch):
+    import subprocess
+    def run(argv, **kw):
+        raise subprocess.TimeoutExpired(argv, 25)
+    monkeypatch.setattr('hunch.safari_input.subprocess.run', run)
+    with pytest.raises(HunchError, match='timed out after 25 seconds'):
+        capture_target.screenshot()

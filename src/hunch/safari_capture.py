@@ -7,6 +7,88 @@ import base64
 import json
 import sys
 import time
+from functools import lru_cache
+
+
+class CaptureError(RuntimeError):
+    def __init__(self, message, *, stage, domain=None, code=None):
+        super().__init__(message)
+        self.stage, self.domain, self.code = stage, domain, code
+
+
+def _raise_native(error, stage):
+    if error is not None:
+        raise CaptureError(
+            f'ScreenCaptureKit {error.domain()} code {error.code()}: {error.localizedDescription()}',
+            stage=stage, domain=error.domain(), code=error.code())
+
+
+@lru_cache(maxsize=1)
+def _output_class():
+    import Foundation
+    import CoreMedia
+    import Quartz
+    import ScreenCaptureKit as SC
+    import objc
+
+    class HunchSafariStreamOutput(Foundation.NSObject,
+                                 protocols=[objc.protocolNamed('SCStreamOutput'),
+                                            objc.protocolNamed('SCStreamDelegate')]):
+        def stream_didOutputSampleBuffer_ofType_(self, stream, sample, kind):
+            if kind != SC.SCStreamOutputTypeScreen or 'image' in self.state:
+                return
+            try:
+                attachments = CoreMedia.CMSampleBufferGetSampleAttachmentsArray(sample, False)
+                if (not attachments or attachments[0].get(SC.SCStreamFrameInfoStatus)
+                        != SC.SCFrameStatusComplete):
+                    return
+                buffer = CoreMedia.CMSampleBufferGetImageBuffer(sample)
+                if buffer is None:
+                    return
+                source = Quartz.CIImage.imageWithCVPixelBuffer_(buffer)
+                image = self.context.createCGImage_fromRect_(source, source.extent())
+                if image is None:
+                    raise CaptureError('ScreenCaptureKit frame conversion failed', stage='frame')
+                # Convert while the sample buffer is alive; never return a borrowed buffer.
+                self.state['image'] = image
+            except Exception as exc:
+                self.state['callback_error'] = exc
+
+        def stream_didStopWithError_(self, stream, error):
+            self.state['stream_error'] = error
+
+    return HunchSafariStreamOutput
+
+
+def _capture_stream(content_filter, config, wait, state):
+    import Quartz
+    import ScreenCaptureKit as SC
+    output = _output_class().alloc().init()
+    output.state = state
+    output.context = Quartz.CIContext.contextWithOptions_(None)
+    stream = SC.SCStream.alloc().initWithFilter_configuration_delegate_(content_filter, config, output)
+    ok, error = stream.addStreamOutput_type_sampleHandlerQueue_error_(
+        output, SC.SCStreamOutputTypeScreen, None, None)
+    _raise_native(error, 'output')
+    if not ok:
+        raise CaptureError('ScreenCaptureKit rejected the stream output', stage='output')
+    try:
+        stream.startCaptureWithCompletionHandler_(lambda error: state.update(start=error))
+        wait('start')
+        _raise_native(state['start'], 'start')
+        wait('image')
+        return state['image']
+    finally:
+        # Stop on success, timeout, conversion failure, or asynchronous stream error.
+        # The parent also bounds this isolated worker's lifetime.
+        failed = sys.exc_info()[0] is not None
+        try:
+            stream.stopCaptureWithCompletionHandler_(lambda error: state.update(stop=error))
+            wait('stop', cleanup=True)
+            _raise_native(state['stop'], 'stop')
+        except Exception:
+            if not failed:
+                raise
 
 
 def capture(window_id, pid):
@@ -17,23 +99,29 @@ def capture(window_id, pid):
     import AppKit
     AppKit.NSApplication.sharedApplication()
     state = {}
-    def wait(key):
-        deadline = time.monotonic() + 10
+    def wait(key, cleanup=False):
+        deadline = time.monotonic() + 5
         while key not in state and time.monotonic() < deadline:
+            if not cleanup:
+                if 'callback_error' in state:
+                    raise state['callback_error']
+                _raise_native(state.get('stream_error'), key)
             Foundation.NSRunLoop.currentRunLoop().runUntilDate_(
                 Foundation.NSDate.dateWithTimeIntervalSinceNow_(.02))
         if key not in state:
-            raise RuntimeError('ScreenCaptureKit timed out')
-        if state.get('error') is not None:
-            error = state['error']
-            raise RuntimeError(f'ScreenCaptureKit {error.domain()} code {error.code()}: {error.localizedDescription()}')
+            raise CaptureError('ScreenCaptureKit timed out', stage=key)
+        if not cleanup:
+            if 'callback_error' in state:
+                raise state['callback_error']
+            _raise_native(state.get('stream_error'), key)
+            _raise_native(state.get('error'), key)
     def content_done(content, error):
         state.update(content=content, error=error)
     SC.SCShareableContent.getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler_(
         True, False, content_done)
     wait('content')
     matches = [w for w in state['content'].windows() if w.windowID() == window_id
-               and w.owningApplication().processID() == pid]
+               and w.owningApplication() is not None and w.owningApplication().processID() == pid]
     if len(matches) != 1:
         raise RuntimeError('Bound Safari window is no longer capturable')
     window = matches[0]
@@ -45,12 +133,12 @@ def capture(window_id, pid):
     config.setShowsCursor_(False)
     config.setIgnoreShadowsSingleWindow_(True)
     config.setCapturesAudio_(False)
-    def image_done(image, error):
-        state.update(image=image, error=error)
-    SC.SCScreenshotManager.captureImageWithFilter_configuration_completionHandler_(
-        content_filter, config, image_done)
-    wait('image')
-    rep = AppKit.NSBitmapImageRep.alloc().initWithCGImage_(state['image'])
+    # The one-shot screenshot API fails with -3811 for Safari in another full-screen
+    # Space. A short desktop-independent stream delivers its complete canvas frame.
+    image = _capture_stream(content_filter, config, wait, state)
+    rep = AppKit.NSBitmapImageRep.alloc().initWithCGImage_(image)
+    if rep.pixelsWide() != int(frame.size.width) or rep.pixelsHigh() != int(frame.size.height):
+        raise CaptureError('Safari capture dimensions changed; take a new screenshot', stage='frame')
     data = rep.representationUsingType_properties_(AppKit.NSBitmapImageFileTypePNG, {})
     return {'data':base64.b64encode(bytes(data)).decode('ascii'),
             'pixelWidth':int(rep.pixelsWide()), 'pixelHeight':int(rep.pixelsHigh()),
@@ -62,5 +150,6 @@ if __name__ == '__main__':
     try:
         print(json.dumps(capture(int(sys.argv[1]), int(sys.argv[2]))))
     except Exception as exc:
-        print(json.dumps({'error':str(exc)}))
+        print(json.dumps({'error':str(exc), 'stage':getattr(exc, 'stage', 'worker'),
+                          'domain':getattr(exc, 'domain', None), 'code':getattr(exc, 'code', None)}))
         sys.exit(1)
