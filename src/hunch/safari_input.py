@@ -95,27 +95,32 @@ def pixel_point(x, y, capture, bounds):
 
 
 class SafariInput:
-    def __init__(self, url):
+    def __init__(self, url, *, capture_only=False):
         import Quartz as Q
         import AppKit
         import ApplicationServices as AX
         from .local_mac import _frontmost
         self.Q, self.front = Q, _frontmost
-        if not AX.AXIsProcessTrusted():
-            raise HunchError('Safari background input needs Accessibility permission for Hunch')
+        self.capture_only = capture_only
         apps = AppKit.NSRunningApplication.runningApplicationsWithBundleIdentifier_('com.apple.Safari')
         if len(apps) != 1:
             raise HunchError('Safari process identity is ambiguous')
         self.pid = apps[0].processIdentifier()
         self.previous = self.front()
-        if self.previous[1] is None or self.previous[1] == self.pid:
-            raise HunchError('Background canvas input requires another app in front; '
-                             'it will not compete with your active Safari keyboard')
         self.url, self.window = url, _window_for_url(url)
         entries = Q.CGWindowListCopyWindowInfo(Q.kCGWindowListOptionIncludingWindow, self.window)
         if len(entries) != 1 or entries[0].get('kCGWindowOwnerPID') != self.pid:
             raise HunchError('Safari window identity could not be verified')
         self.bounds = entries[0]['kCGWindowBounds']
+        # Observation needs only a verified window and Screen Recording. It must not
+        # initialize input routing or require Safari to lose foreground focus.
+        if capture_only:
+            return
+        if not AX.AXIsProcessTrusted():
+            raise HunchError('Safari background input needs Accessibility permission for Hunch')
+        if self.previous[1] is None or self.previous[1] == self.pid:
+            raise HunchError('Background canvas input requires another app in front; '
+                             'it will not compete with your active Safari keyboard')
         ctypes.CDLL('/System/Library/Frameworks/Carbon.framework/Carbon', mode=ctypes.RTLD_GLOBAL)
         ctypes.CDLL('/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight', mode=ctypes.RTLD_GLOBAL)
         self.symbols = ctypes.CDLL(None)
@@ -138,7 +143,7 @@ class SafariInput:
         return fn
 
     def guard(self, target=False):
-        if self.front() != self.previous:
+        if not getattr(self, 'capture_only', False) and self.front() != self.previous:
             raise HunchError('Foreground app changed; stopped background input. Do not replay blindly.')
         if target and _window_for_url(self.url) != self.window:
             raise HunchError('Safari target changed; stopped background input')
@@ -150,6 +155,8 @@ class SafariInput:
                 raise HunchError('Safari window moved/resized; take a fresh screenshot before continuing')
 
     def prepare(self):
+        if getattr(self, 'capture_only', False):
+            raise HunchError('A capture-only Safari target cannot send input')
         self.guard(target=True)
         for record in focus_records(self.window):
             buf = (ctypes.c_ubyte * len(record)).from_buffer(record)

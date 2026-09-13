@@ -447,7 +447,7 @@ class SafariComputer:
             raise HunchError(f"{response.get('status', 'failed').upper()}: {self._reason(response)}")
         self._bind(response)
         # ScreenCaptureKit includes the live canvas layers omitted by legacy captures.
-        response = SafariInput(self._url).screenshot()
+        response = SafariInput(self._url, capture_only=True).screenshot()
         data = response.get("data", "")
         if not data:
             raise HunchError("Safari companion returned an empty screenshot")
