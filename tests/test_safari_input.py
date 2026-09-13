@@ -27,6 +27,29 @@ def test_focus_change_stops_native_input():
     with pytest.raises(HunchError,match='Foreground app changed'):target.guard()
 
 
+def test_capture_target_allows_foreground_safari_without_input_permission(monkeypatch):
+    import AppKit
+    import Quartz
+    import ApplicationServices
+    from types import SimpleNamespace
+    monkeypatch.setattr(AppKit, 'NSRunningApplication', SimpleNamespace(
+        runningApplicationsWithBundleIdentifier_=lambda _: [SimpleNamespace(processIdentifier=lambda: 42)]))
+    monkeypatch.setattr('hunch.local_mac._frontmost', lambda: ('Safari', 42))
+    monkeypatch.setattr(ApplicationServices, 'AXIsProcessTrusted', lambda: False)
+    monkeypatch.setattr('hunch.safari_input._window_for_url', lambda _: 7)
+    monkeypatch.setattr(Quartz, 'CGWindowListCopyWindowInfo', lambda *a: [
+        {'kCGWindowOwnerPID':42, 'kCGWindowBounds':{'X':0,'Y':0,'Width':100,'Height':100}}])
+    target = SafariInput('https://example.com', capture_only=True)
+    target.front = lambda: ('Other app', 99)
+    target.guard(target=True)
+    assert not hasattr(target, 'source') and not hasattr(target, 'symbols')
+    with pytest.raises(HunchError, match='cannot send input'):
+        target.prepare()
+    monkeypatch.setattr('hunch.safari_input._window_for_url', lambda _: 8)
+    with pytest.raises(HunchError, match='target changed'):
+        target.guard(target=True)
+
+
 class Bridge:
     def __init__(self):self.calls=[];self.block=False
     def request(self,op,payload):
@@ -40,7 +63,7 @@ class Bridge:
 def bound(monkeypatch):
     calls=[]
     class Native:
-        def __init__(self,url):calls.append(('target',url))
+        def __init__(self,url,**kwargs):calls.append(('target',url))
         def type(self,text):calls.append(('type',text))
         def key(self,key,mods):calls.append(('key',key,mods))
         def pointer(self,action,capture):calls.append(('pointer',action))

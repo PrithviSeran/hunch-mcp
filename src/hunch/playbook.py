@@ -67,9 +67,11 @@ WEB EXTENSION AND CDP
   browser chrome and live canvas layers. Legacy native/page captures can omit those layers when
   occluded. Use image-pixel coordinates from this screenshot; window/Retina mapping is automatic.
   Ref-based type still replaces DOM fields; no-ref type inserts at the caret.
-  Requires Accessibility and Screen Recording permission, one unique matching URL selected in its Safari window,
-  and another app in front. Duplicate URLs, hidden tabs, changed targets and foreground changes
-  fail closed. Do not respond to a canvas/thin tree by claiming Safari needs foreground focus.
+  Screenshots require Screen Recording and one unique matching URL selected in its Safari window.
+  Capture works with Safari foreground or background, and does not require Accessibility input
+  permission. Never ask the user to switch apps just to take a web_screenshot. Native input additionally
+  requires Accessibility and another app in front. Duplicate URLs, hidden tabs, and changed targets
+  fail closed; foreground changes stop input, not observation. Do not claim a thin tree needs foreground focus.
   Supplementary Unicode (such as many emoji) is currently refused before typing because Safari's
   native key-event path can drop it; never silently omit characters or use a clipboard fallback.
   Dispatch is PERFORMED_UNVERIFIED: inspect document content and save state before claiming success.
