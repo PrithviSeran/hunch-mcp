@@ -90,8 +90,15 @@ resort. Concretely:
   combos, app raises). `act()` appends a per-call receipt when a call disturbed the screen. If
   you add a shared-input path, increment the right counter — the receipt is how "focus-free" is
   audited in-band.
-- Layer priority, most-direct first: **OS-API → AppleScript → Web/CDP → AX → vision**. Vision
-  (`screenshot` + `click_xy`) is the gated last resort; don't reach for it when a tree read works.
+- Layer priority, most-direct first: **OS APIs / AppleScript → native AX tree → web
+  extension or CDP tree → native background screenshot + window-routed input**. Keep the
+  layers distinct: a refusal from native `act` says nothing about whether `web_act` can operate
+  on the same Safari page. For canvas-only Safari content, the final focus-free fallback is
+  `web_open` → `web_screenshot` → `web_act` (`click_xy`/`drag`/`key`/no-ref `type`). It
+  targets the bound Safari window without moving the shared cursor or typing into the foreground
+  app, so it remains available in simultaneous mode. Physical-screen `screenshot` plus native
+  `act` shared keyboard/mouse is a separate, gated foreground fallback and is refused in
+  simultaneous/background mode.
 
 ## AX-layer knowledge (hard-won — read before touching `local_mac.py`)
 

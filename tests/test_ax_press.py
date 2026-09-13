@@ -498,6 +498,24 @@ def test_drag_is_shared_input():
     assert lm.LocalComputer._is_shared_input({"action": "drag"}) is True
 
 
+def test_simultaneous_native_safari_refusal_routes_to_web_tools(monkeypatch):
+    lc = object.__new__(lm.LocalComputer)
+    lc.app = "Safari"
+    lc.simultaneous = True
+    lc.session = _bare_session()
+    lc.session.disturbances = {"pixel_clicks": 0, "keystrokes": 0, "key_combos": 0,
+                               "app_raises": 0, "drags": 0}
+    lc._last_snap = "=== Safari ===\n"
+    monkeypatch.setattr(lm.LocalComputer, "snapshot", lambda self, **k: "=== Safari ===\n")
+    monkeypatch.setattr(lm.time, "sleep", lambda _: None)
+
+    out = lc.act([{"action": "type", "text": "canvas text"}])
+
+    assert "refused in simultaneous mode" in out
+    assert "keep simultaneous mode on" in out
+    assert "web_screenshot -> web_act" in out
+
+
 def test_drag_endpoint_resolution(monkeypatch):
     lc = object.__new__(lm.LocalComputer)
     sess = object.__new__(lm.MacSession)

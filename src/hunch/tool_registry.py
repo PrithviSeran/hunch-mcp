@@ -57,7 +57,10 @@ BASE_TOOLS = [
                      "a field by ref = focus-free; no ref types at focus = STEALS FOCUS), menu "
                      "(invoke a menu-bar path, e.g. ['File','Move to Trash'] — the focus-free "
                      "stand-in for ⌘-shortcuts), key/click_xy (STEAL FOCUS, last resort). Prefer "
-                     "the focus-free verbs. Pass `reason` when any action steals focus."),
+                     "the focus-free verbs. Pass `reason` when any action steals focus. For Safari "
+                     "page/canvas content, do not disable simultaneous mode: use web_open, "
+                     "web_snapshot, then web_screenshot + web_act; its window-routed canvas input "
+                     "does not use the shared cursor/keyboard."),
      "input_schema": _obj({"actions": {"type": "array", "items": _ACTION_ITEM},
                            "reason": {"type": "string"}}, ["actions"])},
     {"name": "screenshot",
@@ -77,7 +80,9 @@ BASE_TOOLS = [
                            "reason": {"type": "string"}}, ["name"])},
     {"name": "simultaneous_mode",
      "description": ("Toggle simultaneous mode. ON = never steal the user's cursor/keyboard/view "
-                     "(background reads, focus-free actions only, shared-input actions refused). "
+                     "(background reads and focus-free actions; native act shared-input actions "
+                     "are refused). Safari web_screenshot and window-routed web_act canvas "
+                     "click/type/key/drag remain available because they do not use shared input. "
                      "OFF = may bring apps forward and use the full input set."),
      "input_schema": _obj({"on": {"type": "boolean"}})},
     {"name": "quit_app", "description": "Quit an app via the OS (reliable regardless of focus).",
@@ -109,14 +114,18 @@ BASE_TOOLS = [
      "description": "Read the bound Safari or CDP page as an accessibility tree. Call web_open first.",
      "input_schema": _obj()},
     {"name": "web_screenshot",
-     "description": ("PNG of the bound CDP page or selected Safari tab "
-                     "(focus-free) — for visual web content the tree can't convey. Use this, never "
+     "description": ("PNG of the bound CDP page or Safari window (focus-free) — for visual web "
+                     "content the tree can't convey. Safari uses ScreenCaptureKit and includes live "
+                     "canvas layers; it remains available in simultaneous mode. Use this, never "
                      "the OS screenshot, for the background browser."),
      "input_schema": _obj()},
     {"name": "web_act",
      "description": ("Run focus-free page actions, then get the updated tree. Verbs: click (by ref), "
                      "click_xy/drag (coordinates from web_screenshot; canvas editors), type "
-                     "(with ref REPLACES a field; without ref types at current focus), key, navigate "
+                     "(with ref REPLACES a field; without ref types at current focus), key, navigate. "
+                     "Safari canvas coordinate/keyboard actions are native window-routed, remain "
+                     "available in simultaneous mode, and are distinct from shared-input native act "
+                     "actions. Navigate "
                      "(only to a URL you were given or read from the page — click links, don't guess)."),
      "input_schema": _obj({"actions": {"type": "array", "items": _WEB_ACTION_ITEM}}, ["actions"])},
     {"name": "web_restart",

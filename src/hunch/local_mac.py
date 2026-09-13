@@ -1495,7 +1495,12 @@ class LocalComputer:
                     lines.append(f"skipped '{act}': needs the shared keyboard/cursor — refused in "
                                  f"simultaneous mode so it can't disrupt you. Use a focus-free "
                                  f"alternative: a 'menu' action (e.g. File > Move to Trash), or "
-                                 f"click/select/right_click by ref.")
+                                 f"click/select/right_click by ref."
+                                 + (" For Safari page/canvas content, keep simultaneous mode on: "
+                                    "use web_open -> web_snapshot, then web_screenshot -> web_act "
+                                    "for tree-invisible content; web_act's Safari input is routed "
+                                    "to the bound window without using shared input."
+                                    if "safari" in self.app.lower() else ""))
                     break
                 if self._is_shared_input(a) and not sim and not front_ok:
                     lines.append(f"refused '{act}': couldn't bring '{self.app}' to the front "
