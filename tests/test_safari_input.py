@@ -161,9 +161,8 @@ def capture_target(monkeypatch):
     return target
 
 
-@pytest.mark.parametrize('code,stage,expected_calls', [(-3811,'image',2), (-3801,'image',1),
-                                                     (-3811,'content',1)])
-def test_capture_retries_only_capture_start_failure(capture_target, monkeypatch, code, stage, expected_calls):
+@pytest.mark.parametrize('code,stage', [(-3811,'start'), (-3801,'start'), (-3811,'content')])
+def test_capture_failure_is_not_retried(capture_target, monkeypatch, code, stage):
     import json
     import subprocess
     calls = []
@@ -176,15 +175,12 @@ def test_capture_retries_only_capture_start_failure(capture_target, monkeypatch,
         return subprocess.CompletedProcess(argv, 0, json.dumps({
             'data':'png','pixelWidth':100,'pixelHeight':100,'nativeBounds':capture_target.bounds}), '')
     monkeypatch.setattr('hunch.safari_input.subprocess.run', run)
-    if expected_calls == 2:
-        assert capture_target.screenshot()['data'] == 'png'
-    else:
-        with pytest.raises(HunchError, match='capture failed'):
-            capture_target.screenshot()
-    assert len(calls) == expected_calls
+    with pytest.raises(HunchError, match='capture failed'):
+        capture_target.screenshot()
+    assert len(calls) == 1
 
 
-def test_capture_retry_stops_when_target_changes(capture_target, monkeypatch):
+def test_capture_rejects_image_when_target_changes(capture_target, monkeypatch):
     import json
     import subprocess
     calls = []
@@ -194,9 +190,9 @@ def test_capture_retry_stops_when_target_changes(capture_target, monkeypatch):
     capture_target.guard = guard
     def run(argv, **kw):
         calls.append(argv)
-        return subprocess.CompletedProcess(argv, 1, json.dumps({
-            'error':'capture failed','stage':'image','code':-3811,
-            'domain':'com.apple.ScreenCaptureKit.SCStreamErrorDomain'}), '')
+        return subprocess.CompletedProcess(argv, 0, json.dumps({
+            'data':'png','pixelWidth':100,'pixelHeight':100,
+            'nativeBounds':capture_target.bounds}), '')
     monkeypatch.setattr('hunch.safari_input.subprocess.run', run)
     with pytest.raises(HunchError, match='target changed'):
         capture_target.screenshot()
@@ -211,7 +207,7 @@ def test_worker_invalid_output_does_not_claim_permission_denial(capture_target, 
         capture_target.screenshot()
 
 
-def test_persistent_capture_start_failure_stops_after_one_retry(capture_target, monkeypatch):
+def test_persistent_capture_start_failure_stops_without_retry(capture_target, monkeypatch):
     import json
     import subprocess
     calls = []
@@ -223,7 +219,7 @@ def test_persistent_capture_start_failure_stops_after_one_retry(capture_target, 
     monkeypatch.setattr('hunch.safari_input.subprocess.run', run)
     with pytest.raises(HunchError, match='-3811'):
         capture_target.screenshot()
-    assert len(calls) == 2
+    assert len(calls) == 1
 
 
 def test_capture_worker_timeout_is_a_capture_error(capture_target, monkeypatch):
