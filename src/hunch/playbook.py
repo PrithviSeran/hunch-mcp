@@ -87,6 +87,11 @@ WEB EXTENSION AND CDP
   reach a screen-reader mirror without reaching the terminal. Bind the intended workspace first.
 - web_act type replaces fields and selects native select options by visible text. Renderer
   click_xy/drag/key actions do not move the macOS cursor. Verify their effects.
+- On Chromium/Electron CDP, web_act hover with a fresh ref moves the renderer pointer
+  without clicking or moving the Mac cursor. Use it to reveal hover menus/tooltips, then
+  web_snapshot and act on the newly observed refs. Dispatch alone does not verify a reveal.
+  Safari hover is unsupported; native act does not expose hover. Do not substitute a click
+  or shared mouse movement for an unavailable hover transport.
 - Use observed/user-provided URLs. Private developer origins require host configuration through
   allowed_web_origins. This checks navigation requests; it is not a network sandbox for redirects,
   links, subresources, or arbitrary application traffic.

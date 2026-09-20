@@ -22,6 +22,7 @@ import tempfile
 import urllib.request
 import urllib.parse
 import ipaddress
+import math
 
 import websocket  # websocket-client
 
@@ -692,6 +693,22 @@ class CDPSession:
                       {"type": t, "x": x, "y": y, "button": "left", "clickCount": 1})
         return f"clicked {ref}"
 
+    def hover(self, ref):
+        """Move only the bound renderer's pointer; callers must verify the revealed UI."""
+        if not isinstance(ref, str) or not ref:
+            return "REFUSED: hover requires a fresh web_snapshot ref"
+        self.validate_document()
+        x, y = self._center(ref)
+        if not (math.isfinite(x) and math.isfinite(y)):
+            return "REFUSED: hover target has invalid geometry; take a fresh snapshot"
+        # Scrolling/geometry lookup can cross a navigation. Never send input to a
+        # new document using the old document's ref and position.
+        self.validate_document()
+        self._cmd("Input.dispatchMouseEvent", {
+            "type": "mouseMoved", "x": x, "y": y, "button": "none", "buttons": 0,
+        })
+        return f"hovered {ref}; re-snapshot to verify any revealed controls"
+
     def _image_to_viewport(self, x, y):
         """Map coordinates from the last web_screenshot PNG to CSS viewport coordinates.
 
@@ -1114,6 +1131,8 @@ class CDPComputer:
                 self.session.validate_document()
                 if act == "click":
                     lines.append(self.session.click(a["ref"]))
+                elif act == "hover":
+                    lines.append(self.session.hover(a.get("ref")))
                 elif act == "click_xy":
                     lines.append(self.session.click_xy(a["x"], a["y"]))
                 elif act == "drag":

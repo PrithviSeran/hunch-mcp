@@ -319,6 +319,7 @@ def web_screenshot() -> Image:
 def web_act(actions: list, detailed: bool = False, postcondition: dict | None = None) -> str | dict:
     """Execute focus-free page actions on the bound Safari or CDP app, then return the updated tree.
     Each: {"action":"click","ref":"e12"} | {"action":"type","ref":"e12","text":"hi"} |
+    {"action":"hover","ref":"e12"} (Chromium/Electron CDP only) |
     {"action":"click_xy","x":500,"y":250} | {"action":"drag","from_x":10,"from_y":20,
     "to_x":200,"to_y":220} |
     {"action":"key","key":"return"} | {"action":"navigate","url":"https://..."}.
