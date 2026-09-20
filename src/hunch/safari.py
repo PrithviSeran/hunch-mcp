@@ -364,6 +364,12 @@ class SafariComputer:
     def act(self, actions, detailed=False, postcondition=None):
         if len(actions) > 50:
             return "REFUSED: Safari actions are limited to 50 per call"
+        if any(action.get("action") == "hover" for action in actions):
+            reason = ("hover is supported only on Chromium/Electron CDP; Safari has no "
+                      "verified hover transport. No actions were performed.")
+            return ({"status": "blocked", "reason": reason, "requested_actions": len(actions),
+                     "attempted_actions": 0, "unattempted_actions": len(actions), "disturbances": {}}
+                    if detailed else "UNSUPPORTED: " + reason)
         supported = {"click", "check", "type", "navigate", "click_xy", "drag", "key"}
         unknown = [action.get("action") for action in actions if action.get("action") not in supported]
         if unknown:

@@ -756,7 +756,9 @@ class Web:
 
     def act(self, actions, detailed=False, postcondition=None):
         """Page actions: click by ref; click_xy/drag at web-screenshot coordinates; type
-        (replaces a referenced field, or types at focus without a ref); key; navigate."""
+        (replaces a referenced field, or types at focus without a ref); key; navigate.
+        hover moves the renderer pointer to a fresh ref on Chromium/Electron CDP
+        only. Re-snapshot to verify its effect; Safari returns unsupported."""
         self._session()
         if getattr(self._computer, "backend", "") == "safari":
             from .destinations import navigation_refusal

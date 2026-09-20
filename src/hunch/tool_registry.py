@@ -18,13 +18,15 @@ _ACTION_ITEM = {
 _WEB_ACTION_ITEM = {
     "type": "object",
     "properties": {
-        "action": {"type": "string", "enum": ["click", "click_xy", "drag", "type", "key", "navigate"]},
+        "action": {"type": "string", "enum": ["click", "hover", "click_xy", "drag", "type", "key", "navigate"]},
         "ref": {"type": "string"}, "text": {"type": "string"},
         "key": {"type": "string"}, "modifiers": {"type": "array", "items": {"type": "string"}},
         "url": {"type": "string"}, "x": {"type": "number"}, "y": {"type": "number"},
         "from_x": {"type": "number"}, "from_y": {"type": "number"},
         "to_x": {"type": "number"}, "to_y": {"type": "number"}},
-    "required": ["action"]}
+    "required": ["action"],
+    "allOf": [{"if": {"properties": {"action": {"const": "hover"}}},
+               "then": {"required": ["ref"], "properties": {"ref": {"minLength": 1}}}}]}
 
 
 def _obj(props=None, required=None):
@@ -123,6 +125,9 @@ BASE_TOOLS = [
      "description": ("Run focus-free page actions, then get the updated tree. Verbs: click (by ref), "
                      "click_xy/drag (coordinates from web_screenshot; canvas editors), type "
                      "(with ref REPLACES a field; without ref types at current focus), key, navigate. "
+                     "hover requires a fresh ref and is supported on Chromium/Electron CDP only; "
+                     "it moves the renderer pointer without clicking or moving the Mac cursor. "
+                     "Re-snapshot to verify revealed controls; Safari hover is unsupported. "
                      "Safari canvas coordinate/keyboard actions are native window-routed, remain "
                      "available in simultaneous mode, and are distinct from shared-input native act "
                      "actions. Navigate "

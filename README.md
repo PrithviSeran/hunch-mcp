@@ -134,6 +134,20 @@ Constructor knobs: `app` (initial snapshot target), `confirm="dialog"|"off"` (se
 `check_permissions` (Accessibility check up front), `simultaneous` (never touch the
 foreground/cursor/keyboard), `cdp_port`.
 
+To reveal hover menus or tooltips in a **Chromium/Electron CDP** session, use a ref
+from the latest `web_snapshot`:
+
+```python
+mac.web.act([{"action": "hover", "ref": "e12"}], detailed=True)
+print(mac.web.snapshot())  # verify the revealed UI and get fresh refs before clicking
+```
+
+The MCP equivalent is `web_act` with the same action. Hover sends a renderer-local
+mouse-move event, without a click, app activation, or movement of the Mac cursor.
+Its receipt is `performed_unverified` unless an explicit postcondition verifies
+the requested field. Safari returns unsupported (a detailed call returns `blocked`
+with zero attempted actions); native `act` does not advertise hover.
+
 - **Permissions**: for library use it's *whatever runs your script* — your terminal or IDE — that
   needs Accessibility (the MCP server instead uses the host app's grant). The constructor checks
   and raises `AccessibilityNotGranted` with instructions. `screenshot()` additionally needs
