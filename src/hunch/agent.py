@@ -89,7 +89,7 @@ _DISPATCH = {
                                         isolated=a.get("isolated", False),
                                         new_window=a.get("new_window", False)),
     "web_login": lambda m, a: m.web.login(url=a.get("url", ""), app=a.get("app", "Google Chrome")),
-    "web_snapshot": lambda m, a: m.web.snapshot(),
+    "web_snapshot": lambda m, a: m.web.snapshot(**a),
     "web_screenshot": lambda m, a: m.web.screenshot(),
     "web_act": lambda m, a: m.web.act(a.get("actions", []), detailed=a.get("detailed", False),
                                      postcondition=a.get("postcondition")),

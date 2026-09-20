@@ -113,8 +113,9 @@ BASE_TOOLS = [
                      "user-attention notification when enabled."),
      "input_schema": _obj({"app": {"type": "string"}, "url": {"type": "string"}})},
     {"name": "web_snapshot",
-     "description": "Read the bound Safari or CDP page as an accessibility tree. Call web_open first.",
-     "input_schema": _obj()},
+     "description": "Read the bound page. CDP structured output preserves full names/values and reports omissions.",
+     "input_schema": _obj({"structured": {"type": "boolean"},
+                           "max_nodes": {"type": "integer", "minimum": 1, "maximum": 20000}})},
     {"name": "web_screenshot",
      "description": ("PNG of the bound CDP page or Safari window (focus-free) — for visual web "
                      "content the tree can't convey. Safari uses ScreenCaptureKit and includes live "
