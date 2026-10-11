@@ -14,14 +14,16 @@ POS, SIZE = ax.kAXPositionAttribute, ax.kAXSizeAttribute
 
 class FakeEl:
     """A fake AX element: role/title/value plus children."""
-    def __init__(self, role, title="", value="", desc="", children=()):
+    def __init__(self, role, title="", value="", desc="", children=(), label=None, placeholder=""):
         self.role, self.title, self.value, self.desc = role, title, value, desc
         self.children = list(children)
+        self.label, self.placeholder = label, placeholder
 
     def attrs(self):
         return {ROLE: self.role, TITLE: self.title, DESC: self.desc,
                 VALUE: self.value or None, ENABLED: True, POS: None, SIZE: None,
-                CHILDREN: self.children or None}
+                CHILDREN: self.children or None,
+                "AXTitleUIElement": self.label, "AXPlaceholderValue": self.placeholder or None}
 
 
 class Fetcher:
@@ -44,7 +46,7 @@ def _session():
     return s
 
 
-def _snapshot_tree(s, root, **kw):
+def _snapshot_tree(s, root, compact=True, **kw):
     """Drive the walk exactly like MacSession.snapshot does, minus window resolution."""
     max_depth = _cap_depth(kw.get("max_depth"), _MAX_DEPTH)
     max_nodes = _cap_nodes(kw.get("max_nodes"), _MAX_NODES)
@@ -52,7 +54,7 @@ def _snapshot_tree(s, root, **kw):
     s.snapshot_count += 1
     lines = ["=== FakeApp ==="]
     budget = {"left": max_nodes, "hit": False}
-    s._walk(root, 0, "", lines, True, max_depth, budget)
+    s._walk(root, 0, "", lines, compact, max_depth, budget)
     if budget["hit"]:
         lines.append(local_mac._TRUNC_FOOTER.format(n=max_nodes))
     return "\n".join(lines)
@@ -263,3 +265,58 @@ if __name__ == "__main__":
         getattr(mod, name)()
         print(f"ok {name}")
     print("all walk tests passed")
+
+
+class LabelFetcher(Fetcher):
+    """Also counts reads of the label attributes."""
+    def __init__(self):
+        super().__init__()
+        self.label_reads = 0
+
+    def __call__(self, el, attrs):
+        if tuple(attrs) == local_mac._LABEL_ATTRS:
+            self.label_reads += 1
+        return super().__call__(el, attrs)
+
+
+def _labelled_window():
+    theme = FakeEl("AXStaticText", value="Theme")
+    return FakeEl("AXWindow", "Settings", children=[
+        theme,
+        FakeEl("AXPopUpButton", value="System", label=theme),
+        FakeEl("AXTextField", placeholder="Search notes"),
+        FakeEl("AXButton", "Save"),
+        FakeEl("AXRow", children=[FakeEl("AXStaticText", value="Sign in")]),
+        FakeEl("AXRow", desc="Channels", children=[FakeEl("AXStaticText", value="general")]),
+    ])
+
+
+def test_an_unnamed_control_shows_its_label_or_placeholder_without_changing_refs():
+    win = _labelled_window()
+    plain = FakeEl("AXWindow", "Settings", children=[
+        FakeEl("AXStaticText", value="Theme"), FakeEl("AXPopUpButton", value="System"),
+        FakeEl("AXTextField"), FakeEl("AXButton", "Save"),
+        FakeEl("AXRow", children=[FakeEl("AXStaticText", value="Sign in")]),
+        FakeEl("AXRow", desc="Channels", children=[FakeEl("AXStaticText", value="general")])])
+    s, t = _session(), _session()
+    fetch = LabelFetcher()
+    with _patched(fetch):
+        text = _snapshot_tree(s, win, compact=False)
+    with _patched(Fetcher()):
+        _snapshot_tree(t, plain, compact=False)
+    assert "AXPopUpButton \"Theme\" val='System'" in text
+    assert 'AXTextField "Search notes"' in text
+    assert 'AXRow "Sign in"' in text              # the row's name, as compact mode shows it
+    assert 'AXButton "Save"' in text
+    assert "AXRow (Channels)" in text and '"general"' not in text   # a description wins
+    assert s._ref_keys == t._ref_keys              # labels are display only: same refs
+    assert fetch.label_reads == 2                  # only the two unnamed controls pay for it
+
+
+def test_find_matches_a_control_by_its_label():
+    win = _labelled_window()
+    s = _session()
+    s._resolve_window = lambda app_name: (win, "FakeApp", None)
+    with _patched(Fetcher()):
+        text, info = s.find(role="AXPopUpButton", name_contains="theme")
+    assert info["matches"] == 1 and '"Theme"' in text

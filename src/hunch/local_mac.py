@@ -319,6 +319,9 @@ _ANCHOR = {"AXWindow", "AXSheet", "AXDialog"}
 # with the accessible name computed from their subtree, instead of dropping the
 # row and surfacing only its unselectable text leaf. General to any list/outline.
 _ROW_ROLES = {"AXRow", "AXOutlineRow", "AXListItem"}
+# Text inputs: an unnamed one is shown by its placeholder when nothing labels it.
+_TEXT_INPUTS = {"AXTextField", "AXTextArea", "AXSecureTextField", "AXSearchField", "AXComboBox"}
+_LABEL_ATTRS = ("AXTitleUIElement", "AXPlaceholderValue")
 
 _ATTRS = (ax.kAXRoleAttribute, ax.kAXTitleAttribute, ax.kAXDescriptionAttribute,
           ax.kAXValueAttribute, ax.kAXEnabledAttribute, ax.kAXPositionAttribute,
@@ -448,6 +451,30 @@ class MacSession:
         is_row = role in _ROW_ROLES
         name = (title or value or self._accessible_name(el)) if is_row else title
         return role, title, desc, value, enabled, name, is_row
+
+    def _label(self, el, role, title, desc, name, is_row):
+        """The name a line shows, for an element with no title and no description (those
+        show as they are). A row: its row name (its value, else its subtree's text). An
+        interactive control: the element that labels it (AXTitleUIElement, e.g. "Theme"
+        beside a pop-up), else a text input's placeholder. Only those unnamed controls pay
+        the extra reads. Display only: refs stay keyed on `name` (_seg_key), so no ref
+        changes."""
+        if title or desc:
+            return title
+        if is_row:
+            return name
+        if role not in _INTERACTIVE:
+            return ""
+        a = ax.get_attrs(el, _LABEL_ATTRS)
+        label = a.get("AXTitleUIElement")
+        if label is not None:
+            b = ax.get_attrs(label, (ax.kAXValueAttribute, ax.kAXTitleAttribute))
+            text = str(b.get(ax.kAXValueAttribute) or b.get(ax.kAXTitleAttribute) or "").strip()
+            if text:
+                return text
+        if role in _TEXT_INPUTS:
+            return str(a.get("AXPlaceholderValue") or "").strip()
+        return ""
 
     @staticmethod
     def _seg_key(parent_key, sib, role, name, desc):
@@ -644,13 +671,13 @@ class MacSession:
         needle = (name_contains or "").lower()
         results, searched, more = [], [0], [False]
 
-        def matches(role_, title, desc, value, name):
+        def matches(role_, title, desc, value, name, label):
             if want_role is not None:
                 r = role_.lower()
                 if (r[2:] if r.startswith("ax") else r) != want_role:
                     return False
             if needle:
-                hay = " ".join(x for x in (title, desc, value, name) if x).lower()
+                hay = " ".join(x for x in (title, desc, value, name, label()) if x).lower()
                 return needle in hay
             return True
 
@@ -662,11 +689,18 @@ class MacSession:
             a = ax.get_attrs(el, _ATTRS)
             role_, title, desc, value, enabled, name, is_row = self._describe(el, a)
             key = self._seg_key(parent_key, sib, role_, name, desc)
-            if matches(role_, title, desc, value, name):
+            shown_label = []
+
+            def label():
+                if not shown_label:
+                    shown_label.append(self._label(el, role_, title, desc, name, is_row) or name)
+                return shown_label[0]
+
+            if matches(role_, title, desc, value, name, label):
                 r = self._ref_for(key)
                 self.registry[r] = el
                 crumb = " > ".join(crumbs[-4:])
-                line = self._fmt_el(r, role_, title or name, desc, value, enabled)
+                line = self._fmt_el(r, role_, title or label(), desc, value, enabled)
                 results.append((crumb + " › " if crumb else "") + line)
             if depth >= max_depth:
                 return
@@ -735,7 +769,8 @@ class MacSession:
         if emit:
             ref = self._ref_for(key)
             self.registry[ref] = el
-            lines.append("  " * depth + self._fmt_el(ref, role, title, desc, value, enabled))
+            shown = self._label(el, role, title, desc, name, is_row)
+            lines.append("  " * depth + self._fmt_el(ref, role, shown, desc, value, enabled))
             depth_out = depth + 1
 
         children = a[ax.kAXChildrenAttribute]
