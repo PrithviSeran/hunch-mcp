@@ -582,7 +582,9 @@ class CDPSession:
             return ""
 
     # ── perception ──────────────────────────────────────────────────────
-    def snapshot(self, compact=True, max_nodes=1500):
+    def snapshot(self, compact=True, max_nodes=1500, structured=False):
+        if not isinstance(max_nodes, int) or isinstance(max_nodes, bool) or not 1 <= max_nodes <= 20000:
+            raise ValueError("max_nodes must be between 1 and 20000")
         self._follow_new_tab()   # if a click/form opened a new tab, move onto it before reading
         document = self._document_identity()
         self.registry = {}
@@ -591,7 +593,7 @@ class CDPSession:
         by_id = {n["nodeId"]: n for n in nodes}
         roots = [n for n in nodes if not n.get("parentId")]
         lines = [f"=== {self.title()[:60]} — CDP snapshot #{self.snapshot_count} ==="]
-        budget = {"left": max_nodes, "skipped": 0}
+        budget = {"left": max_nodes, "skipped": 0, "elements": []}
         for r in roots:
             self._walk(r, by_id, 0, lines, compact, budget)
         if budget["skipped"]:
@@ -602,6 +604,11 @@ class CDPSession:
             self.registry.clear()
             raise RuntimeError("CDP document changed during observation; retry snapshot")
         self._observed_document = document
+        if structured:
+            text = {"schema_version": "hunch.ax.v1", "url": self.url(),
+                    "complete": budget["skipped"] == 0, "omitted": budget["skipped"],
+                    "elements": budget["elements"]}
+            return text, {"refs": len(self.registry), "url": self.url()}
         return text, {"est_tokens": round(len(text) / 3.5), "refs": len(self.registry), "url": self.url()}
 
     @staticmethod
@@ -647,6 +654,13 @@ class CDPSession:
             if val and val != name:
                 parts.append(f"val={val[:80]!r}")
             props = {p["name"]: p.get("value", {}).get("value") for p in n.get("properties", [])}
+            if "elements" in budget:
+                semantic = {k: v for k, v in props.items() if k in
+                            {"checked", "expanded", "selected", "pressed", "readonly", "required", "multiselectable"}}
+                if val:
+                    semantic["value"] = val
+                budget["elements"].append({"ref": ref, "role": role, "name": name,
+                    "depth": depth, "enabled": not bool(props.get("disabled")), "properties": semantic})
             if props.get("disabled"):
                 parts.append("disabled")
             lines.append("  " * depth + " ".join(parts))
@@ -1118,8 +1132,8 @@ class CDPComputer:
             self.session.allowed_origins = allowed_origins
             self.session.pinned_app = _resolve_app(app) not in _BROWSER_ALIASES.values()
 
-    def snapshot(self):
-        return self.session.snapshot()[0]
+    def snapshot(self, structured=False, max_nodes=1500):
+        return self.session.snapshot(structured=structured, max_nodes=max_nodes)[0]
 
     def act(self, actions, detailed=False, postcondition=None):
         from .results import action_receipt, validate_postcondition

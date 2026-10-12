@@ -290,7 +290,7 @@ def web_login(app: str = "Google Chrome", url: str = "") -> str:
 
 
 @mcp.tool()
-def web_snapshot() -> str:
+def web_snapshot(structured: bool = False, max_nodes: int = 1500) -> str | dict:
     """Look at the bound Safari or CDP browser/Electron page as an accessibility tree
     ([ref] per element). Call web_open first.
 
@@ -300,7 +300,7 @@ def web_snapshot() -> str:
     web_snapshot again. NEVER use the OS `screenshot` tool to see a web page — it captures the
     physical frontmost screen, which for a BACKGROUND CDP window is the user's OWN window, not this
     page. To see the page as pixels focus-free, use `web_screenshot`."""
-    return _run("web_snapshot")
+    return _run("web_snapshot", structured=structured, max_nodes=max_nodes)
 
 
 @mcp.tool()

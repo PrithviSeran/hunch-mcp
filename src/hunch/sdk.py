@@ -749,9 +749,13 @@ class Web:
         snap = self._computer.snapshot()
         return f"restarted {app} over CDP ({snap.count('[e')} elements)"
 
-    def snapshot(self):
-        """The current page as a ref-annotated accessibility tree (focus-free)."""
+    def snapshot(self, structured=False, max_nodes=1500):
+        """Read the current tree; structured CDP output preserves full names/values."""
         self._session()
+        if structured or max_nodes != 1500:
+            if getattr(self._computer, "backend", "") == "safari":
+                raise HunchError("structured/bounded snapshots require CDP")
+            return self._h._redact(self._computer.snapshot(structured=structured, max_nodes=max_nodes))
         return self._h._redact(self._computer.snapshot())
 
     def act(self, actions, detailed=False, postcondition=None):
