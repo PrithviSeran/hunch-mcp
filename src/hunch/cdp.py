@@ -985,12 +985,18 @@ class CDPSession:
         mods = 0
         for m in (modifiers or []):
             mods |= self._MODBITS.get(str(m).lower(), 0)
-        # with a modifier held it's a shortcut, not text entry -> rawKeyDown (no char event)
-        down = "rawKeyDown" if mods else "keyDown"
+        # with Ctrl/Alt/Meta held it's a shortcut, not text entry -> rawKeyDown (no char event).
+        # Otherwise the key carries the text it types, as a keyboard's does: without it Chrome
+        # sends no keypress and does no default action (Enter does not submit its form).
+        text = "\r" if k == "Enter" else k if len(k) == 1 else None
+        shortcut = mods & ~self._MODBITS["shift"]
+        down = "rawKeyDown" if shortcut else "keyDown"
         for t in (down, "keyUp"):
-            self._cmd("Input.dispatchKeyEvent",
-                      {"type": t, "key": k, "code": codefield, "modifiers": mods,
-                       "windowsVirtualKeyCode": code, "nativeVirtualKeyCode": code})
+            event = {"type": t, "key": k, "code": codefield, "modifiers": mods,
+                     "windowsVirtualKeyCode": code, "nativeVirtualKeyCode": code}
+            if t == "keyDown" and text:
+                event.update(text=text, unmodifiedText=text)
+            self._cmd("Input.dispatchKeyEvent", event)
         return "pressed " + "+".join([str(m) for m in (modifiers or [])] + [key])
 
     def mark(self):
