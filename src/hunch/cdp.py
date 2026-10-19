@@ -67,6 +67,10 @@ def _is_blocked_host(host):
 
 
 # ── ARIA/CDP roles worth surfacing (interactive + content), like the AX filter ──
+# A snapshot line shows at most this many characters of an element's name (see snapshot's
+# `full_names`).
+NAME_LIMIT = 90
+
 _INTERACTIVE = {"link", "button", "textbox", "searchbox", "checkbox", "radio",
                 "combobox", "listbox", "option", "menuitem", "menuitemcheckbox",
                 "menuitemradio", "tab", "switch", "slider", "spinbutton", "textfield"}
@@ -582,7 +586,10 @@ class CDPSession:
             return ""
 
     # ── perception ──────────────────────────────────────────────────────
-    def snapshot(self, compact=True, max_nodes=1500):
+    def snapshot(self, compact=True, max_nodes=1500, full_names=False):
+        """The page's accessibility tree as ref-annotated lines. Names are shortened to
+        NAME_LIMIT characters to keep the text small; `full_names` keeps every name whole, for
+        a caller that matches elements by their exact name."""
         self._follow_new_tab()   # if a click/form opened a new tab, move onto it before reading
         document = self._document_identity()
         self.registry = {}
@@ -593,7 +600,7 @@ class CDPSession:
         lines = [f"=== {self.title()[:60]} — CDP snapshot #{self.snapshot_count} ==="]
         budget = {"left": max_nodes, "skipped": 0}
         for r in roots:
-            self._walk(r, by_id, 0, lines, compact, budget)
+            self._walk(r, by_id, 0, lines, compact, budget, full_names)
         if budget["skipped"]:
             lines.append(f"…tree truncated at {max_nodes} elements shown (+{budget['skipped']} "
                          "more) — interact/scroll to change the page, then web_snapshot again")
@@ -623,7 +630,7 @@ class CDPSession:
             return True
         return False
 
-    def _walk(self, n, by_id, depth, lines, compact, budget):
+    def _walk(self, n, by_id, depth, lines, compact, budget, full_names=False):
         role = (n.get("role", {}) or {}).get("value", "") or ""
         name = self._name(n)
         val = self._val(n)
@@ -643,7 +650,7 @@ class CDPSession:
             ref = self._ref(backend)
             parts = [f"[{ref}]", role]
             if name:
-                parts.append(f'"{name[:90]}"')
+                parts.append(f'"{name if full_names else name[:NAME_LIMIT]}"')
             if val and val != name:
                 parts.append(f"val={val[:80]!r}")
             props = {p["name"]: p.get("value", {}).get("value") for p in n.get("properties", [])}
@@ -655,7 +662,7 @@ class CDPSession:
         for cid in n.get("childIds", []):
             c = by_id.get(cid)
             if c is not None:
-                self._walk(c, by_id, child_depth, lines, compact, budget)
+                self._walk(c, by_id, child_depth, lines, compact, budget, full_names)
 
     # ── actions (all focus-free: dispatched into the renderer) ───────────
     def _center(self, ref):
@@ -1124,8 +1131,8 @@ class CDPComputer:
             self.session.allowed_origins = allowed_origins
             self.session.pinned_app = _resolve_app(app) not in _BROWSER_ALIASES.values()
 
-    def snapshot(self):
-        return self.session.snapshot()[0]
+    def snapshot(self, full_names=False):
+        return self.session.snapshot(full_names=full_names)[0]
 
     def act(self, actions, detailed=False, postcondition=None):
         from .results import action_receipt, validate_postcondition

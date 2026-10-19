@@ -749,10 +749,16 @@ class Web:
         snap = self._computer.snapshot()
         return f"restarted {app} over CDP ({snap.count('[e')} elements)"
 
-    def snapshot(self):
-        """The current page as a ref-annotated accessibility tree (focus-free)."""
+    def snapshot(self, full_names=False):
+        """The current page as a ref-annotated accessibility tree (focus-free). Long names are
+        shortened; `full_names=True` keeps them whole (CDP pages only)."""
         self._session()
-        return self._h._redact(self._computer.snapshot())
+        if not full_names:
+            return self._h._redact(self._computer.snapshot())
+        from .cdp import CDPComputer
+        if not isinstance(self._computer, CDPComputer):
+            raise ValueError("full_names is available on CDP pages only")
+        return self._h._redact(self._computer.snapshot(full_names=True))
 
     def act(self, actions, detailed=False, postcondition=None):
         """Page actions: click by ref; click_xy/drag at web-screenshot coordinates; type
