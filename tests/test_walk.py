@@ -258,6 +258,21 @@ def test_cdp_truncation_marker():
     assert len(lines) == 2 and budget["skipped"] == 3
 
 
+def test_cdp_full_names_keeps_long_names_whole():
+    """Names are shortened to NAME_LIMIT by default; full_names keeps them whole."""
+    from hunch.cdp import CDPSession, NAME_LIMIT
+    s = CDPSession.__new__(CDPSession)
+    s.registry, s._counter, s.snapshot_count = {}, 0, 0
+    long = "x" * (NAME_LIMIT + 3)
+    nodes = {0: {"nodeId": 0, "role": {"value": "link"}, "name": {"value": long},
+                 "backendDOMNodeId": 0, "childIds": []}}
+    short, whole = [], []
+    s._walk(nodes[0], nodes, 0, short, True, {"left": 10, "skipped": 0})
+    s._walk(nodes[0], nodes, 0, whole, True, {"left": 10, "skipped": 0}, full_names=True)
+    assert f'"{"x" * NAME_LIMIT}"' in short[0]
+    assert f'"{long}"' in whole[0]
+
+
 if __name__ == "__main__":
     import sys
     mod = sys.modules[__name__]
