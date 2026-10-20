@@ -22,6 +22,14 @@ class WebNotOpen(HunchError):
     """A .web method was called before .web.open()."""
 
 
+class UnsupportedPlatform(HunchError):
+    """The called surface needs macOS. The web surface runs on Linux; native apps do not."""
+
+
+class StaleRef(Exception):
+    """An element ref expired. Re-snapshot. Not a HunchError: callers catch it on its own."""
+
+
 from dataclasses import dataclass  # noqa: E402  (kept below the exceptions on purpose)
 
 

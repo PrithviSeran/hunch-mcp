@@ -255,7 +255,56 @@ def cmd_connect(args):
 # ── doctor ─────────────────────────────────────────────────────────────────────
 
 
+def _doctor_linux(args):
+    """Chrome and DISPLAY. Native Mac features are named, not probed."""
+    failed = False
+    print(f"hunch {__version__} — doctor (Linux web surface)\n")
+
+    print("Runtime")
+    if sys.version_info >= (3, 11):
+        _ok(f"python {sys.version.split()[0]}")
+    else:
+        failed |= _fail(f"python {sys.version.split()[0]} — need >= 3.11")
+    for mod, why in [("mcp.server.fastmcp", "MCP SDK"),
+                     ("websocket", "websocket-client (web/CDP layer)")]:
+        try:
+            __import__(mod)
+            _ok(f"import {mod} ({why})")
+        except Exception as e:
+            failed |= _fail(f"import {mod} ({why}): {e}")
+
+    print("\nWeb layer (CDP)")
+    try:
+        from .procs import linux_app_path
+        _ok(f"Chrome binary: {linux_app_path('')}")
+    except Exception as e:
+        failed |= _fail(str(e))
+    if os.environ.get("DISPLAY"):
+        _ok(f"DISPLAY={os.environ['DISPLAY']} (Chrome runs on this display, not headless)")
+    else:
+        _warn("DISPLAY is unset — Chrome is not launched headless; run under Xvfb or set DISPLAY")
+    if os.path.isdir(CHROME_PROFILE):
+        _ok(f"Hunch browser profile exists ({CHROME_PROFILE})")
+    else:
+        _warn("no Hunch browser profile yet — the first web.open creates one")
+    try:
+        with socket.create_connection(("127.0.0.1", CDP_PORT), timeout=0.3):
+            _warn(f"something is already listening on port {CDP_PORT}")
+    except OSError:
+        _ok(f"CDP port {CDP_PORT} free")
+
+    print("\nmacOS-only")
+    _warn("native apps, Accessibility, Screen Recording, Safari, AppleScript, "
+          "files, and clipboard need macOS")
+
+    print("\n" + ("Some checks FAILED — fix the above and re-run." if failed else
+                  "No failures. WARNs (if any) explain themselves above."))
+    return 1 if failed else 0
+
+
 def cmd_doctor(args):
+    if sys.platform != "darwin":
+        return _doctor_linux(args)
     failed = False
     print(f"hunch {__version__} — doctor\n")
 

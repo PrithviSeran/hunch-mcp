@@ -5,11 +5,12 @@ doctor) must work even when pyobjc or the MCP SDK are missing, so nothing here
 may import them. The server loads lazily via `hunch serve`.
 """
 
-__version__ = "0.7.6"
+__version__ = "0.8.0"
 
 # Public SDK surface, loaded lazily (PEP 562) so bare `import hunch` stays dependency-free.
-# Names mapped to .sdk/.agent/.local_mac pull in pyobjc; .errors/.auth/.providers stay
-# stdlib-only, so hunch.provider(...)/AuthStatus and the exceptions work without the heavy deps.
+# Names mapped to .sdk/.agent pull in pyobjc on macOS only, and only when a native
+# method runs. .errors/.auth/.providers stay stdlib-only, so hunch.provider(...),
+# AuthStatus, and the exceptions work without the heavy deps — including on Linux.
 _LAZY = {
     "Hunch": ".sdk",
     "Agent": ".agent",
@@ -18,7 +19,8 @@ _LAZY = {
     "ApprovalDenied": ".errors",
     "AccessibilityNotGranted": ".errors",
     "WebNotOpen": ".errors",
-    "StaleRef": ".local_mac",
+    "UnsupportedPlatform": ".errors",
+    "StaleRef": ".errors",
     "provider": ".providers",   # hunch.provider("claude"|"codex") — auth + agent loop, standalone
     "Provider": ".providers",
     "AuthStatus": ".providers",  # the uniform sign-in status returned by provider.status()

@@ -34,6 +34,29 @@ jobs:
       - name: Run tests
         run: python -m pytest tests/
 
+  linux:
+    name: Linux web
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install package and test runner
+        run: python -m pip install '.[agent]' pytest
+      - name: Linux-safe tests
+        run: python -m pytest tests/
+      - name: Install a display
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - uses: browser-actions/setup-chrome@v1
+      - name: Live Chrome smoke
+        run: xvfb-run -a python -m pytest tests/test_linux_web_smoke.py
+        env:
+          HUNCH_LINUX_WEB_SMOKE: "1"
+
   package:
     name: Build package
     runs-on: ubuntu-latest

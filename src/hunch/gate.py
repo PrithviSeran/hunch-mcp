@@ -10,17 +10,33 @@ through the app's own UI via a confirm callback, branded with the app's name.
 This module must never import server.py (module-load side effects) or the MCP SDK.
 """
 import os
+import sys
 import time
 import subprocess
 
 from . import policy
-from .local_mac import set_focus_reason, suppress_focus_notice, _frontmost
 from .notify import as_str
 
 # Exceptions live in errors.py (dependency-free, importable by auth/cli without pyobjc);
 # re-exported here so `from .gate import HunchError` keeps working everywhere.
 from .errors import (HunchError, ApprovalDenied, AccessibilityNotGranted, WebNotOpen,  # noqa: F401
-                     ConsentRequest)
+                     ConsentRequest, UnsupportedPlatform)
+
+
+def _frontmost():
+    """Lazy: importing local_mac pulls in pyobjc, which Linux does not have."""
+    from .local_mac import _frontmost as impl
+    return impl()
+
+
+def _set_focus_reason(reason):
+    from .local_mac import set_focus_reason
+    return set_focus_reason(reason)
+
+
+def _suppress_focus_notice(seconds):
+    from .local_mac import suppress_focus_notice
+    return suppress_focus_notice(seconds)
 
 
 
@@ -96,6 +112,8 @@ class Gate:
         elif self.confirm == "off":
             ok = True                       # instance-wide auto-approve
         else:
+            if sys.platform != "darwin":
+                raise UnsupportedPlatform("confirm='dialog' needs macOS; pass confirm='off' or a callable")
             script = (f'tell application "System Events" to display dialog {as_str(prompt)} '
                       f'with title {as_str(self.app_name + " wants your screen")} '
                       f'buttons {{"Cancel", "Go ahead"}} '
@@ -114,7 +132,8 @@ class Gate:
     def mark_screen_approval(self):
         self._screen_ok_until = time.monotonic() + APPROVAL_WINDOW_S
         self._screen_ok_target = getattr(self, "_screen_target", None)
-        suppress_focus_notice(APPROVAL_WINDOW_S)
+        if sys.platform == "darwin":
+            _suppress_focus_notice(APPROVAL_WINDOW_S)
 
     def bind_screen_target(self, target):
         self._screen_target = target
@@ -151,7 +170,7 @@ def check_focus_steal(computer, actions, gate, confirm=False, reason=""):
                              getattr(session, "_selected_window", None)))
     stealing = [a for a in actions if computer._is_shared_input(a)]
     if stealing:
-        set_focus_reason(reason)   # the focus-switch warning tells the user WHY
+        _set_focus_reason(reason)   # the focus-switch warning tells the user WHY
     if (stealing and not computer.simultaneous and not confirm
             and not gate.screen_approved() and gate.enabled("focus_steal")):
         kinds = ", ".join(sorted({a.get("action") for a in stealing}))
