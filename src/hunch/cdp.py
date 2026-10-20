@@ -11,6 +11,7 @@ the same agent loop.
 
 import os
 import re
+import sys
 import json
 import base64
 import struct
@@ -222,20 +223,15 @@ _OWNED_ENDPOINTS = {}
 
 
 def _endpoint_listeners(port):
-    result = subprocess.run(["lsof", "-nP", "-FpdRn", f"-iTCP:{int(port)}", "-sTCP:LISTEN"],
-                            capture_output=True, text=True, timeout=3)
-    listeners = {}
-    current = None
-    for line in result.stdout.splitlines():
-        if line.startswith("p"):
-            current = listeners.setdefault(int(line[1:]), {"parent": None, "sockets": set()})
-        elif current is not None and line.startswith("R"):
-            current["parent"] = int(line[1:])
-        elif current is not None and line.startswith("d"):
-            current["sockets"].add(line[1:])
-    if result.returncode:
-        return {}
-    return listeners
+    from .procs import endpoint_listeners
+    return endpoint_listeners(port)
+
+
+def _socket_id_ok(socket_id):
+    """macOS lsof device ids are 0x…; Linux reports the socket inode."""
+    if re.fullmatch(r"0x[0-9a-fA-F]+", socket_id):
+        return int(socket_id, 16) != 0
+    return bool(re.fullmatch(r"[1-9][0-9]*", socket_id))
 
 
 def _endpoint_owner(listeners):
@@ -248,7 +244,7 @@ def _endpoint_owner(listeners):
     if not sockets or len(sockets[0]) != 1 or any(s != sockets[0] for s in sockets):
         return None
     socket_id = next(iter(sockets[0]))
-    if not re.fullmatch(r"0x[0-9a-fA-F]+", socket_id) or int(socket_id, 16) == 0:
+    if not _socket_id_ok(socket_id):
         return None
     roots = [pid for pid, entry in listeners.items() if entry["parent"] not in listeners]
     if len(roots) != 1:
@@ -266,30 +262,25 @@ def _endpoint_owner(listeners):
 
 def endpoint_identity(port):
     """Resolve the listening application, including verified inherited sockets."""
-    from .local_mac import _running_identity
+    from .procs import running_identity
     from .targets import process_key
     listeners = _endpoint_listeners(port)
     pid = _endpoint_owner(listeners)
     if pid is None:
         raise RuntimeError(f"cannot verify one owning process for CDP port {port}")
-    identity = _running_identity(pid)
+    identity = running_identity(pid)
     if not identity:
         raise RuntimeError(f"CDP port {port} owner has no application identity")
     if len(listeners) > 1:
         if (_endpoint_listeners(port) != listeners
-                or process_key(_running_identity(pid) or {}) != process_key(identity)):
+                or process_key(running_identity(pid) or {}) != process_key(identity)):
             raise RuntimeError(f"CDP port {port} ownership changed during verification; retry attachment")
     return identity
 
 
 def _app_path(app):
-    from AppKit import NSWorkspace
-    if os.path.isabs(app):
-        return os.path.realpath(app)
-    path = NSWorkspace.sharedWorkspace().fullPathForApplication_(app)
-    if not path:
-        raise RuntimeError(f"cannot resolve installed application {app!r}")
-    return os.path.realpath(str(path))
+    from .procs import app_path
+    return app_path(app)
 
 
 def verify_endpoint(port, app):
@@ -309,6 +300,9 @@ def launch_chromium(app_name, port, url=None, background=True, isolated=False, p
         if refusal:
             raise RuntimeError(refusal)
     app = _resolve_app(app_name)
+    if editor and sys.platform != "darwin":
+        from .errors import UnsupportedPlatform
+        raise UnsupportedPlatform("Electron editors need macOS")
     try:
         urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=1).read()
         listening = True
@@ -321,7 +315,12 @@ def launch_chromium(app_name, port, url=None, background=True, isolated=False, p
                 or isolated or owned["profile"] != os.path.realpath(profile or HUNCH_PROFILE)):
             raise RuntimeError(f"CDP port {port} is already in use; explicitly attach or select a free port")
         return f"reusing verified CDP instance on :{port}"
-    data_dir = tempfile.mkdtemp(prefix="hunch_cdp_", dir="/private/tmp") if isolated else os.path.realpath(profile or HUNCH_PROFILE)
+    if isolated:
+        # macOS keeps the historical /private/tmp parent. Linux uses the system temp dir.
+        parent = "/private/tmp" if sys.platform == "darwin" else tempfile.gettempdir()
+        data_dir = tempfile.mkdtemp(prefix="hunch_cdp_", dir=parent)
+    else:
+        data_dir = os.path.realpath(profile or HUNCH_PROFILE)
     # Leave room for the editor's versioned socket basename (macOS limit: 103 bytes).
     if editor and len(os.fsencode(data_dir)) > 70:
         raise RuntimeError("editor profile path is too long for macOS IPC; choose a shorter cdp_profile")
@@ -332,14 +331,26 @@ def launch_chromium(app_name, port, url=None, background=True, isolated=False, p
             "--disable-renderer-backgrounding"]
     if url:
         args.append(url)
-    command = ["open"] + (["-g"] if background else []) + ["-na", app, "--args"] + args
-    result = subprocess.run(command, capture_output=True, text=True)
-    if result.returncode:
-        raise RuntimeError(f"failed to launch {app}: {result.stderr.strip()}")
+    if sys.platform == "darwin":
+        command = ["open"] + (["-g"] if background else []) + ["-na", app, "--args"] + args
+        result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode:
+            raise RuntimeError(f"failed to launch {app}: {result.stderr.strip()}")
+    else:
+        # background is a macOS `open -g` flag. On Linux, Chrome uses the DISPLAY it is given
+        # (Xvfb in a container). Headless is not the default: it is flagged more often and
+        # renders differently from the pages a recording saw.
+        binary = _app_path(app)
+        log = open(os.path.join(data_dir, "chrome.log"), "ab")
+        try:
+            subprocess.Popen([binary, *args], start_new_session=True, stdin=subprocess.DEVNULL,
+                             stdout=log, stderr=subprocess.STDOUT)
+        finally:
+            log.close()
     _wait_for_port(port, timeout=15)
     identity = verify_endpoint(port, app)
-    from .local_mac import _proc_cmdline
-    command_line = _proc_cmdline(identity["pid"])
+    from .procs import proc_cmdline
+    command_line = proc_cmdline(identity["pid"])
     if f"--user-data-dir={data_dir}" not in command_line:
         raise RuntimeError("launched endpoint did not preserve the requested profile; ownership unverified")
     _OWNED_ENDPOINTS[port] = {"identity": identity, "profile": data_dir, "app": app,
@@ -349,24 +360,15 @@ def launch_chromium(app_name, port, url=None, background=True, isolated=False, p
 
 def quit_cdp(port, *, owner=None):
     """Gracefully quit a process this runtime launched, after rechecking ownership."""
-    from AppKit import NSRunningApplication
+    from .procs import terminate
     from .targets import process_key
-    from .local_mac import _process_alive
     owned = _OWNED_ENDPOINTS.get(port)
     if not owned or owned.get("owner") is not owner:
         raise RuntimeError(f"cannot quit unowned CDP endpoint :{port}; attach or inspect it first")
     identity = endpoint_identity(port)
     if process_key(identity) != process_key(owned["identity"]):
         raise RuntimeError("CDP ownership changed; refusing to quit")
-    app = NSRunningApplication.runningApplicationWithProcessIdentifier_(identity["pid"])
-    if app is None:
-        raise RuntimeError("CDP owning process disappeared")
-    app.terminate()
-    deadline = time.monotonic() + 6
-    while _process_alive(identity["pid"]) and time.monotonic() < deadline:
-        time.sleep(0.2)
-    if _process_alive(identity["pid"]):
-        raise RuntimeError("CDP application did not quit gracefully; resolve its save/confirmation prompt")
+    terminate(identity["pid"])
     del _OWNED_ENDPOINTS[port]
     return f"quit CDP instance on :{port}"
 

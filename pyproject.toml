@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "hunch-sdk"
 version = "0.7.6"
-description = "Drive your Mac focus-free over MCP: OS APIs, AppleScript, CDP, and Accessibility."
+description = "Drive Mac apps focus-free, and the Chromium web surface on macOS and Linux. Mac apps need macOS; the web surface runs on macOS and Linux."
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
@@ -17,6 +17,7 @@ classifiers = [
   "Environment :: MacOS X",
   "Intended Audience :: Developers",
   "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
@@ -26,11 +27,11 @@ dependencies = [
   "mcp>=1.2,<2",
   "jsonschema>=4.20",
   "websocket-client>=1.6",
-  "pyobjc-framework-Cocoa>=10.0",
-  "pyobjc-framework-ApplicationServices>=10.0",
-  "pyobjc-framework-Quartz>=10.0",
-  "pyobjc-framework-ScreenCaptureKit>=10.0",
-  "pyobjc-framework-CoreMedia>=10.0",
+  "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
+  "pyobjc-framework-ApplicationServices>=10.0; sys_platform == 'darwin'",
+  "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
+  "pyobjc-framework-ScreenCaptureKit>=10.0; sys_platform == 'darwin'",
+  "pyobjc-framework-CoreMedia>=10.0; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]

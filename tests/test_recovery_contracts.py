@@ -12,9 +12,10 @@ from hunch.tool_registry import catalog
 
 
 def test_inherited_endpoint_listener_parsing(monkeypatch):
-    monkeypatch.setattr(cdp.subprocess, "run", lambda *a, **k: SimpleNamespace(
+    from hunch import procs
+    monkeypatch.setattr(procs.subprocess, "run", lambda *a, **k: SimpleNamespace(
         returncode=0, stdout="p10\nR1\nf57\nd0xabc\nn127.0.0.1:9222\np20\nR10\nf57\nd0xabc\n"))
-    assert cdp._endpoint_owner(cdp._endpoint_listeners(9222)) == 10
+    assert cdp._endpoint_owner(procs.darwin_endpoint_listeners(9222)) == 10
 
 
 @pytest.mark.parametrize("listeners", [
@@ -338,7 +339,8 @@ def test_failed_graceful_cdp_quit_never_forces(monkeypatch):
     monkeypatch.setattr(cdp, "endpoint_identity", lambda _: identity)
     monkeypatch.setattr(local_mac, "_process_alive", lambda _: True)
     clock = iter([0, 7])
-    monkeypatch.setattr(cdp.time, "monotonic", lambda: next(clock))
+    from hunch import procs
+    monkeypatch.setattr(procs.time, "monotonic", lambda: next(clock))
     with pytest.raises(RuntimeError, match="did not quit gracefully"):
         cdp.quit_cdp(9222, owner=owner)
     assert calls == ["terminate"] and 9222 in cdp._OWNED_ENDPOINTS

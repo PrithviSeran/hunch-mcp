@@ -1,5 +1,6 @@
 """Session target identity and selection, independent of AX transport calls."""
 import os
+import sys
 import plistlib
 from dataclasses import dataclass
 from functools import lru_cache
@@ -53,6 +54,8 @@ def _bundle_metadata(path, modified):
 
 
 def bundle_metadata(app_path):
+    if sys.platform != "darwin":
+        return {}
     path = os.path.join(app_path, "Contents", "Info.plist")
     try:
         return _bundle_metadata(path, os.stat(path).st_mtime_ns)

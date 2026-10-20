@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 from pathlib import Path
 import plistlib
 import shutil
@@ -241,6 +242,7 @@ def test_socket_timeout_preserves_uncertain_action_outcome(tmp_path, monkeypatch
         client.request("act", {})
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="Safari needs macOS")
 def test_sdk_routes_safari_without_changing_the_public_web_tools(monkeypatch):
     from hunch.sdk import Hunch
 

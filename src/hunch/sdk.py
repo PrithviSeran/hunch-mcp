@@ -32,24 +32,41 @@ state, so multiple Hunch instances in one process share it. One process drives
 one Mac, so in practice this doesn't bite.
 """
 import base64
+import sys
 
 from . import gate
-from . import os_ops
 from . import policy as _policy_mod
+from .errors import StaleRef, UnsupportedPlatform
 from .gate import (HunchError, ApprovalDenied, AccessibilityNotGranted, WebNotOpen)  # re-export
 from .cli import CDP_PORT
-from .local_mac import (LocalComputer, StaleRef, screenshot_b64, list_running_apps,
-                        set_focus_reason,
-                        launch_app as _launch_app, quit_app as _quit_app, focus_app as _focus_app)
-from .notify import notify as _notify
 
 __all__ = ["Hunch", "HunchError", "ApprovalDenied", "AccessibilityNotGranted",
-           "WebNotOpen", "StaleRef"]
+           "WebNotOpen", "UnsupportedPlatform", "StaleRef"]
+
+
+def _require_macos(method):
+    if sys.platform != "darwin":
+        raise UnsupportedPlatform(f"{method} needs macOS")
 
 
 def _frontmost():
     from .local_mac import _frontmost as fresh_frontmost
     return fresh_frontmost()[0] or "Finder"
+
+
+def _focus_app(name):
+    from .local_mac import focus_app
+    return focus_app(name)
+
+
+def _launch_app(name, force_accessibility=False, background=False):
+    from .local_mac import launch_app
+    return launch_app(name, force_accessibility, background=background)
+
+
+def _notify(*args, **kwargs):
+    from .notify import notify
+    return notify(*args, **kwargs)
 
 
 class Hunch:
@@ -141,10 +158,16 @@ class Hunch:
         if check_permissions:
             self._check_accessibility()
         # ONE persistent computer per instance, so element [refs] survive snapshot -> act.
-        self._computer = LocalComputer(app=app, simultaneous=simultaneous or background_only,
-                                       max_depth=snapshot_max_depth,
-                                       max_nodes=snapshot_max_nodes)
-        self._computer.session._shared_guard = self._authorize_shared_input
+        # Linux has no Accessibility session; native methods raise UnsupportedPlatform.
+        self._simultaneous_on = bool(simultaneous or background_only)
+        if sys.platform == "darwin":
+            from .local_mac import LocalComputer
+            self._computer = LocalComputer(app=app, simultaneous=self._simultaneous_on,
+                                           max_depth=snapshot_max_depth,
+                                           max_nodes=snapshot_max_nodes)
+            self._computer.session._shared_guard = self._authorize_shared_input
+        else:
+            self._computer = None
         from .capabilities import Capabilities
         self._capabilities = Capabilities(self)
         # Last app aim'd by focus_app / launch_app / snapshot(app=...). Empty
@@ -183,9 +206,10 @@ class Hunch:
     def session_summary(self):
         """Compact reconnect context without element refs or page contents."""
         import json
-        session = self._computer.session
+        computer = self._computer
+        session = computer.session if computer is not None else None
         web = self.web._computer
-        evidence = {"requested_app": self._computer.app,
+        evidence = {"requested_app": computer.app if computer is not None else None,
                     "background_only": self.background_only, "simultaneous": self.simultaneous,
                     "last_observed_native_identity": getattr(session, "_identity", None),
                     "cdp": {"app": web.app, "port": web.port,
@@ -201,6 +225,9 @@ class Hunch:
 
     @staticmethod
     def _check_accessibility():
+        if sys.platform != "darwin":
+            raise UnsupportedPlatform(
+                "Accessibility check needs macOS; pass check_permissions=False for the web surface")
         try:
             from ApplicationServices import AXIsProcessTrusted
         except ImportError as e:
@@ -225,6 +252,7 @@ class Hunch:
         that element's subtree at full depth (other refs stay valid). Truncation is
         never silent: capped output ends in an explicit …marker naming the ref to
         expand. max_children raises the per-node sibling cap to page a big list in."""
+        _require_macos("snapshot")
         if ref is not None:
             return self._redact(self._computer.snapshot(ref=ref, max_depth=max_depth, max_nodes=max_nodes,
                                                         max_children=max_children))
@@ -246,6 +274,7 @@ class Hunch:
         return only matching elements, each with an actable [ref]. role is
         case-insensitive with the AX prefix optional ("button" == AXButton);
         name_contains matches title/description/value as a substring."""
+        _require_macos("find")
         prev, prev_aimed = self._computer.app, self._aimed_app
         if app:
             self._computer.app = app
@@ -262,6 +291,8 @@ class Hunch:
         menu/key/click_xy by ref) and return the updated tree. Focus-stealing actions are
         gated; a user refusal raises ApprovalDenied. StaleRef means re-snapshot.
         confirm=True skips the dialog (the user already approved out-of-band)."""
+        _require_macos("act")
+        from .local_mac import LocalComputer
         # Coerce before the focus-steal gate so a stringified actions payload
         # (local-model failure mode) does not blow up on a.get inside the gate.
         coerced, bad = LocalComputer._coerce_actions(actions)
@@ -291,6 +322,8 @@ class Hunch:
     def screenshot(self):
         """The physical screen as PNG bytes (needs Screen Recording permission). Shows the
         FRONTMOST app — for a background CDP page use web.screenshot() instead."""
+        _require_macos("screenshot")
+        from .local_mac import screenshot_b64
         if self._secrets:
             raise HunchError("screenshot blocked after secret fill; transformed visual disclosure cannot be excluded")
         return base64.b64decode(screenshot_b64())
@@ -299,21 +332,28 @@ class Hunch:
 
     def list_apps(self):
         """Names of the running GUI apps you can snapshot()."""
+        _require_macos("list_apps")
+        from .local_mac import list_running_apps
         return list_running_apps()
 
     def targets(self, app="", window="", select=False, inventory="running"):
+        _require_macos("targets")
         return self._capabilities.targets(app, window, select, inventory)
 
     def capabilities(self, app, operation="observe"):
+        _require_macos("capabilities")
         return self._capabilities.inspect(app, operation)
 
     def recover(self, plan_id, target_id=""):
+        _require_macos("recover")
         return self._capabilities.recover(plan_id, target_id)
 
     def launch_app(self, name, force_accessibility=False, reason=""):
         """Launch or focus an app and target it for snapshots. force_accessibility=True
         relaunches an Electron/Chromium app so its tree becomes readable. A foreground
         launch is a real focus switch: gated — refusal raises ApprovalDenied."""
+        _require_macos("launch_app")
+        from .local_mac import set_focus_reason
         if force_accessibility and self._gate.enabled("app_to_front"):
             if not self._gate.confirm_dialog(f"Restart {name} gracefully to enable accessibility?",
                                              category="app_lifecycle", detail=name,
@@ -338,6 +378,8 @@ class Hunch:
                 + "; verify the requested operation; node count does not establish coverage")
 
     def quit_app(self, name):
+        _require_macos("quit_app")
+        from .local_mac import quit_app as _quit_app
         message = _quit_app(name)
         d = self._computer.session.disturbances
         d["quit_requests"] = d.get("quit_requests", 0) + 1
@@ -345,6 +387,8 @@ class Hunch:
 
     def focus_app(self, name, reason=""):
         """Bring an app to the front and target it. Gated — refusal raises ApprovalDenied."""
+        _require_macos("focus_app")
+        from .local_mac import set_focus_reason
         if self.background_only:
             raise ApprovalDenied("host background constraint forbids foreground activation")
         blocked = self._gate.front_gate(name, reason)
@@ -360,12 +404,17 @@ class Hunch:
     def simultaneous(self):
         """When True, Hunch never touches the foreground/cursor/keyboard: background
         launches, focus-free actions only (shared-input actions are refused)."""
+        if self._computer is None:
+            return self._simultaneous_on
         return self._computer.simultaneous
 
     @simultaneous.setter
     def simultaneous(self, on):
         if self.background_only and not on:
             raise ApprovalDenied("host background constraint cannot be disabled by a tool")
+        if self._computer is None:
+            self._simultaneous_on = bool(on)
+            return
         self._computer.simultaneous = bool(on)
 
     # ── AppleScript / OS ──────────────────────────────────────────────────────
@@ -376,6 +425,8 @@ class Hunch:
         confirm=True skips the dialog (the user already approved out-of-band).
         System Settings toggles via defaults write / UI scripting are soft-refused with a
         teaching string — AX snapshot/act is the reliable path."""
+        _require_macos("applescript")
+        from . import os_ops
         if self.background_only and not self.allow_unrestricted_scripts:
             return "REFUSED: arbitrary AppleScript has no enforceable background guarantee; use a typed operation"
         refusal = gate.applescript_settings_refusal(script)
@@ -402,6 +453,7 @@ class Hunch:
             return self._notify_handler(message, title) is not False
         if not self._native_notifications:
             return False
+        _require_macos("notify")
         _notify(message, title, sound="Ping")
         return True
 
@@ -554,6 +606,7 @@ class Web:
         — the AX tree can't write xterm.js, but CDP injects real keystrokes into the PTY."""
         from .safari import SafariComputer, is_safari
         if is_safari(app):
+            _require_macos("Safari")
             if isolated:
                 return ("REFUSED: Safari uses the user's existing profile; isolated Safari "
                         "sessions are not supported. Use Google Chrome with isolated=true.")
@@ -563,6 +616,7 @@ class Web:
 
         from .cdp import _is_editor
         if _is_editor(app):
+            _require_macos("Electron editors")
             return self._open_editor(folder=url, app=app)
         if url:
             from .destinations import navigation_refusal
@@ -671,6 +725,7 @@ class Web:
         enabled; the login persists in the Hunch profile."""
         from .safari import is_safari
         if is_safari(app):
+            _require_macos("Safari")
             result = self.open(url=url, app="Safari")
             if isinstance(result, str) and result.startswith(("REFUSED", "BLOCKED")):
                 return result
@@ -913,6 +968,8 @@ class Files:
 
     def trash(self, paths):
         """Move file(s)/folder(s) to the Trash by path — reversible."""
+        _require_macos("files.trash")
+        from . import os_ops
         if isinstance(paths, str):
             paths = [paths]
         hit = next((p for p in paths if gate.protected(p)), None)
@@ -930,6 +987,8 @@ class Files:
         return os_ops.trash(paths)
 
     def move(self, src, dst):
+        _require_macos("files.move")
+        from . import os_ops
         for p in (src, dst):
             if p and gate.protected(p):
                 return self._refused(p, "writable")
@@ -943,6 +1002,8 @@ class Files:
         return os_ops.move(src, dst)
 
     def copy(self, src, dst):
+        _require_macos("files.copy")
+        from . import os_ops
         for p in (src, dst):
             if p and gate.protected(p):
                 return self._refused(p, "writable")
@@ -956,6 +1017,8 @@ class Files:
         return os_ops.copy(src, dst)
 
     def mkdir(self, path):
+        _require_macos("files.mkdir")
+        from . import os_ops
         if gate.protected(path):
             return self._refused(path, "writable")
         if self._h._gate.enabled("destructive_file"):
@@ -968,10 +1031,14 @@ class Files:
 
     def open(self, path, app=None):
         """Open a file/folder/URL/deep-link with its default (or a named) app."""
+        _require_macos("files.open")
+        from . import os_ops
         return os_ops.open_path(path, app)
 
     def reveal(self, paths):
         """Reveal item(s) in Finder (this one does bring Finder forward)."""
+        _require_macos("files.reveal")
+        from . import os_ops
         if self._h.background_only or self._h.simultaneous:
             raise ApprovalDenied("revealing files fronts Finder; background mode forbids it")
         blocked = self._h._gate.front_gate("Finder", "reveal selected files")
@@ -987,9 +1054,13 @@ class Clipboard:
         self._h = hunch
 
     def get(self):
+        _require_macos("clipboard.get")
+        from . import os_ops
         return os_ops.clipboard_read()
 
     def set(self, text):
+        _require_macos("clipboard.set")
+        from . import os_ops
         result = os_ops.clipboard_write(text)
         disturbances = self._h._computer.session.disturbances
         disturbances["clipboard_changes"] = disturbances.get("clipboard_changes", 0) + 1

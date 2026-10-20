@@ -348,8 +348,7 @@ def _frontmost():
         return (None, None)
 
 
-class StaleRef(Exception):
-    pass
+from .errors import StaleRef  # noqa: E402  (re-export; defined with the other SDK errors)
 
 
 class MacSession:
