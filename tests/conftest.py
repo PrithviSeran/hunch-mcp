@@ -4,6 +4,7 @@ import sys
 # These import pyobjc (or a module that does) at collection time, or they drive
 # the native Mac session. Linux CI runs the rest of the suite plus the web smoke.
 _MACOS_ONLY = {
+    "test_agent.py",
     "test_ax_press.py",
     "test_capability_contracts.py",
     "test_editor_terminal.py",
