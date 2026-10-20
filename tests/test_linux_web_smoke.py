@@ -58,7 +58,8 @@ def test_chrome_open_act_screenshot_attach_and_quit(tmp_path):
     page_server = _serve(tmp_path)
     host, port = page_server.server_address
     url = f"http://{host}:{port}/index.html"
-    mac = Hunch(confirm="off", check_permissions=False)
+    allowed = (f"http://{host}:{port}",)
+    mac = Hunch(confirm="off", check_permissions=False, allowed_web_origins=allowed)
     second_owner = object()
     second_port = None
     try:
@@ -74,7 +75,8 @@ def test_chrome_open_act_screenshot_attach_and_quit(tmp_path):
         assert shot[:8] == b"\x89PNG\r\n\x1a\n"
 
         second_port = _free_port()
-        launch_chromium("Google Chrome", second_port, url=url, isolated=True, owner=second_owner)
+        launch_chromium("Google Chrome", second_port, url=url, isolated=True, owner=second_owner,
+                        allowed_origins=allowed)
         other = Hunch(confirm="off", check_permissions=False)
         attached = other.web.attach("Google Chrome", second_port)
         if attached.get("status") == "blocked":
