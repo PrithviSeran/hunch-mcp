@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hunch-sdk"
-version = "0.7.6"
+version = "0.8.0"
 description = "Drive Mac apps focus-free, and the Chromium web surface on macOS and Linux. Mac apps need macOS; the web surface runs on macOS and Linux."
 readme = "README.md"
 license = "Apache-2.0"
