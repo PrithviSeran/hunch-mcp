@@ -756,6 +756,162 @@ class CDPSession:
                    "button": "left", "clickCount": 1})
         return f"dragged screenshot point ({from_x}, {from_y}) to ({to_x}, {to_y})"
 
+    # ── cross-site child frames (read and click only) ────────────────────
+    # A cross-site <iframe> (a consent tool's frame, an embedded widget) is another renderer
+    # process: the page's accessibility tree and hit tests stop at its <iframe> element. These
+    # read such a frame's tree over its own target and click in it through the page's input,
+    # nothing else: there is no navigation, typing or secret entry inside a frame.
+
+    @staticmethod
+    def _frame_origin(url):
+        parsed = urllib.parse.urlsplit(url or "")
+        return f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme in ("http", "https") else ""
+
+    def _frame_targets(self):
+        """Debug targets of cross-site frames whose parent is the bound page."""
+        try:
+            targets = json.load(urllib.request.urlopen(f"http://127.0.0.1:{self.port}/json", timeout=3))
+        except Exception:
+            return []
+        return [t for t in targets if t.get("type") == "iframe" and t.get("parentId") == self.target_id
+                and t.get("webSocketDebuggerUrl")]
+
+    def child_frames(self):
+        """The cross-site frames embedded in the bound page: [{"target_id", "url", "origin",
+        "owner"}], `owner` being the backend id of the frame's <iframe> element in the page (None
+        when the page cannot resolve it)."""
+        out = []
+        for t in self._frame_targets():
+            try:
+                owner = self._cmd("DOM.getFrameOwner", {"frameId": t["id"]}).get("backendNodeId")
+            except Exception:
+                owner = None
+            url = t.get("url") or ""
+            out.append({"target_id": t["id"], "url": url, "origin": self._frame_origin(url), "owner": owner})
+        return out
+
+    def _frame(self, target_id):
+        """The open connection to a child frame, opened on first use; KeyError when `target_id`
+        is not a cross-site frame of the bound page now."""
+        target = next((t for t in self._frame_targets() if t["id"] == target_id), None)
+        if target is None:
+            self._drop_frame(target_id)
+            raise KeyError(f"no cross-site frame {target_id} in the bound page")
+        frames = self.__dict__.setdefault("_frames", {})
+        frame = frames.get(target_id)
+        if frame is None:
+            from urllib.parse import urlsplit
+            address = urlsplit(target["webSocketDebuggerUrl"])
+            if (address.scheme != "ws" or address.hostname not in ("127.0.0.1", "localhost", "::1")
+                    or address.port != self.port or address.username or address.password):
+                raise RuntimeError("refusing CDP websocket outside the verified local endpoint")
+            ws = websocket.create_connection(target["webSocketDebuggerUrl"], timeout=15, max_size=None,
+                                             suppress_origin=True)
+            frame = frames[target_id] = {"ws": ws, "id": 0, "registry": {}, "url": None}
+            for d in ("DOM", "Accessibility"):
+                self._frame_cmd(frame, f"{d}.enable")
+        frame["target_url"] = target.get("url") or ""
+        return frame
+
+    @staticmethod
+    def _frame_cmd(frame, method, params=None, timeout=20):
+        frame["id"] += 1
+        mid = frame["id"]
+        frame["ws"].send(json.dumps({"id": mid, "method": method, "params": params or {}}))
+        end = time.time() + timeout
+        while time.time() < end:
+            m = json.loads(frame["ws"].recv())
+            if m.get("id") == mid:
+                if "error" in m:
+                    raise RuntimeError(f"{method}: {m['error'].get('message')}")
+                return m.get("result", {})
+        raise RuntimeError(f"{method}: timed out")
+
+    def _drop_frame(self, target_id):
+        frame = self.__dict__.get("_frames", {}).pop(target_id, None)
+        if frame is not None:
+            try:
+                frame["ws"].close()
+            except Exception:
+                pass
+
+    def close_frames(self):
+        for target_id in list(self.__dict__.get("_frames", {})):
+            self._drop_frame(target_id)
+
+    def frame_snapshot(self, target_id, full_names=False):
+        """A cross-site child frame's accessibility tree: {"target_id", "url", "origin",
+        "nodes": [{"ref", "role", "name", "value", "disabled", "depth"}], "text"}. Its refs
+        (`f<n>e<k>`) are the frame's own, good for frame_click on this frame until its next
+        frame_snapshot; they are never page refs."""
+        frame = self._frame(target_id)
+        nodes = self._frame_cmd(frame, "Accessibility.getFullAXTree")["nodes"]
+        frames = self.__dict__["_frames"]
+        prefix = f"f{list(frames).index(target_id) + 1}"
+        by_id = {n["nodeId"]: n for n in nodes}
+        registry, out, lines = {}, [], []
+
+        def walk(n, depth):
+            role = (n.get("role", {}) or {}).get("value", "") or ""
+            name, val = self._name(n), self._val(n)
+            backend = n.get("backendDOMNodeId")
+            child = depth
+            if not n.get("ignored") and backend is not None and self._interesting(role, name, val):
+                ref = f"{prefix}e{len(registry) + 1}"
+                registry[ref] = backend
+                props = {p["name"]: p.get("value", {}).get("value") for p in n.get("properties", [])}
+                shown = name if full_names else name[:NAME_LIMIT]
+                out.append({"ref": ref, "role": role, "name": shown, "value": val[:80],
+                            "disabled": bool(props.get("disabled")), "depth": depth})
+                lines.append("  " * depth + " ".join([f"[{ref}]", role] + ([f'"{shown}"'] if name else [])
+                                                     + (["disabled"] if props.get("disabled") else [])))
+                child = depth + 1
+            for cid in n.get("childIds", []):
+                if cid in by_id:
+                    walk(by_id[cid], child)
+        for root in (n for n in nodes if not n.get("parentId")):
+            walk(root, 0)
+        frame["registry"], frame["url"] = registry, frame["target_url"]
+        return {"target_id": target_id, "url": frame["url"], "origin": self._frame_origin(frame["url"]),
+                "nodes": out, "text": "\n".join(lines)}
+
+    def frame_click(self, target_id, ref):
+        """Click a frame_snapshot ref at its centre, as input to the page (Chrome routes it into
+        the frame), without moving the OS cursor. Refused when the frame's document changed since
+        its snapshot, or when the point is not on the frame's <iframe> (something covers it)."""
+        if not isinstance(ref, str) or not ref:
+            return "REFUSED: frame_click requires a frame_snapshot ref"
+        frame = self._frame(target_id)
+        backend = frame["registry"].get(ref)
+        if backend is None:
+            raise KeyError(f"stale frame ref {ref}")
+        if frame["target_url"] != frame["url"]:
+            frame["registry"] = {}
+            return "REFUSED: the frame's document changed since its snapshot; take a fresh frame_snapshot"
+        self.validate_document()
+        owner = next((f["owner"] for f in self.child_frames() if f["target_id"] == target_id), None)
+        if owner is None:
+            return "REFUSED: the frame's <iframe> is not in the page"
+        try:
+            self._frame_cmd(frame, "DOM.scrollIntoViewIfNeeded", {"backendNodeId": backend})
+        except Exception:
+            pass
+        inner = self._frame_cmd(frame, "DOM.getBoxModel", {"backendNodeId": backend})["model"]["content"]
+        outer = self._cmd("DOM.getBoxModel", {"backendNodeId": owner})["model"]["content"]
+        x = outer[0] + (inner[0] + inner[2]) / 2
+        y = outer[1] + (inner[1] + inner[5]) / 2
+        if not (math.isfinite(x) and math.isfinite(y)):
+            return "REFUSED: frame target has invalid geometry; take a fresh frame_snapshot"
+        at = self._cmd("Runtime.evaluate", {"expression": f"document.elementFromPoint({x}, {y})"})
+        obj = (at.get("result") or {}).get("objectId")
+        hit = self._cmd("DOM.describeNode", {"objectId": obj})["node"].get("backendNodeId") if obj else None
+        if hit != owner:
+            return f"REFUSED: something in the page covers {ref} in the frame"
+        self.validate_document()
+        for t in ("mousePressed", "mouseReleased"):
+            self._cmd("Input.dispatchMouseEvent", {"type": t, "x": x, "y": y, "button": "left", "clickCount": 1})
+        return f"clicked {ref} in the frame from {self._frame_origin(frame['url']) or 'its document'}"
+
     # JS that sets a field's value the way the DOM expects: REPLACES existing content (fixes
     # the append bug), fires input+change so React/Vue register it, and handles native <select>
     # dropdowns (which CDP mouse events can't open) by matching an option by value/visible text.
