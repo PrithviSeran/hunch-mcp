@@ -832,6 +832,19 @@ class Web:
             return self._h._redact(self._computer.act(actions, detailed=detailed, postcondition=postcondition))
         return self._h._redact(self._computer.act(actions))
 
+    def identity(self, ref):
+        """The identity the page keeps for a ref's element (Chromium/Electron CDP only):
+        {"framework": "react"|"vue"|"none", "keys": [...], "attrs": {...}}. Keys are the
+        framework's list keys from the root down to the element, which apps mostly set to
+        their records' ids; attrs are the element's own id, name, data-testid and href.
+        Read-only, two CDP round trips. Nothing is interpreted: a list position and a
+        record id come back alike. Safari raises HunchError."""
+        s = self._session()
+        read = getattr(s, "identity", None)
+        if read is None:
+            raise HunchError("identity needs a Chromium/Electron CDP session; Safari has none")
+        return self._h._redact(read(ref))
+
     def screenshot(self):
         """The bound web page as PNG bytes without bringing its window forward."""
         if self._h._secrets:

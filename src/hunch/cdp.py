@@ -373,6 +373,67 @@ def quit_cdp(port, *, owner=None):
     return f"quit CDP instance on :{port}"
 
 
+# The identity a page keeps for an element, read in the main world. Frameworks keep a
+# `key` per list item and apps mostly set it to the record's id; React stores its fiber on
+# the DOM node (`__reactFiber$…`, an internal React does not promise), Vue sets `__vnode`
+# and `__vueParentComponent` only where a build exposes them (dev builds; production Vue 3
+# does not). Author attributes are returned as written. Nothing here interprets a key: a
+# list position (`0`, `1`, …) and a record id come back alike, and the caller decides.
+IDENTITY_FN = r"""function(){
+  const el = this, out = {framework: "none", keys: [], attrs: {}};
+  if (!el || el.nodeType !== 1) return out;
+  for (const a of ["id", "name", "data-testid", "data-test-id", "data-test", "data-cy", "data-qa",
+                   "data-e2e-id", "data-tour", "data-id", "href"]) {
+    if (!el.hasAttribute(a)) continue;
+    let v = el.getAttribute(a);
+    if (a === "href") { try { const u = new URL(v, location.href); v = u.pathname + u.hash; } catch (e) {} }
+    out.attrs[a] = v;
+  }
+  const fk = Object.keys(el).find(k => k.startsWith("__reactFiber$") || k.startsWith("__reactInternalInstance$"));
+  if (fk) {
+    out.framework = "react";
+    let f = el[fk], n = 0;
+    while (f && n < 2000) { if (f.key != null) out.keys.push(String(f.key)); f = f.return; n++; }
+    out.keys.reverse();
+    return out;
+  }
+  const vn = el.__vnode || (el.__vue__ && el.__vue__.$vnode) || null;
+  let comp = el.__vueParentComponent || el.__vue__ || null;
+  if (vn || comp) {
+    out.framework = "vue";
+    if (vn && vn.key != null) out.keys.push(String(vn.key));
+    let n = 0;
+    while (comp && n < 2000) {
+      const k = comp.vnode ? comp.vnode.key : (comp.$vnode ? comp.$vnode.key : null);
+      if (k != null) out.keys.push(String(k));
+      comp = comp.parent || comp.$parent || null; n++;
+    }
+    out.keys.reverse();
+  }
+  return out;
+}"""
+
+
+
+def identity_of(cmd, backend):
+    """The identity the page keeps for the element with DOM backend id `backend`, through
+    `cmd(method, params)`: {"framework": "react"|"vue"|"none", "keys": [...], "attrs": {...}}.
+    Keys run from the root down to the element, outermost first, repeats kept. Two round
+    trips, main world, no input. RuntimeError when the node is gone or the read fails."""
+    obj = cmd("DOM.resolveNode", {"backendNodeId": backend}).get("object", {}).get("objectId")
+    if not obj:
+        raise RuntimeError(f"node {backend} is no longer on the page; take a fresh snapshot")
+    result = cmd("Runtime.callFunctionOn", {
+        "objectId": obj, "functionDeclaration": IDENTITY_FN, "returnByValue": True,
+    }).get("result", {})
+    value = result.get("value")
+    if not isinstance(value, dict) or not isinstance(value.get("keys"), list):
+        raise RuntimeError(f"identity of node {backend} could not be read: {result.get('description') or result}")
+    return {"framework": str(value.get("framework") or "none"),
+            "keys": [str(k) for k in value["keys"]],
+            "attrs": {str(k): v for k, v in (value.get("attrs") or {}).items()}}
+
+
 class CDPSession:
     """A CDP connection to one page/window, with a per-snapshot ref registry
     (ref -> backendDOMNodeId) so the agent acts on elements by ref."""
@@ -717,6 +778,26 @@ class CDPSession:
             "type": "mouseMoved", "x": x, "y": y, "button": "none", "buttons": 0,
         })
         return f"hovered {ref}; re-snapshot to verify any revealed controls"
+
+    def identity(self, ref):
+        """The identity the page itself keeps for a ref's element (`identity_of`): its
+        framework's list keys from the root down, outermost first, and its author attributes
+        (id, name, data-testid and its variants, href as path and hash). Read-only, two round
+        trips, no input. A stale ref raises KeyError; a document change RuntimeError."""
+        if not isinstance(ref, str) or not ref:
+            raise KeyError("identity requires a fresh web_snapshot ref")
+        backend = self.registry.get(ref)
+        if backend is None:
+            raise KeyError(f"stale ref {ref}")
+        self.validate_document()
+        try:
+            return identity_of(self._cmd, backend)
+        except RuntimeError as e:
+            raise RuntimeError(str(e).replace(f"node {backend}", ref)) from None
+
+    def identities(self, refs):
+        """`identity` for each ref, as {ref: identity}, in one pass."""
+        return {ref: self.identity(ref) for ref in refs}
 
     def _image_to_viewport(self, x, y):
         """Map coordinates from the last web_screenshot PNG to CSS viewport coordinates.
