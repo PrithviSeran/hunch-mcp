@@ -148,6 +148,20 @@ Its receipt is `performed_unverified` unless an explicit postcondition verifies
 the requested field. Safari returns unsupported (a detailed call returns `blocked`
 with zero attempted actions); native `act` does not advertise hover.
 
+An element's own identity, where the page keeps one (**Chromium/Electron CDP** only):
+
+```python
+mac.web.identity("e12")
+# {"framework": "react", "keys": ["2026-11-18", "staff_member_1", "7282"],
+#  "attrs": {"data-testid": "draggable-event"}}
+```
+
+`keys` are the framework's list keys from the root down to the element (React, and Vue where
+a build exposes vnodes), which apps mostly set to their records' ids and which survive the
+re-renders that replace DOM nodes; `attrs` are the element's `id`, `name`, `data-testid` and
+`href` as written. It reads in the page's main world and sends no input. Nothing is
+interpreted: a list position (`0`, `1`) and a record id come back alike.
+
 - **Permissions**: for library use it's *whatever runs your script* — your terminal or IDE — that
   needs Accessibility (the MCP server instead uses the host app's grant). The constructor checks
   and raises `AccessibilityNotGranted` with instructions. `screenshot()` additionally needs
