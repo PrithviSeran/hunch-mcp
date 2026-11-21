@@ -7,10 +7,10 @@
 
 **Drive your Mac with any LLM: focus-free, in the background, over [MCP](https://modelcontextprotocol.io).**
 
-Hunch is an MCP server that gives an LLM agent hands on *your* Mac: your installed apps, your
+Hunch is an MCP server that lets an LLM agent operate your Mac: your installed apps, your
 logged-in sessions, your files, without taking over your screen. While you keep working in the
 foreground, an agent can read a background app's UI, click its buttons, drive Mail or Music by
-AppleScript, fill a web form, or move files. It works on real native apps, not just a browser.
+AppleScript, fill a web form, or move files. It works on native apps as well as in a browser.
 
 > **Works best with modern LLMs.** Hunch ships a detailed playbook as MCP server instructions;
 > capable tool-using models (Claude Sonnet/Opus-class and up) follow it well. Smaller models may
@@ -29,7 +29,7 @@ never touches your screen:
 | **Accessibility** | `snapshot` `act` | any native app's UI: read the tree, click/select/type by reference |
 
 A gated last resort (`screenshot` + coordinate clicks/keystrokes) exists for apps whose
-accessibility tree is truly empty. It steals focus, so it asks you first.
+accessibility tree is empty. It steals focus, so it asks you first.
 
 For focus-free visual work in Safari, open a dedicated extension-owned window with
 `web_open(..., app="Safari", new_window=True)`. `web_screenshot` captures that background
@@ -39,7 +39,7 @@ window and dispatches renderer-local actions that a physical screen capture cann
 
 ## How it works (no server, no cloud)
 
-"MCP server" undersells how local this is. `hunch serve` is a plain Python process that your
+Hunch runs entirely on your Mac. `hunch serve` is a plain Python process that your
 MCP host (Claude Desktop, Cursor, …) spawns as a **child process** and talks to over
 **JSON-RPC on stdin/stdout** (MCP's stdio transport). There is no HTTP endpoint, no port
 Hunch listens on, no daemon, and no telemetry. When your host quits, Hunch is gone.
@@ -54,7 +54,7 @@ whatever the tools return through your host; nothing else leaves the machine.
 ## Benchmarks
 
 Hunch is measured against other macOS computer-use agents on a real, logged-in Mac in
-[mac-agent-bench](https://github.com/PrithviSeran/mac-agent-bench) — *same brain, different hands*:
+[mac-agent-bench](https://github.com/PrithviSeran/mac-agent-bench):
 identical `claude -p` per task, only the MCP adapter differs. It scores task success with programmatic
 checkers **and** disturbance: how much the agent hijacks your cursor and foreground while it works.
 
@@ -66,7 +66,7 @@ Across 5 complex multi-step tasks (n=3):
 | [Peekaboo](https://github.com/steipete/Peekaboo) | 13/15 | $14.60 | 22·16 | 2 |
 | [cua-driver](https://github.com/trycua/cua) | 15/15 | $17.70 | 22·0 | 0 |
 
-Perfect reliability, ~10x cheaper, ~5–10x faster, and it essentially never touches your screen (`0`
+Perfect reliability, ~10x cheaper, 5 to 10x faster, and it almost never touches your screen (`0`
 cursor moves, `1` focus switch across 15 trials). Full methodology and per-task tables are in the
 [benchmark repo](https://github.com/PrithviSeran/mac-agent-bench).
 
@@ -80,8 +80,8 @@ pip install 'hunch-sdk[subscription]'    # + the agent loop on Claude   (provide
 pip install --pre 'hunch-sdk[codex]'     # + the agent loop on OpenAI Codex (provider="codex")
 ```
 
-Or via Homebrew — best if you don't manage Python environments; it bundles an isolated
-Python at a stable path, which makes the macOS permission grants the most predictable:
+Or via Homebrew, for a Mac with no managed Python environment. It bundles an isolated
+Python at a stable path, which keeps the macOS permission grants predictable:
 
 ```
 brew install prithviseran/hunch/hunch
@@ -97,7 +97,7 @@ hunch connect claude-desktop   # or: claude-code, cursor
 
 Restart your MCP host and ask it to *"use hunch to …"*.
 
-### The permissions, honestly
+### Permissions
 
 macOS trust attaches to the **app that runs the server**, meaning your MCP host (Claude Desktop,
 Cursor, your terminal), not "hunch" itself. `hunch setup` walks you through it:
@@ -113,7 +113,7 @@ it from; the server inherits the *host's* grant.
 
 ## Python SDK (library use)
 
-Hunch is also an importable library — the same focus-free primitives as the MCP tools, driven
+Hunch is also an importable library: the same focus-free primitives as the MCP tools, driven
 deterministically from your own Python (a cron job, a test harness, your own agent loop), no LLM
 required. The distribution is `hunch-sdk`; the import is `hunch`:
 
@@ -162,12 +162,12 @@ re-renders that replace DOM nodes; `attrs` are the element's `id`, `name`, `data
 `href` as written. It reads in the page's main world and sends no input. Nothing is
 interpreted: a list position (`0`, `1`) and a record id come back alike.
 
-- **Permissions**: for library use it's *whatever runs your script* — your terminal or IDE — that
+- **Permissions**: for library use it's whatever runs your script (your terminal or IDE) that
   needs Accessibility (the MCP server instead uses the host app's grant). The constructor checks
   and raises `AccessibilityNotGranted` with instructions. `screenshot()` additionally needs
   Screen Recording.
 - **Safety gates default ON**: the same one-click "Go ahead" dialogs and `~/.hunch/config.json`
-  gates as the MCP server. `Hunch(confirm="off")` auto-approves for that instance only — for
+  gates as the MCP server. `Hunch(confirm="off")` auto-approves for that instance only, for
   unattended scripts, with the same caveats as `auto_approve_all`.
 - **Errors**: methods return status strings (check for `REFUSED`); the SDK raises only
   `ApprovalDenied` (user declined a dialog), `AccessibilityNotGranted`, `WebNotOpen`
@@ -176,7 +176,7 @@ interpreted: a list position (`0`, `1`) and a record id come back alike.
 - **Credentials**: `mac.web.fill_login(service)` / `fill_secret(service, ref)` type Keychain
   values straight into the page and never return them; domain binding is enforced.
 - **Coexistence**: the SDK and the MCP server share the CDP port (9337) and the persistent Hunch
-  browser profile — whichever opened it first is reused, but `web.restart()`/`web.login()` kill
+  browser profile. Whichever opened it first is reused, but `web.restart()`/`web.login()` kill
   whatever holds the port.
 
 Runnable scripts live in [`examples/`](examples/).
@@ -184,15 +184,15 @@ Runnable scripts live in [`examples/`](examples/).
 ## Agent loop (`mac.agent`)
 
 The instance SDK gives you deterministic primitives. The **agent loop** puts an LLM in the driver's seat:
-you hand it a task in plain English and it drives the Mac through those same primitives — on *your*
-machine with *your* logged-in apps. Pick your **provider** — Anthropic **Claude** or OpenAI **Codex** —
+you hand it a task in plain English and it drives the Mac through those same primitives, on your
+machine with your logged-in apps. Pick your **provider** (Anthropic **Claude** or OpenAI **Codex**)
 once at construction; everything after is provider-agnostic. It's an optional extra (keeps the base
 install free of the model SDKs):
 
 ```bash
 pip install 'hunch-sdk[subscription]'                    # Claude
 # or, for Codex (the SDK is beta):  pip install --pre 'hunch-sdk[codex]'
-python -c 'import hunch; hunch.provider("claude").login()'   # sign-in (browser OAuth) — no API key
+python -c 'import hunch; hunch.provider("claude").login()'   # sign-in (browser OAuth), no API key
 ```
 
 ```python
@@ -206,7 +206,7 @@ print(result.turns, result.usage)
 
 ### Signing in
 
-Auth is an explicit, provider-scoped surface — nothing is scavenged silently. You choose the vendor
+Auth is an explicit, provider-scoped surface. Nothing is read from the machine silently. You choose the vendor
 once, then the same prefix-free methods act on it:
 
 ```python
@@ -232,49 +232,49 @@ if not st.logged_in:
 
 | Provider | Sign in with | Cost |
 |---|---|---|
-| `claude` | `mac.login()` / `hunch.provider("claude").login()` — the same browser OAuth Claude Code uses. Already signed into Claude Code on this Mac? You're done; Hunch reuses that. | your Claude plan (no per-token cost) |
-| `codex` | `mac.login()` / `codex login` — a ChatGPT/Codex browser sign-in. | your ChatGPT/Codex plan |
+| `claude` | `mac.login()` / `hunch.provider("claude").login()`: the same browser OAuth Claude Code uses. If Claude Code is already signed in on this Mac, Hunch reuses that sign-in. | your Claude plan (no per-token cost) |
+| `codex` | `mac.login()` / `codex login`: a ChatGPT/Codex browser sign-in. | your ChatGPT/Codex plan |
 
-Both run on a subscription/login — metered API keys are intentionally not exposed. With no valid
-sign-in, `run()` surfaces an error that points you back to `login()` — it never guesses.
+Both run on a subscription/login. Metered API keys are not exposed. With no valid
+sign-in, `run()` surfaces an error that points you back to `login()`. It never guesses.
 
-- **Watch it work** with an `on_event(kind, data)` callback — `kind` is one of `text` (reasoning),
+- **Watch it work** with an `on_event(kind, data)` callback. `kind` is one of `text` (reasoning),
   `tool` (`{name, input}`), `tool_result` (preview), `done` (final text), `error`.
 - **Continuation**: follow-up `run()` calls keep the conversation (the model still knows which email
   is Sarah's); `mac.agent.reset()` starts a fresh task.
 - **Mix layers freely**: call `mac.snapshot(...)` / `mac.clipboard.get()` deterministically around
-  `mac.agent.run(...)` — the thing a cloud sandbox can't do on your real machine.
-- **Knobs**: `run(task, model=None, max_turns=40, effort=None, on_event=None, system_suffix="")` —
+  `mac.agent.run(...)`.
+- **Knobs**: `run(task, model=None, max_turns=40, effort=None, on_event=None, system_suffix="")`.
   `model=None` uses the provider's own default model. `AgentResult` has `text`, `turns`,
   `stop_reason`, `usage`, `aborted`.
 - **Safety**: the instance's gate config governs the loop. The default `confirm="dialog"` pops a
-  real "Go ahead?" dialog before any focus-stealing or risky step — good when you're at the
-  machine, but a gated action can stall an unattended run for the dialog's timeout. For cron jobs
+  real "Go ahead?" dialog before any focus-stealing or risky step. That suits a run you are
+  watching, but a gated action can stall an unattended run for the dialog's timeout. For cron jobs
   use `Hunch(confirm="off")` and accept the risk; the model still asks *you* (via `notify_user`)
   before irreversible or outward actions. A declined gate comes back as a `REFUSED` result, so the
   loop adapts instead of crashing.
-- **Cost**: runs draw on your provider plan's usage limits — no per-token bill. `max_turns` caps it.
+- **Cost**: runs draw on your provider plan's usage limits, with no per-token bill. `max_turns` caps it.
 
 > **Codex note:** the `codex` provider drives an OpenAI Codex agent that reaches Hunch's tools over
 > MCP (a separate `hunch serve` process), so its dangerous-verb approvals use Hunch's own
 > click-to-approve dialogs rather than a host `can_use_tool` callback.
 
-Other models: the instance-SDK primitives are provider-agnostic — wire `mac.snapshot()` /
+Other models: the instance-SDK primitives are provider-agnostic. Wire `mac.snapshot()` /
 `mac.act()` into your own OpenAI/Gemini/etc. agent loop as tools.
 
 ## Building an app on Hunch
 
-The SDK is developer-first: **one uniform semantics, everything instance-owned, nothing ambient
-unless you opt in.** The MCP server above is itself just the first app built on it — its
+An SDK instance has **one uniform semantics, everything instance-owned, nothing ambient
+unless you opt in.** The MCP server above is the first app built on it: its
 "personal" behavior (the `~/.hunch/config.json` policy, "Hunch"-branded dialogs, shared browser
-profile) is nothing but constructor arguments.
+profile) is set by constructor arguments.
 
 ```python
 from hunch import Hunch, ConsentRequest, OAuthToken
 
 mac = Hunch(
     provider="claude",                  # which LLM vendor drives mac.agent ("claude" | "codex")
-    app_id="com.acme.mailbot",          # pure namespacing — own Keychain slots, browser
+    app_id="com.acme.mailbot",          # pure namespacing: own Keychain slots, browser
                                         #   profile, and CDP port; never a behavior switch
     app_name="Acme Mailbot",            # what consent dialogs + notifications say
     confirm=my_consent_callback,        # ConsentRequest -> bool, rendered in YOUR UI
@@ -286,17 +286,17 @@ mac = Hunch(
 )
 ```
 
-What this buys you:
+What this gives an app:
 
-- **Coexistence** — two apps with different `app_id`s get disjoint Keychain services, credential
+- **Coexistence**: two apps with different `app_id`s get disjoint Keychain services, credential
   stores, browser profiles, and CDP ports. They can't read each other's logins, log each other
   out, or kill each other's browser sessions. Structurally, not by convention.
-- **Your brand, your UX** — every dialog, refusal, and notification says your `app_name`;
+- **Your brand, your UX**: every dialog, refusal, and notification says your `app_name`;
   `confirm=` and `notify=` route consent and alerts through your app instead of osascript
   dialogs and macOS banners. A broken consent callback fails **closed**.
-- **Isolated safety posture** — the machine's `hunch config` (and `HUNCH_NO_INTERNAL_GATE`)
+- **Isolated safety posture**: the machine's `hunch config` (and `HUNCH_NO_INTERNAL_GATE`)
   govern only the personal MCP server, never your instance.
-- **Explicit auth** — `provider="claude"` with `auth=hunch.OAuthToken(...)` uses exactly that
+- **Explicit auth**: `provider="claude"` with `auth=hunch.OAuthToken(...)` uses exactly that
   subscription token (reprs are redacted), so your app never silently rides on the end user's own
   Claude sign-in. (The `codex` provider authenticates via `mac.login()` / `codex login`.)
 
@@ -346,7 +346,7 @@ adjusts them; changes apply immediately, even to a running server. `auto_approve
 everything and makes you confirm you understand the [risk](SECURITY.md).
 
 For **SDK instances** the gates are instance-owned: `Hunch()` defaults to all gates on and never
-reads the config file — pass `policy={"gates": {...}}`, a `callable(category) -> bool`, or
+reads the config file. Pass `policy={"gates": {...}}`, a `callable(category) -> bool`, or
 `policy="personal"` to opt into the live config-file behavior for your own scripts.
 
 Hunch also refuses to let the agent edit anything under `~/.hunch/` (its own policy and credential
@@ -379,7 +379,7 @@ terminal you ran it in, which may differ from your MCP host's.
 
 **Only `screenshot` fails; everything else works.** That's the **Screen Recording** permission,
 which only the screenshot/vision fallback needs. Grant it to the host in System Settings →
-Privacy & Security → Screen Recording, or just let agents use `snapshot`, which doesn't need it.
+Privacy & Security → Screen Recording, or let agents use `snapshot`, which doesn't need it.
 
 **It worked yesterday and broke today.** An update to your host app (or macOS) likely reset its
 permission grants. Toggle the host off and on under Accessibility (and Screen Recording, if you
